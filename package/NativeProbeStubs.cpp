@@ -9,6 +9,10 @@
 // The real implementations live in a device's display provider; hummer does not
 // have one yet (Adreno 830 / a8xx), so these are placeholders for bring-up.
 
-extern "C" void native_legacy_display_probe(void) {}
+// Only native_legacy_display_probe needs a stub here.
+//
+// The sibling hook native_mobile_graphics_client_probe is NOT stubbed: XNU's own
+// IOUserClient.cpo already defines it, so duplicating it here produced
+// "duplicate symbol" at the final link.
 
-extern "C" void native_mobile_graphics_client_probe(void) {}
+extern "C" void native_legacy_display_probe(void) {}
