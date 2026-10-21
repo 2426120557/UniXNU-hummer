@@ -20,4 +20,7 @@ CONFIG_XNU_CRYPTO_BOOTSTRAP="prelinked"
 # CONFIG_XNU_NATIVE_ARCH_TIMER=y
 # CONFIG_XNU_NATIVE_ADRENO=n        # Adreno 830 (a8xx) 未成熟
 # CONFIG_XNU_NATIVE_LEGACY_DISPLAY=n
-CONFIG_XNU_EXTRA_LD_ARCHIVES=""
+
+# 试水阶段：无条件引用的 offline-probe 钩子（native_legacy_display_probe /
+# native_mobile_graphics_client_probe）用空 stub 满足链接。真正的显示驱动未移植。
+CONFIG_XNU_EXTRA_LD_ARCHIVES="-Wl,-force_load,{tree}/build/native-probe-stubs/libNativeProbeStubs.a"

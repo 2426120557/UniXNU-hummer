@@ -85,6 +85,12 @@ if component == 'NativeAdreno':
     command += ['-I', str(ROOT / 'kits/ArmSmmu4K'), '-I', str(ROOT / 'kits/AdrenoPM4'),
                 '-I', str(ROOT / 'kits/sheng'), '-I', str(ROOT / 'kits/AdrenoFirmware'),
                 '-I', str(ROOT / 'build/sheng-gmu')]
+# The kernel build driver prepends Homebrew LLVM to PATH (for EDK2 CLANGPDB tools).
+# Replaying the compile record with that clang breaks: llvm 23 dropped the
+# -Wno-unnecessary-virtual-specifier flag this driver passes. Compile with Xcode's
+# clang (the compiler that actually generated the record) via xcrun.
+if command and command[0] in ('clang', 'clang++'):
+    command = ['xcrun', '--sdk', 'iphoneos', command[0]] + command[1:]
 (out / 'compile-command.json').write_text(json.dumps(command, indent=2) + '\n')
 result = subprocess.run(command, cwd=record['directory'], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
 (out / 'compile.log').write_text(result.stdout)
