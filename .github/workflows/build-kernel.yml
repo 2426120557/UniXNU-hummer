@@ -51,6 +51,8 @@ jobs:
 
       - name: Build kernel (prelink fails without IPSW, expected)
         continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: ./unixnu build kernel -D "$GITHUB_WORKSPACE" 2>&1 | tee "$GITHUB_WORKSPACE/kernel.log"
         working-directory: UniXNU
 
