@@ -11,17 +11,22 @@ soc = "SM8750"
 description = "OnePlus Ace 5 Pro"
 kit = "hummer"                     # package/ 出现在构建树的 kits/hummer
 
-# 目标 OS 镜像：未定。sheng 用的是 iPad7,1 iPadOS 17.7.11。hummer 的目标 IPSW 待定。
-# 首次引导其实只需要 KernelCache + DeviceTree + StaticTrustCache 这几个小成员。
+# 目标 OS 镜像：与 UniXNU-sheng 相同的原版 iPadOS 恢复镜像（未改动的 iPad7,1 17.7.11）。
+# 只用 range request 取需要的成员（KernelCache/DeviceTree/TrustCache），不整体下载。
+# 用同一份 IPSW，所以 sheng 那套已验证的 prelink 参数（sha256/slide/地址）对本机有效。
 [ipsw]
-url = ""                           # TODO: 选定目标 iPadOS 恢复镜像
-product = "iPad7,1"                # TODO: 目标设备身份（首启建议不声明身份）
-version = ""
-build = ""
-device_class = "j120ap"            # TODO
-chip_id = 0x8011                   # TODO: 目标 Apple chip_id（仅镜像侧身份）
-board_id = 12                      # TODO
+url = "https://updates.cdn-apple.com/2025SpringFCS/fullrestores/122-77166/DCA6CFE8-90E9-4B92-880D-3DE171798E40/iPad_Pro_HFR_17.7.11_21H461_Restore.ipsw"
+product = "iPad7,1"
+version = "17.7.11"
+build = "21H461"
+device_class = "j120ap"
+chip_id = 0x8011
+board_id = 12
 fetch = ["KernelCache", "DeviceTree", "StaticTrustCache", "Cryptex1,SystemTrustCache"]
+
+[ipsw.sha256]
+"044-76040-038.dmg" = "3f99b859c9728379110b66657c7b15285bcb1925ad8b5726542e2cdcf8b1028d"
+"044-76034-038.dmg" = "b4908cde41d23e6bc05e6af51a2c9eeb00cf0f863a6a18b1600c96a3fd70414f"
 
 # userdata 分区的原始镜像（OS + SystemOS 盘映像）。first/last_lba 需从真机 GPT 读。
 # TODO: hummer 的 userdata LBA 尚未从真机读取。
@@ -52,15 +57,48 @@ archives = [
 ]
 
 # prelink：把 4K 页 XNU 内核 prelink 进原版 kernelcache。
-# TODO: kernelcache_sha256 / slide / early_security_init / roots 都需在 macOS 上
-# 对选定的目标 kernelcache 实测后钉死。sheng 的值不可照搬。
+# 下面这组值是 sheng 针对「iPad7,1 17.7.11 21H461」这份 kernelcache 实测钉死的；
+# 因为本机用同一份 IPSW，它们对 hummer 同样有效（early_security_init 的地址是
+# 原版 kernelcache 里 AppleMobileFileIntegrity 的位置，换 kernelcache 必须重测）。
 [kernel.prelink]
 tool = "kits/NativePrelink/emit_prelink.py"
 kernel = "build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/mach.development.bcm2837.unstripped.noctf"
-kernelcache_sha256 = ""            # TODO
+kernelcache_sha256 = "f18b4df865405f2a287b84977d7aca745e056d656d9fc9df1662970ce2969de7"
 slide = "-0x1000000"
-early_security_init = ""           # TODO
-roots = []                          # TODO
+early_security_init = "com.apple.driver.AppleMobileFileIntegrity=0xfffffff005ab4ae0"
+roots = [
+  "com.apple.AppleFSCompression.AppleFSCompressionTypeZlib",
+  "com.apple.driver.AppleARMPlatform",
+  "com.apple.driver.AppleARMWatchdogTimer",
+  "com.apple.driver.AppleAudioClockLibs",
+  "com.apple.driver.AppleEffaceableStorage",
+  "com.apple.driver.AppleIISController",
+  "com.apple.driver.AppleM2ScalerCSCDriver",
+  "com.apple.driver.AppleMobileFileIntegrity",
+  "com.apple.driver.ApplePMGR",
+  "com.apple.driver.IODARTFamily",
+  "com.apple.filesystems.apfs",
+  "com.apple.iokit.CoreAnalyticsFamily",
+  "com.apple.iokit.IOAVFamily",
+  "com.apple.iokit.IOAudio2Family",
+  "com.apple.iokit.IOCECFamily",
+  "com.apple.iokit.IOCryptoAcceleratorFamily",
+  "com.apple.iokit.IOGPUFamily",
+  "com.apple.iokit.IOHDCPFamily",
+  "com.apple.iokit.IOMobileGraphicsFamily",
+  "com.apple.iokit.IOReportFamily",
+  "com.apple.iokit.IOSlowAdaptiveClockingFamily",
+  "com.apple.iokit.IOStorageFamily",
+  "com.apple.iokit.IOSurface",
+  "com.apple.kec.Libm",
+  "com.apple.kec.corecrypto",
+  "com.apple.kext.AppleMatch",
+  "com.apple.kext.CoreTrust",
+  "com.apple.security.AppleImage4",
+  "com.apple.security.sandbox",
+  "com.apple.iokit.IOHIDFamily",
+  "com.apple.iokit.IOHIDEventDriver",
+]
 
 [firmware]
 config = "hummer"                 # Resources/Configs/hummer.toml in the Mu-Silicium checkout (--uefi)
