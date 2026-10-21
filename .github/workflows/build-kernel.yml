@@ -66,14 +66,20 @@ jobs:
             echo "kernel Mach-O not produced; see logs"
           fi
 
-      - name: Show build log tail (on failure)
-        if: failure()
+      - name: Show build log tail
+        if: always()
         run: |
-          echo "===== kernel-bootstrap.log (tail) ====="
-          tail -80 UniXNU/out/hummer/logs/kernel-bootstrap.log 2>/dev/null || echo "(no kernel-bootstrap.log)"
-          echo ""
-          echo "===== archive logs (any) ====="
-          ls -la UniXNU/out/hummer/logs/ 2>/dev/null || true
+          LOG="UniXNU/out/hummer/logs/kernel-bootstrap.log"
+          if [ -f "$LOG" ]; then
+            echo "===== 报错上下文（grep error） ====="
+            grep -n -iE "error:|error |Error [0-9]|undefined|No such file|ld: |command not found" "$LOG" | head -40 || true
+            echo ""
+            echo "===== 日志最后 40 行 ====="
+            tail -40 "$LOG"
+          else
+            echo "(no kernel-bootstrap.log)"
+            ls -la UniXNU/out/hummer/logs/ 2>/dev/null || true
+          fi
 
       - name: Upload logs
         uses: actions/upload-artifact@v4
