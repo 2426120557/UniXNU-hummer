@@ -10,7 +10,7 @@ on:
 # 本 workflow 以「内核 Mach-O 是否产出」为通过判据。
 jobs:
   kernel:
-    runs-on: macos-14          # Intel 标准 runner（免费；macOS 计费 ×10）
+    runs-on: macos-15          # 与 UniXNU 官方 macOS build workflow 一致
     timeout-minutes: 300       # 上限 360，留点余量
     steps:
       - name: Checkout device repo
@@ -23,15 +23,24 @@ jobs:
           path: UniXNU
           submodules: recursive
 
+      # 关键：固定 Python 3.12。系统默认的 3.14 会让 XNU 的 LDFILELIST 等脚本静默失败。
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
       - name: Resolve UniXNU commit (cache key)
         run: echo "UNIXNU_SHA=$(git -C UniXNU rev-parse HEAD)" >> "$GITHUB_ENV"
 
       - name: Install build dependencies
-        run: brew install cmake ninja llvm lld unifdef
+        run: |
+          brew install cmake ninja unifdef llvm mtools dtc
+          echo "$(brew --prefix llvm)/bin" >> "$GITHUB_PATH"
 
       - name: Toolchain versions
         run: |
           xcodebuild -version
+          python3 --version
           clang --version | head -1
           cmake --version | head -1
 
