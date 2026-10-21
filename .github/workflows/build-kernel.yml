@@ -63,15 +63,26 @@ jobs:
             ls -la "$K"
           else
             echo "KERNEL_BUILT=no" >> "$GITHUB_ENV"
-            echo "kernel Mach-O not produced; see kernel.log"
+            echo "kernel Mach-O not produced; see logs"
           fi
 
-      - name: Upload kernel log
+      - name: Show build log tail (on failure)
+        if: failure()
+        run: |
+          echo "===== kernel-bootstrap.log (tail) ====="
+          tail -80 UniXNU/out/hummer/logs/kernel-bootstrap.log 2>/dev/null || echo "(no kernel-bootstrap.log)"
+          echo ""
+          echo "===== archive logs (any) ====="
+          ls -la UniXNU/out/hummer/logs/ 2>/dev/null || true
+
+      - name: Upload logs
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: kernel-log
-          path: kernel.log
+          name: kernel-logs
+          path: |
+            kernel.log
+            UniXNU/out/hummer/logs/
 
       - name: Result
         run: |
