@@ -79,6 +79,15 @@ jobs:
             echo "kernel.macho not produced; see logs"
           fi
 
+      # payload：把 kernel.macho + ADT 打成 FAT 卷（boot 镜像的 ramdisk）。
+      # 平台种子走 secret，未配则用下面的默认（软件身份种子，非真实机密）。
+      - name: Build payload
+        if: env.KERNEL_BUILT == 'yes'
+        env:
+          UNIXNU_UNIQUE_CHIP_ID: ${{ secrets.UNIXNU_UNIQUE_CHIP_ID || '0x38d960c942ad2137' }}
+        run: ./unixnu build payload -D "$GITHUB_WORKSPACE" 2>&1 | tee "$GITHUB_WORKSPACE/payload.log"
+        working-directory: UniXNU
+
       - name: Show build log tail
         if: always()
         run: |
@@ -101,7 +110,9 @@ jobs:
           name: kernel-logs
           path: |
             kernel.log
+            payload.log
             UniXNU/out/hummer/kernel/
+            UniXNU/out/hummer/payload/
             UniXNU/out/hummer/logs/
 
       - name: Result

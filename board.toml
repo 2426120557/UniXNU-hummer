@@ -128,26 +128,31 @@ MEMORY_PROTECTION = "TRUE"
 SHIP_MODE = "FALSE"
 BUILDID_STRING = "hummer-research"
 
-# boot 镜像的 ramdisk：含 UniXNU 配置、内核、其 ADT、可选 trust cache 和 Data seed。
-# loader(DarwinBoot) 已在固件卷内。
-# TODO: 需 macOS 跑 kernel 步骤后实测 volume/size/title/kernel_args/trust_cache。
-# [payload]
-# volume = "HUMMERESP"
-# size_mib = 192
-# loader = "firmware"
-# title = "hummer first boot: source 4K XNU to console"
-# dram_size = "0x400000000"          # 16 GiB
-# panic_screen = true
-# kernel_args = [
-#   "-v", "serial=3", "debug=0x14e", "native-ufs-root=1", ...
-# ]
-#
-# [payload.adt]
-# tool = "scripts/make-hummer-adt.py"
-# chip_id = "TODO"                  # 软件身份种子，非 Apple silicon ID，首启可自选
-# owned_memory_size = "0x130000000"  # TODO: 从真机 SMEM RAM 表实测连续窗口
-# root_match_volume_uuid = "TODO"
-# cpu_regs = "0,0x100,0x200,0x300,0x400,0x500,0x10000,0x10100"   # 6 perf + 2 Oryon prime
-# packed_data_ramdisk = true
-# ipad_identity = false
-# unique_chip_id = "required"
+# boot 镜像的 ramdisk：FAT 卷，含 UniXNU 配置、内核、ADT 设备树。
+# loader(DarwinBoot) 已在固件卷内，所以 loader = "firmware"。
+[payload]
+volume = "HUMMERESP"
+size_mib = 192
+loader = "firmware"
+title = "hummer first boot: source 4K XNU to console"
+dram_size = "0x400000000"          # 16 GiB
+timeout = 3
+# panic_screen 需要 Mu-Silicium 检出(UNIXNU_UEFI)，CI 上没有，首启先关掉。
+panic_screen = false
+# 首启最小 boot args。注意：绝不能加 native-ufs-root=1 —— payload 会校验
+# _sheng_pmgr_run 符号(需要 sheng PMGR 集成)，最小内核没有，会直接拒绝打包。
+kernel_args = [
+  "-v",
+  "serial=3",
+  "debug=0x14e",
+]
+
+[payload.adt]
+tool = "scripts/make-hummer-adt.py"
+chip_id = "207"                    # 软件身份种子（非 Apple silicon ID），沿用 sheng 约定
+owned_memory_size = "0x130000000"  # DarwinBoot 连续窗口 256MiB..8GiB，2MiB 对齐
+cpu_regs = "0,0x100,0x200,0x300,0x400,0x500,0x10000,0x10100"   # 6 性能核 + 2 Oryon 大核
+psci_method = "smc"
+packed_data_ramdisk = false
+ipad_identity = false              # 首启不声明 Apple 身份
+unique_chip_id = "required"        # 平台种子不入仓库：--unique-chip-id / UNIXNU_UNIQUE_CHIP_ID
