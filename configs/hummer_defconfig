@@ -1,0 +1,23 @@
+# Kernel configuration of the hummer image. CONFIG_XNU_<NAME> becomes XNU_<NAME>
+# for the kernel build.
+#
+# 试水阶段：最小可编译集 —— 只编 XNU 4K 内核本体 + 通用平台专家(ArmDTPlatform)
+# + CPU/SMP(ArmCpu)。不含任何 I/O/GPU/显示驱动（那些需要 hummer 的 package/ kit，
+# 尚未适配，且 GPU 是 Adreno 830/a8xx 未成熟）。
+
+CONFIG_XNU_SOURCE_CORECRYPTO14=y
+CONFIG_XNU_SOURCE_PTHREAD=y
+CONFIG_XNU_ARM_DT_PLATFORM=y
+CONFIG_XNU_ARMCPU=y
+
+CONFIG_XNU_CRYPTO_BOOTSTRAP="prelinked"
+
+# —— 后续阶段再启用（需 hummer kit / macOS 实测钉死）——
+# CONFIG_XNU_NATIVE_UFS=y
+# CONFIG_XNU_NATIVE_AES=y
+# CONFIG_XNU_NATIVE_VIRTIO_BLOCK=y
+# CONFIG_XNU_NATIVE_RAM_BLOCK=y
+# CONFIG_XNU_NATIVE_ARCH_TIMER=y
+# CONFIG_XNU_NATIVE_ADRENO=n        # Adreno 830 (a8xx) 未成熟
+# CONFIG_XNU_NATIVE_LEGACY_DISPLAY=n
+CONFIG_XNU_EXTRA_LD_ARCHIVES=""

@@ -1,0 +1,83 @@
+name: build-kernel
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+
+# 试水目标：验证 macOS CI 能否编出 hummer 的 XNU 4K 内核 + 通用平台专家。
+# 已知：build kernel 会在 prelink 阶段因缺少 kernelcache/IPSW 失败（预期内），
+# 本 workflow 以「内核 Mach-O 是否产出」为通过判据。
+jobs:
+  kernel:
+    runs-on: macos-14          # Intel 标准 runner（免费；macOS 计费 ×10）
+    timeout-minutes: 300       # 上限 360，留点余量
+    steps:
+      - name: Checkout device repo
+        uses: actions/checkout@v4
+
+      - name: Checkout UniXNU
+        uses: actions/checkout@v4
+        with:
+          repository: UniXNU/UniXNU
+          path: UniXNU
+          submodules: recursive
+
+      - name: Resolve UniXNU commit (cache key)
+        run: echo "UNIXNU_SHA=$(git -C UniXNU rev-parse HEAD)" >> "$GITHUB_ENV"
+
+      - name: Install build dependencies
+        run: brew install cmake ninja llvm lld unifdef
+
+      - name: Toolchain versions
+        run: |
+          xcodebuild -version
+          clang --version | head -1
+          cmake --version | head -1
+
+      - name: Cache fetched sources
+        uses: actions/cache@v4
+        with:
+          path: UniXNU/out/feeds
+          key: unixnu-feeds-${{ env.UNIXNU_SHA }}
+
+      - name: Select defconfig
+        run: ./unixnu defconfig hummer_defconfig -D "$GITHUB_WORKSPACE"
+        working-directory: UniXNU
+
+      - name: Show status
+        run: ./unixnu status -D "$GITHUB_WORKSPACE"
+        working-directory: UniXNU
+
+      - name: Build kernel (prelink fails without IPSW, expected)
+        continue-on-error: true
+        run: ./unixnu build kernel -D "$GITHUB_WORKSPACE" 2>&1 | tee "$GITHUB_WORKSPACE/kernel.log"
+        working-directory: UniXNU
+
+      - name: Check kernel artifact
+        id: check
+        run: |
+          K="UniXNU/build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/mach.development.bcm2837.unstripped.noctf"
+          if [ -f "$K" ]; then
+            echo "KERNEL_BUILT=yes" >> "$GITHUB_ENV"
+            ls -la "$K"
+          else
+            echo "KERNEL_BUILT=no" >> "$GITHUB_ENV"
+            echo "kernel Mach-O not produced; see kernel.log"
+          fi
+
+      - name: Upload kernel log
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: kernel-log
+          path: kernel.log
+
+      - name: Result
+        run: |
+          if [ "$KERNEL_BUILT" = "yes" ]; then
+            echo "✅ XNU kernel compiled; prelink pending (needs IPSW kernelcache)"
+          else
+            echo "❌ kernel did not compile — check the uploaded kernel.log"
+            exit 1
+          fi

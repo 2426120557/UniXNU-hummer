@@ -1,0 +1,114 @@
+# OnePlus Ace 5 Pro (hummer, SM8750) — UniXNU device repository.
+#
+# 当前状态：
+#   [firmware] 段已真机验证 —— UEFI 固件含 UniXNU 菜单，fastboot boot 成功。
+#   [kernel]/[ipsw]/[userdata]/[payload]/[payload.adt] 段是 XNU 内核 + 负载打包
+#   阶段的脚手架（TODO 标注），需要 macOS/Xcode 才能构建验证，尚未跑通。
+
+[board]
+name = "hummer"
+soc = "SM8750"
+description = "OnePlus Ace 5 Pro"
+kit = "hummer"                     # package/ 出现在构建树的 kits/hummer
+
+# 目标 OS 镜像：未定。sheng 用的是 iPad7,1 iPadOS 17.7.11。hummer 的目标 IPSW 待定。
+# 首次引导其实只需要 KernelCache + DeviceTree + StaticTrustCache 这几个小成员。
+[ipsw]
+url = ""                           # TODO: 选定目标 iPadOS 恢复镜像
+product = "iPad7,1"                # TODO: 目标设备身份（首启建议不声明身份）
+version = ""
+build = ""
+device_class = "j120ap"            # TODO
+chip_id = 0x8011                   # TODO: 目标 Apple chip_id（仅镜像侧身份）
+board_id = 12                      # TODO
+fetch = ["KernelCache", "DeviceTree", "StaticTrustCache", "Cryptex1,SystemTrustCache"]
+
+# userdata 分区的原始镜像（OS + SystemOS 盘映像）。first/last_lba 需从真机 GPT 读。
+# TODO: hummer 的 userdata LBA 尚未从真机读取。
+# [userdata]
+# first_lba = 0x0
+# last_lba = 0x0
+# lba_bytes = 4096
+# windows = [
+#   { name = "OS", component = "OS" },
+#   { name = "SystemOS", component = "Cryptex1,SystemOS" },
+# ]
+
+[kernel]
+defconfig = "hummer_defconfig"
+# 内核步骤的归档构建器，按序执行。试水阶段用最小可编译集：
+# corecrypto + pthread + ArmDTPlatform(读 ADT，通用平台专家) + ArmCpu(SMP)。
+# 不含 I/O/GPU/显示驱动（那些需要 hummer 的 package/ kit，尚未适配）。
+# 注意：所有构建器都在 macOS 上跑（kernel.py 硬性要求 xcodebuild + iphoneos SDK）。
+# build-arm-driver.py 从 UniXNU-sheng 原样拷贝（其 sheng 硬编码只在 NativeAdreno/GPU
+# 分支，对 ArmDTPlatform/ArmCpu 通用）。
+archives = [
+  "build-corecrypto-14.py",
+  "build-corecrypto-14.py --namespace",
+  "build-arm-driver.py ArmDTPlatform",
+  "build-arm-driver.py ArmCpu",
+  "build-libpthread-kernel.py",
+]
+
+# prelink：把 4K 页 XNU 内核 prelink 进原版 kernelcache。
+# TODO: kernelcache_sha256 / slide / early_security_init / roots 都需在 macOS 上
+# 对选定的目标 kernelcache 实测后钉死。sheng 的值不可照搬。
+[kernel.prelink]
+tool = "kits/NativePrelink/emit_prelink.py"
+kernel = "build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/mach.development.bcm2837.unstripped.noctf"
+kernelcache_sha256 = ""            # TODO
+slide = "-0x1000000"
+early_security_init = ""           # TODO
+roots = []                          # TODO
+
+[firmware]
+config = "hummer"                 # Resources/Configs/hummer.toml in the Mu-Silicium checkout (--uefi)
+dsc = "Platforms/OnePlus/hummerPkg/hummer.dsc"
+fd = "Build/hummerPkg/{target}_CLANGPDB/FV/SILICIUM_UEFI.fd"
+# hummer 的依赖源码树是普通目录（非 git 子模块），无需 submodules 初始化。
+# GIC 处理：hummer 构建用 UniXNU 的 mu_basecore feed（原版），需要 fix_gic_feed.sh
+# 给 feed 打 spurious-mask 补丁（AnyLaySys 的 hummer 补丁语义）。
+packages = [
+  "{uefi}",
+  "{uefi}/Platforms/OnePlus",
+  "{tree}/package",
+  "{tree}/drivers/DarwinBoot",
+  "{edk2}",
+  "{uefi}/Common/Mu",
+  "{uefi}/Common/Mu_OEM_Sample",
+  "{uefi}/Silicon/Qualcomm",
+  "{uefi}/Silicon/Silicium",
+  "{uefi}/Silicium-ACPI",
+  "{uefi}/Silicium-ACPI/Platforms/OnePlus",
+  "{uefi}/Silicium-ACPI/Silicon/Qualcomm",
+]
+
+[firmware.defines]
+ENABLE_SECUREBOOT = "0"
+MEMORY_PROTECTION = "TRUE"
+SHIP_MODE = "FALSE"
+BUILDID_STRING = "hummer-research"
+
+# boot 镜像的 ramdisk：含 UniXNU 配置、内核、其 ADT、可选 trust cache 和 Data seed。
+# loader(DarwinBoot) 已在固件卷内。
+# TODO: 需 macOS 跑 kernel 步骤后实测 volume/size/title/kernel_args/trust_cache。
+# [payload]
+# volume = "HUMMERESP"
+# size_mib = 192
+# loader = "firmware"
+# title = "hummer first boot: source 4K XNU to console"
+# dram_size = "0x400000000"          # 16 GiB
+# panic_screen = true
+# kernel_args = [
+#   "-v", "serial=3", "debug=0x14e", "native-ufs-root=1", ...
+# ]
+#
+# [payload.adt]
+# tool = "scripts/make-hummer-adt.py"
+# chip_id = "TODO"                  # 软件身份种子，非 Apple silicon ID，首启可自选
+# owned_memory_size = "0x130000000"  # TODO: 从真机 SMEM RAM 表实测连续窗口
+# root_match_volume_uuid = "TODO"
+# cpu_regs = "0,0x100,0x200,0x300,0x400,0x500,0x10000,0x10100"   # 6 perf + 2 Oryon prime
+# packed_data_ramdisk = true
+# ipad_identity = false
+# unique_chip_id = "required"
