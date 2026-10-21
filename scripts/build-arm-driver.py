@@ -65,6 +65,9 @@ while index < len(arguments):
     index += 1
 command.extend(['-Wall', '-Wextra', '-Werror', '-Wno-unused-parameter',
                 '-Wno-c99-designator', '-Wno-reorder-init-list', '-Wno-deprecated-enum-enum-conversion',
+                # clang 17 removed -Wunnecessary-virtual-specifier entirely, so the -Wno- form below is
+                # an unknown option there; keep -Werror strict but let version-drifted -Wno- flags pass.
+                '-Wno-unknown-warning-option',
                 '-Wno-unnecessary-virtual-specifier', '-I', str(ROOT / '.cache/xnu-work/osfmk')])
 if component in ('NativeVirtioBlock', 'NativeRamBlock', 'NativeUfs'):
     command += ['-I', str(ROOT / 'build/storage-abi/include')]
