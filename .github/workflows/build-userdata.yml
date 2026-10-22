@@ -1,0 +1,155 @@
+name: build-userdata
+
+# 只做一件事：跑 `unixnu build userdata`，把 iPadOS 17.7.11 的 OS + SystemOS 盘映像
+# 打成一个带 SHNGROOT manifest 的原始镜像，供 `fastboot flash userdata` 使用。
+#
+# 为什么必须在 macOS 上：userdata.py 用 `hdiutil imageinfo` 取镜像大小、用
+# `hdiutil attach -nomount -readonly` 拿到 /dev/rdisk 再逐块读原始字节。Linux 没有
+# hdiutil，自己实现 DMG 解压要处理 UDZO/ULFO 和 koly 尾部，风险比这高。
+#
+# 为什么不整体下载 IPSW：scripts/unixnu/ipsw.py 的 RangeFile 用 HTTP range 只取
+# 需要的成员（OS、Cryptex1,SystemOS），BuildManifest 也是 range 取的。
+#
+# 两处刻意的设计：
+#   1. 第一次请用 dry_run=1 跑。它只取 zip 目录 + BuildManifest，几秒钟就能告出
+#      "OS 会从哪个 dmg 抽、多大"，据此判断 220.74 GiB 的 userdata 装不装得下。
+#   2. 真实产物 12 GB 左右，GitHub release 单文件上限 2 GiB，所以 split 成分卷。
+#      本地用 outputs/fetch_userdata.sh 拉回来拼接 + 校验 sha256。
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "1 = 只报告各窗口大小，不写镜像（第一次先跑这个）"
+        type: choice
+        options: ["1", "0"]
+        default: "1"
+      split_mib:
+        description: "分卷大小（MiB，必须 < 2048）"
+        default: "1900"
+
+jobs:
+  userdata:
+    runs-on: macos-15
+    timeout-minutes: 350       # 上限 360
+    permissions:
+      contents: write          # 只为把分卷挂到 release
+
+    steps:
+      - name: Checkout device repo
+        uses: actions/checkout@v4
+
+      # 与 build-kernel.yml 同一个固定 ref：main 的 e95b37d 弄丢过
+      # BINDM_FORCE_ROOT、还把子模块 gitlink 指向远端已删的 commit。
+      - name: Checkout UniXNU
+        uses: actions/checkout@v4
+        with:
+          repository: UniXNU/UniXNU
+          path: UniXNU
+          ref: b6ae99c17194e6a18fd819d3148e69fe405e91fc
+
+      - name: Repair the UniXNU submodule checkout
+        shell: bash
+        working-directory: UniXNU
+        run: bash "$GITHUB_WORKSPACE/ci/fix-unixnu-submodules.sh"
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # macOS runner 的 SSD 只有 ~14 GB，而这里要落 8 GB 成员 + 12 GB 镜像。
+      # 这个 job 不需要 Xcode（userdata 只用 hdiutil，系统自带），所以直接删掉
+      # 模拟器运行时和 SDK 里的 CoreSimulator，通常能腾出 20 GB 以上，
+      # 但保留 Xcode.app 本体 —— unixnu 启动时会检查 xcodebuild 在不在。
+      - name: Free disk space
+        if: inputs.dry_run == '0'
+        run: |
+          df -h /
+          sudo rm -rf ~/Library/Developer/CoreSimulator/Caches || true
+          sudo rm -rf /Library/Developer/CoreSimulator/Profiles/Runtimes/* || true
+          sudo rm -rf /Applications/Xcode*.app/Contents/Developer/Platforms/*.platform/Developer/Library/CoreSimulator || true
+          sudo rm -rf /Applications/Xcode*.app/Contents/Developer/Platforms/*.platform/Developer/SDKs/*.sdk/usr/lib/swift* || true
+          df -h /
+
+      - name: Select defconfig
+        run: ./unixnu defconfig hummer_defconfig -D "$GITHUB_WORKSPACE"
+        working-directory: UniXNU
+
+      - name: Show status
+        run: ./unixnu status -D "$GITHUB_WORKSPACE"
+        working-directory: UniXNU
+
+      # dry-run：只打印两个窗口会从哪个 dmg 抽、多大。用来在真正写 12 GB 之前
+      # 确认 IPSW URL / 成员名 / [userdata] 几何都对。
+      - name: Build userdata (dry run)
+        if: inputs.dry_run == '1'
+        run: ./unixnu build userdata -D "$GITHUB_WORKSPACE" --dry-run 2>&1 | tee "$GITHUB_WORKSPACE/userdata.log"
+        working-directory: UniXNU
+
+      - name: Build userdata
+        if: inputs.dry_run == '0'
+        run: |
+          START=$(date +%s)
+          ./unixnu build userdata -D "$GITHUB_WORKSPACE" 2>&1 | tee "$GITHUB_WORKSPACE/userdata.log"
+          echo "USERDATA_SECONDS=$(( $(date +%s) - START ))" >> "$GITHUB_ENV"
+        working-directory: UniXNU
+
+      - name: Inspect the image
+        if: inputs.dry_run == '0'
+        run: |
+          IMG=UniXNU/out/hummer/userdata/userdata-root.img
+          ls -la "$IMG" "UniXNU/out/hummer/userdata/userdata-root.json"
+          df -h /
+          # manifest 的头 8 字节必须是 "SHNGROOT"，否则驱动连清单都不认。
+          head -c 8 "$IMG"; echo
+          python3 - <<'PY'
+          import json, struct, hashlib
+          p = 'UniXNU/out/hummer/userdata/userdata-root.json'
+          d = json.load(open(p))
+          print('image_bytes   ', d.get('image_bytes'))
+          print('image_sha256  ', d.get('image_sha256'))
+          print('userdata_bytes', d.get('userdata_bytes'))
+          print('flash_command ', d.get('flash_command'))
+          for w in d.get('windows', []):
+              print('  window', w.get('name'), hex(w.get('offset', 0)), w.get('size'), w.get('sha256', '')[:16])
+          PY
+
+      - name: Split the image into release-sized parts
+        if: inputs.dry_run == '0'
+        run: |
+          IMG=UniXNU/out/hummer/userdata/userdata-root.img
+          mkdir -p parts
+          # split 按字节切；1900 MiB 留出余量，确保每个分卷都低于 release 的 2 GiB 上限。
+          split -b "${{ inputs.split_mib }}m" -d -a 2 "$IMG" parts/userdata-root.img.part
+          ls -la parts/
+          ( cd parts && sha256sum userdata-root.img.part* > SHA256SUMS.txt )
+          cp UniXNU/out/hummer/userdata/userdata-root.json parts/
+
+      - name: Publish parts to a release
+        if: inputs.dry_run == '0'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="userdata-21H461"
+          gh release view "$TAG" >/dev/null 2>&1 \
+            || gh release create "$TAG" --title "userdata 21H461" \
+                 --notes "SHNGROOT root image for hummer. Split into parts; concatenate and verify with outputs/fetch_userdata.sh."
+          gh release upload "$TAG" parts/* --clobber
+
+      - name: Build summary
+        if: always()
+        run: |
+          {
+            echo "## build-userdata (dry_run=${{ inputs.dry_run }})"
+            echo
+            if [ -f userdata.log ]; then
+              echo '```'
+              tail -40 userdata.log
+              echo '```'
+            fi
+            ls -la UniXNU/out/hummer/userdata/ 2>/dev/null || true
+            echo
+            echo "USERDATA_SECONDS=${USERDATA_SECONDS:-n/a}"
+          } >> "$GITHUB_STEP_SUMMARY"
