@@ -14,28 +14,38 @@ ROOT = Path(__file__).resolve().parents[1]
 # text replacements, each asserted to match exactly once, so an upstream refactor fails
 # the build instead of silently dropping the change.
 #
-# 1. Take over the stream entry the firmware already installed.  v28 (native-ufs-probe=7)
-#    read sCR0=002b0406, IDR0=4c017e84, IDR1=00000053, gFSR=0 and found SMR[0]=80000060
-#    (VALID, ID 0x60, MASK 0) with S2CR[0]=00000000: TYPE=TRANSLATE through context bank
-#    0.  Those stage-1 tables are ABL's and describe ABL's buffers, not this kernel's.
-#    The planner refuses while that entry exists and would leave it matching first anyway
-#    (SMR hits resolve by group index), so the entry itself is converted:
-#      a. plain S2CR bypass - cheapest, and correct unless this firmware silently turns
-#         BYPASS into FAULT, the quirk the driver comment records for the same IP;
-#      b. otherwise restore the firmware mapping and install the Qualcomm shape - a
-#         context bank with CBAR.TYPE=S1_TRANS_S2_BYPASS and stage 1 disabled, with the
-#         stream pointed at it by CBNDX - in the SAME slot.
-#    Both paths are read back before the controller is allowed to use them.
-# 2. The geometry refusal reported neither the ID registers it judged nor their derived
-#    values, which left the first hardware failure unattributable.
+# 1. Map the whole SMMU register window.  IDR1.NUMPAGENDXB reads 6 here, so GR0+GR1
+#    cover 128 pages and the context banks start at page 128; CB82 sits at 0xD2000,
+#    past the 0xd0000 window sized for the earlier board.  Writing CB82's SCTLR through
+#    that mapping took a data abort (level 3 translation fault, ESR 96000047).
+# 2. Take over the stream entry the firmware already installed.  v28 (probe=7) found
+#    SMR[0]=80000060 (VALID, ID 0x60, MASK 0) with S2CR[0]=00000000, i.e. TYPE=TRANSLATE
+#    through context bank 0 - ABL's own stage-1 tables, which describe ABL's buffers.
+#    The planner refuses while that entry exists and would leave it matching first
+#    anyway (SMR hits resolve by group index), so the entry itself is converted:
+#      a. plain S2CR bypass - hardware turned it down on this board, which is the quirk
+#         the driver comment records for the same IP;
+#      b. so the Qualcomm shape is installed instead: a context bank whose CBAR says
+#         S1_TRANS_S2_BYPASS with stage 1 disabled, stream pointed at it by CBNDX.
+#    No computed address is written before proving it is inside the mapped window; a
+#    geometry that does not fit is reported instead of being guessed around.
+# 3. The planner's own refusal still prints the ID registers behind it.
 NATIVE_UFS_EDITS = [
+    (
+        'SMMU: map the whole 1 MiB register window',
+        '  uintptr_t smmu = mapPhys (0x15000000ULL, 0xd0000, keep);\n',
+        """  // IDR1.NUMPAGENDXB=6 -> GR0+GR1 span 128 pages, the context banks start at page 128,
+  // so the highest bank's page is at 0xD2000: the window must be the device's full 1 MiB
+  // (the DT's reg size), not the smaller mapping sized for the earlier board.
+  uintptr_t smmu = mapPhys (0x15000000ULL, 0x100000, keep);
+""",
+    ),
     (
         "SMMU: take over the firmware's own stream entry",
         '  UfsSmmuPlan plan = planUfsSmmu (stream, dma, bytes, [smmu](unsigned offset) { return read32 (smmu, offset); });\n',
         """  {
-    // A fixed 128-slot window rather than IDR0.NUMSMRG: the adopt path refused this SMMU
-    // once on a geometry judgement that the measured IDR1 does not support, so the ID
-    // registers are not trusted to bound a read-only sweep.  Unused groups read as zero.
+    // A fixed 128-slot window rather than IDR0.NUMSMRG, which reads 132 here - past the
+    // 128 groups this part implements.  Unused groups read back as zero.
     unsigned cut = 0xffff;
     uint32_t cutSmr = 0, cutS2cr = 0;
     for (unsigned scan = 0; scan < 128; scan++) {
@@ -75,13 +85,14 @@ NATIVE_UFS_EDITS = [
         uint32_t idr1 = read32 (smmu, 0x24);
         unsigned pages = 1U << (((idr1 >> 28) & 7) + 1);
         unsigned banks = idr1 & 0xff;
-        if (pages == 0 || pages > 128 || banks < 2 || banks > 128) {
-          // IDR1 disagreed with what probe=7 measured on this board (0x53).
-          pages = 2;
-          banks = 83;
-        }
-        unsigned bank = banks - 1;
+        unsigned bank = banks ? banks - 1 : 0;
         unsigned cbOffset = (pages + bank) * 4096;
+        if (pages == 0 || banks < 2 || cbOffset + 4096 > 0x100000) {
+          // Report instead of guess: the previous build fell back to pages=2 here and
+          // wrote CB82's SCTLR outside the mapped window.
+          panic ("NATIVE_UFS smmu: geometry idr1=%08x pages=%u banks=%u bank=%u cb=0x%x",
+                 idr1, pages, banks, bank, cbOffset);
+        }
         write32 (smmu, cbOffset, 0);
         __asm__ volatile ("dsb sy" ::: "memory");
         write32 (smmu, 0x1800 + 4 * bank, 1);
@@ -89,8 +100,8 @@ NATIVE_UFS_EDITS = [
         __asm__ volatile ("dsb sy" ::: "memory");
         if (read32 (smmu, cbOffset) != 0 || read32 (smmu, 0x1000 + 4 * bank) != 0x00010000U ||
             read32 (smmu, 0x1800 + 4 * bank) != 1) {
-          panic ("NATIVE_UFS smmu: bank bypass config bank=%u pages=%u sctlr=%08x cbar=%08x cba2r=%08x",
-                 bank, pages, read32 (smmu, cbOffset), read32 (smmu, 0x1000 + 4 * bank),
+          panic ("NATIVE_UFS smmu: bank bypass config bank=%u cb=0x%x sctlr=%08x cbar=%08x cba2r=%08x",
+                 bank, cbOffset, read32 (smmu, cbOffset), read32 (smmu, 0x1000 + 4 * bank),
                  read32 (smmu, 0x1800 + 4 * bank));
         }
         write32 (smmu, 0xc00 + 4 * cut, bank);
