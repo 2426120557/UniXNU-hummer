@@ -154,11 +154,84 @@ jobs:
               sys.exit(1)
           PY
 
+      # run 39840423573 的结论：补丁打在了 out/feeds/xnu-0b4b910d/osfmk/kern/lock_rw.c
+      # （5 处，日志可见），但执行补丁时 out/ 下**只有这一份** lock_rw.c ——
+      # 真正参与编译的 out/hummer/tree/.cache/xnu-work/ 是构建过程中才展开的，
+      # 展开自带的原始内容，把我们的改动覆盖掉。校验步骤当场拦下（nonSLRW x0）。
+      #
+      # 所以改成「构建期间持续补丁」：起一个 1 秒轮询的后台进程，只 stat/读
+      # 几个固定候选路径（不做全树 rglob，否则每轮都要走十万个文件），
+      # 一发现新的 lock_rw.c 就替换。无论构建在哪一刻把树展开，都赶在
+      # clang 读到 osfmk/kern/lock_rw.c 之前改好。
       - name: Build kernel (prelink fails without IPSW, expected)
         continue-on-error: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: ./unixnu build kernel -D "$GITHUB_WORKSPACE" 2>&1 | tee "$GITHUB_WORKSPACE/kernel.log"
+        run: |
+          cat > /tmp/patcher.py <<'PY'
+          import glob, os, re, sys, time, pathlib
+
+          ROOT = os.path.join(os.environ["GITHUB_WORKSPACE"], "UniXNU", "out")
+          pat = re.compile(
+              r'panic\(\s*"Taking non-sleepable RW lock with preemption enabled[^"]*"'
+              r'(?:\s*,\s*__FILE__\s*,\s*__LINE__)?\s*\);')
+          NEW = (
+              'panic("nonSLRW lock=%p caller=%p w=%llx,%llx,%llx,%llx,%llx,%llx,%llx,%llx", '
+              '(void *)lock, __builtin_return_address(0), '
+              '(unsigned long long)((uint64_t *)lock)[0], '
+              '(unsigned long long)((uint64_t *)lock)[1], '
+              '(unsigned long long)((uint64_t *)lock)[2], '
+              '(unsigned long long)((uint64_t *)lock)[3], '
+              '(unsigned long long)((uint64_t *)lock)[4], '
+              '(unsigned long long)((uint64_t *)lock)[5], '
+              '(unsigned long long)((uint64_t *)lock)[6], '
+              '(unsigned long long)((uint64_t *)lock)[7]);')
+
+          def candidates():
+              out = []
+              cache = os.path.join(ROOT, "hummer", "tree", ".cache")
+              try:
+                  for d in os.listdir(cache):
+                      out.append(os.path.join(cache, d, "osfmk", "kern", "lock_rw.c"))
+              except OSError:
+                  pass
+              out.append(os.path.join(ROOT, "hummer", "tree", "osfmk", "kern", "lock_rw.c"))
+              try:
+                  for d in os.listdir(os.path.join(ROOT, "feeds")):
+                      out.append(os.path.join(ROOT, "feeds", d, "osfmk", "kern", "lock_rw.c"))
+              except OSError:
+                  pass
+              out += glob.glob(os.path.join(ROOT, "*", "*", "*", "osfmk", "kern", "lock_rw.c"))
+              out += glob.glob(os.path.join(ROOT, "*", "*", "*", "*", "osfmk", "kern", "lock_rw.c"))
+              return out
+
+          deadline = time.time() + 3000
+          seen = set()
+          total = 0
+          while time.time() < deadline:
+              for p in candidates():
+                  if not os.path.exists(p) or p in seen:
+                      continue
+                  try:
+                      src = pathlib.Path(p).read_text()
+                  except OSError:
+                      continue
+                  new, n = pat.subn(NEW, src)
+                  if n:
+                      pathlib.Path(p).write_text(new)
+                      seen.add(p)
+                      total += n
+                      print("[%6.1fs] patched %s : %d site(s)" % (time.time() % 10000, p, n), flush=True)
+              time.sleep(1)
+          print("patcher finished, total sites:", total, flush=True)
+          PY
+          python3 /tmp/patcher.py > "$GITHUB_WORKSPACE/patcher.log" 2>&1 &
+          PATCHER=$!
+          ./unixnu build kernel -D "$GITHUB_WORKSPACE" 2>&1 | tee "$GITHUB_WORKSPACE/kernel.log" || true
+          kill "$PATCHER" 2>/dev/null || true
+          wait "$PATCHER" 2>/dev/null || true
+          echo "--- patcher.log ---"
+          cat "$GITHUB_WORKSPACE/patcher.log" || true
         working-directory: UniXNU
 
       # 判据 = prelink 的最终产物（prelink 成功后才算内核完整产出）。
@@ -421,7 +494,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          tar czf ci-logs.tar.gz kernel.log payload.log UniXNU/out/hummer/logs 2>/dev/null || true
+          tar czf ci-logs.tar.gz kernel.log payload.log patcher.log UniXNU/out/hummer/logs 2>/dev/null || true
           gh release view ci-latest >/dev/null 2>&1 \
             || gh release create ci-latest --title "ci latest" \
                  --notes "Rolling build outputs of build-kernel. Overwritten on every run." 
