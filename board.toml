@@ -68,13 +68,16 @@ archives = [
   # （build-corecrypto-14.py 等）会用 `xcrun nm` 扫整份 osfmk 目标文件列表，
   # 碰到不存在的文件直接报 “No such file or directory” 并中断整个构建。
   "build-hummer-video-map.py",
-  # 同样放在最后。这一项探的是更早的一层：start.s 的 start_first_cpu 入口，
-  # 那时 MMU 还关着（DarwinBoot 清过 SCTLR_EL1.M），直接往帧缓冲的物理地址
-  # 写一条洋红色横带（y=64..96），不需要任何页表。屏幕因此变成三态：
-  #   只有绿条                → 内核入口压根没执行（问题在装载/跳转，不在内核）
-  #   绿条 + 洋红横带          → start_first_cpu 跑了，死在 start.s→arm_init 之间
-  #   ...还有 (0,0) 的方块和底部蓝条 → arm_init 也跑了，映射也成
-  # 横带刻意放在 y=64..96，不覆盖 video-map 那个 64x64 方块。
+  # 同样放在最后。这一项探 start.s 里 MMU 打开之前的两段路，那时 MMU 还关着
+  # （DarwinBoot 清过 SCTLR_EL1.M），直接往帧缓冲的物理地址写像素不需要页表：
+  #   洋红横带 y=64..96      start_first_cpu 入口（x0 还是 boot_args 物理指针）
+  #   青色横带 y=1200..1232  common_start 开头，即 create_bootstrap_mapping
+  #                          已经把 V=P 和 KVA 两套临时页表建完、两个栈和
+  #                          arm_init 的 KVA 也算完
+  # MMU 一开，0xFC000000 就没有映射了，内核在 arm_vm_init 建好 pmap 之前画不了
+  # 任何东西，所以更靠后的进度改用另一种信号：outputs/patch-reset-probe.py 把
+  # _arm_init 里那条 `bl arm_vm_init` 换成一段 cave，调用照做，然后等 6 秒用
+  # PSCI SYSTEM_RESET 复位。6 秒后重启 = arm_vm_init 返回了；不重启 = 死在里面。
   "build-hummer-entry-probe.py",
 ]
 
