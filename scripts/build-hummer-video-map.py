@@ -14,8 +14,9 @@ Nothing maps it:
     ``[physBase, physBase + memSize)`` and the matching kernel VA window — and
     ``arm_replace_identity_map()`` tears the V=P one down in arm_vm_init();
   * osfmk/arm64/arm_vm_init.c has no reference to ``PE_state.video`` at all;
-  * on hummer the window sits at 0x8C0070000 (5 GiB), so 0xFC000000 is outside
-    every mapping the kernel ever has.
+  * DarwinBoot sets ``boot_args.PhysicalBase`` / ``MemorySize`` to the window it
+    allocated for the kernel (0x8C0070000, 5 GiB), *not* to the extent of DRAM,
+    so 0xFC000000 is outside every mapping the kernel ever has.
 
 The console therefore takes a data abort on its first pixel write, panics, and
 the panic path faults again in the same place — which is why the screen simply
@@ -25,9 +26,26 @@ What this does
 --------------
 Hooks ``osfmk/arm/arm_init.c`` immediately before ``PE_create_console()``
 (``PE_init_platform()`` has already run, so ``PE_state.video`` is populated):
-maps the framebuffer into the kernel high window and re-maps it
-write-combining, because a cached mapping never reaches the panel, then points
-``PE_state.video.v_baseAddr`` at the kernel VA.
+maps the framebuffer into the kernel high window, re-maps it write-combining
+because a cached mapping never reaches the panel, points
+``PE_state.video.v_baseAddr`` at the kernel VA, and then paints two markers
+through the new mapping.
+
+Why paint instead of print
+--------------------------
+``PE_create_console()`` and ``PE_init_printf()`` both run *after* this point, so
+kprintf() here goes nowhere — which is exactly why the v14 build could not tell
+anyone whether it had even been reached.  Pixels need no console:
+
+  * magenta square in the top-left corner — 64x64, the cheapest proof of life;
+  * blue band across the bottom eighth.
+
+Together with the green bar DarwinBoot paints before it turns the MMU off, the
+screen alone then separates "the kernel never reached arm_init" (green only)
+from "reached it and the mapping works" (green + magenta + blue).  A build that
+dies inside pmap_map_high_window_bd() still shows green only, so if the next
+boot is still green the probe moves one level earlier, into start.s while the
+MMU is off and physical stores need no mapping at all.
 
 This runs as a ``[kernel] archives`` entry: kernel.py runs the archive builders
 between the bootstrap compile pass and the final pass, so patching the source
@@ -46,15 +64,16 @@ INJECT = """	/*
 	 *
 	 * v_baseAddr arrives as a *physical* address and nothing maps it: the
 	 * bootstrap tables only cover [physBase, physBase + memSize), which on this
-	 * board starts at 0x8C0070000, while the panel sits at 0xFC000000.  The
-	 * console created below draws pixels straight through that address, so
-	 * without this the first write faults, the panic path faults again in the
-	 * same place, and the machine stops with nothing on screen.
+	 * board starts at 0x8C0070000 and spans 5 GiB, while the panel sits at
+	 * 0xFC000000.  The console created below draws pixels straight through that
+	 * address, so without this the first write faults, the panic path faults
+	 * again in the same place, and the machine stops with nothing on screen.
 	 *
 	 * PE_init_platform() has already copied boot_args.Video into
 	 * PE_state.video and arm_vm_init() has already built the kernel pmap, so
-	 * both are usable here.  kprintf() is safe this early: printf.c routes it
-	 * to a no-op until PE_init_kprintf() runs.
+	 * both are usable here.  Note that kprintf() is useless at this point:
+	 * PE_create_console() and PE_init_printf() run further down, so anything
+	 * printed here is dropped.  The two painted markers below are the report.
 	 */
 	if ((PE_state.video.v_display != 0) && (PE_state.video.v_baseAddr != 0)) {
 		vm_size_t fb_len = (vm_size_t)PE_state.video.v_rowBytes *
@@ -81,12 +100,50 @@ INJECT = """	/*
 			                               VM_PROT_READ | VM_PROT_WRITE,
 			                               PMAP_MAP_BD_WCOMB);
 
+			{
+				/*
+				 * A string in the binary, so a build can be told apart from
+				 * the v14 one that only ever called kprintf().
+				 */
+				static const char hummer_fb_probe[] __attribute__((used)) =
+				    "hummer: fb mapped at the high window, markers painted";
+				(void)hummer_fb_probe;
+			}
+
+			{
+				volatile unsigned int *px = (volatile unsigned int *)
+				    (fb_va + (fb_pa - fb_page));
+				unsigned long stride = PE_state.video.v_rowBytes >> 2;
+				unsigned long height = PE_state.video.v_height;
+				unsigned long x, y, band;
+
+				if ((stride != 0) && (height > 1)) {
+					/* Corner first: the cheapest proof that the mapping works. */
+					for (y = 0; (y < 64) && (y < height); y++) {
+						volatile unsigned int *row = px + y * stride;
+						for (x = 0; (x < 64) && (x < stride); x++) {
+							row[x] = 0xFFFF00FFu;   /* magenta */
+						}
+					}
+
+					/* Then a band along the bottom, clear of DarwinBoot's bar. */
+					band = height >> 3;
+					if (band == 0) {
+						band = 1;
+					}
+					for (y = height - band; y < height; y++) {
+						volatile unsigned int *row = px + y * stride;
+						for (x = 0; x < stride; x++) {
+							row[x] = 0xFFFF0000u;   /* blue */
+						}
+					}
+
+					__asm__ __volatile__("dsb sy" ::: "memory");
+				}
+			}
+
 			PE_state.video.v_baseAddr = (unsigned long)(fb_va + (fb_pa - fb_page));
 			PE_state.video.v_offset = 0;
-
-			kprintf("hummer: framebuffer %#lx+%#lx mapped at %#lx\\n",
-			        (unsigned long)fb_pa, (unsigned long)fb_len,
-			        (unsigned long)PE_state.video.v_baseAddr);
 		}
 	}
 
@@ -123,14 +180,14 @@ def main():
         fail(f"expected exactly one {ANCHOR.strip()!r} in arm_init.c, found {text.count(ANCHOR)}")
 
     TARGET.write_text(text.replace(ANCHOR, INJECT + ANCHOR))
-    print("hummer-video-map: patched arm_init.c (framebuffer mapped before the console)")
+    print("hummer-video-map: patched arm_init.c (framebuffer mapped, markers painted)")
 
     dropped = drop_object()
     if not dropped:
         # First pass of a cold build has not compiled it yet; nothing to invalidate.
         print("hummer-video-map: no stale object to drop (first pass)")
     else:
-        print(f"hummer-video-map: dropped {', '.join(dropped)}")
+        print(f"hummer-video-map: dropped, {', '.join(dropped)}")
 
     patched = TARGET.read_text()
     if MARKER not in patched:
