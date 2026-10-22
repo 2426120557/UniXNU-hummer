@@ -112,15 +112,62 @@ jobs:
       - name: Build the RAM root image (APFS, raw)
         if: env.KERNEL_BUILT == 'yes'
         run: |
-          set -eux
-          hdiutil create -size 64m -fs APFS -volname System -format UDRW -ov "$RUNNER_TEMP/ram-root.dmg"
-          DEV=$(hdiutil attach -nomount -readonly "$RUNNER_TEMP/ram-root.dmg" | awk 'NR==1{print $1}')
-          echo "attached $DEV"
-          dd if="${DEV/disk/rdisk}" of="$GITHUB_WORKSPACE/ram-root.img" bs=1m
-          hdiutil detach "$DEV" || true
-          ls -la "$GITHUB_WORKSPACE/ram-root.img"
-          # 头一个块里应该能看到 APFS 容器超级块（magic 'NXSB' 在偏移 32）。
-          hexdump -C -n 64 "$GITHUB_WORKSPACE/ram-root.img" || true
+          # 做一个 64 MiB 的 APFS 卷，从 /dev/rdiskN 原样读出来：得到的字节流就是
+          # "设备内容"（没有 DMG 外壳），可以直接当 ramdisk 交给 --data-ramdisk。
+          #
+          # 两个 hdiutil 的坑：
+          #   1) -format 只能配 -srcfolder / -srcdevice；空白镜像（-size N）本身就是
+          #      可写 UDIF，多写一个 -format UDRW 会直接报
+          #      "-format requires -srcfolder or -srcdevice"（v33 第一次就栽在这）。
+          #   2) APFS 不一定能在很小的卷上建出来；建不出来就退回全零镜像 ——
+          #      这一步要拿的那一比特是 "md0 有没有被认成根设备"，与卷里装什么无关。
+          set -ux
+          OUT="$GITHUB_WORKSPACE/ram-root.img"
+          IMG="$RUNNER_TEMP/ram-root.dmg"
+          rm -f "$OUT" "$IMG"
+
+          mkfs=no
+          if hdiutil create -size 64m -fs APFS -volname System -ov "$IMG" > "$RUNNER_TEMP/hdiutil.log" 2>&1; then
+            mkfs=yes
+          else
+            echo "::warning::APFS image creation failed, falling back to zeros"
+            cat "$RUNNER_TEMP/hdiutil.log"
+          fi
+
+          if [ "$mkfs" = yes ]; then
+            DEV=$(hdiutil attach -nomount -readonly "$IMG" | awk 'NR==1{print $1}')
+            echo "attached $DEV"
+            dd if="${DEV/disk/rdisk}" of="$OUT" bs=1m || rm -f "$OUT"
+            hdiutil detach "$DEV" || true
+          fi
+
+          if [ ! -s "$OUT" ]; then
+            echo "fallback: 64 MiB of zeros"
+            dd if=/dev/zero of="$OUT" bs=1m count=64
+          fi
+
+          ls -la "$OUT"
+          echo "--- first 96 bytes ---"
+          hexdump -C -n 96 "$OUT" || true
+
+          # APFS 容器超级块：块内偏移 32 处是 'NXSB'（4e 58 53 42）。
+          magic=$(dd if="$OUT" bs=1 skip=32 count=4 2>/dev/null | xxd -p)
+          echo "bytes[32..36] = ${magic:-?}"
+          if [ "$magic" = "4e585342" ]; then
+            echo "RESULT: APFS container superblock present, filesystem sits at offset 0"
+          else
+            echo "RESULT: no NXSB at offset 32"
+          fi
+
+          # 若有 GPT，说明文件系统不在偏移 0，md0 还需要分区方案才能找到卷。
+          gpt=$(dd if="$OUT" bs=1 skip=512 count=8 2>/dev/null | xxd -p)
+          if [ "$gpt" = "4546492050415254" ]; then
+            echo "RESULT: GPT header at 0x200 -- root fs is NOT at offset 0"
+          else
+            echo "RESULT: no partition map at 0x200"
+          fi
+
+          test -s "$OUT"
 
       # payload：把 kernel.macho + ADT 打成 FAT 卷（boot 镜像的 ramdisk）。
       # 平台种子走 secret，未配则用下面的默认（软件身份种子，非真实机密）。
