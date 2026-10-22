@@ -34,6 +34,7 @@ link pass are already frozen by the time these archive builders run, so the
 renderer lives inside `arm_vm_init.c`, which is already linked.  Its header is
 new, which is free.
 """
+import re
 import sys
 from pathlib import Path
 
@@ -339,30 +340,17 @@ hummer_fb_alias(boot_args *args)
 
 '''
 
-VM_INIT_CALL_SITE = r'''	arm_set_user_tbi();
+VM_INIT_ALIAS_ANCHOR = "\tset_mmu_ttb_alternate(cpu_ttep & TTBR_BADDR_MASK);\n"
 
-	/*
-	 * hummer: install the panel alias in the tables that survive, while
-	 * phystokv() still walks the bootstrap aperture.
-	 */
-	hummer_fb_alias(args);
-
-	arm_vm_physmap_init(args);
-	set_mmu_ttb_alternate(cpu_ttep & TTBR_BADDR_MASK);
-
-	hummer_early_mark(20, "fb alias live, TTBR1 active");
-
-	ml_enable_monitor();
-
-	set_mmu_ttb(invalid_ttep & TTBR_BADDR_MASK);
-
-	flush_mmu_tlb();
-	kva_active = TRUE;
-	// global table pointers may need to be different due to physical aperture remapping
-	cpu_tte = (tt_entry_t*)(phystokv(cpu_ttep));
-	invalid_tte = (tt_entry_t*)(phystokv(invalid_ttep));
-	hummer_early_mark(21, "bootstrap TTBR0 gone");
-'''
+VM_INIT_ALIAS = ("\t/*\n"
+                 "\t * hummer: install the panel alias in the tables that survive,\n"
+                 "\t * while phystokv() still walks the bootstrap aperture.\n"
+                 "\t */\n"
+                 "\thummer_fb_alias(args);\n"
+                 "\n"
+                 "\tset_mmu_ttb_alternate(cpu_ttep & TTBR_BADDR_MASK);\n"
+                 "\n"
+                 "\thummer_early_mark(20, \"fb alias live, TTBR1 active\");\n")
 
 VM_INIT_PMAP = r'''	hummer_early_mark(22, "calling pmap_bootstrap");
 	pmap_bootstrap(dynamic_memory_begin);
@@ -371,36 +359,29 @@ VM_INIT_PMAP = r'''	hummer_early_mark(22, "calling pmap_bootstrap");
 
 # --------------------------------------------------------------------------
 # arm_init.c: the marks around the code that dies
+#
+# Every anchor here is a single line: UniXNU's own XNU patch series already
+# rewrote this neighbourhood (non-apple-cache-monitor.patch wraps
+# ml_enable_monitor() in #if XNU_MONITOR, zzz-boot-progress.patch adds
+# boot_progress_stage() calls around arm_vm_init), so multi-line context does
+# not survive.
 # --------------------------------------------------------------------------
-ARM_INIT_HEAD = r'''	arm_vm_init(xmaxmem, args);
-	hummer_early_mark(15, "arm_vm_init returned");
-'''
+ARM_INIT_MARK15_ANCHOR = "\tarm_vm_init(xmaxmem, args);\n"
+ARM_INIT_MARK15 = "\thummer_early_mark(15, \"arm_vm_init returned\");\n"
 
-ARM_INIT_PATCH_LOW_GLO = r'''	if (debug_boot_arg) {
-		patch_low_glo();
-	}
-	hummer_early_mark(16, "patch_low_glo done");
-'''
+ARM_INIT_DEBUG_ANCHOR = "\tPE_consistent_debug_inherit();\n"
+ARM_INIT_DEBUG = ("\thummer_early_mark(16, \"low_glo / s2r done\");\n"
+                  "\tPE_consistent_debug_inherit();\n"
+                  "\thummer_early_mark(17, \"consistent_debug_inherit done\");\n")
 
-ARM_INIT_SERIAL = r'''	PE_consistent_debug_inherit();
-	hummer_early_mark(17, "consistent_debug_inherit done");
+ARM_INIT_SERIAL_ANCHOR = "\tconst unsigned int serial_exists = serial_init();\n"
+ARM_INIT_SERIAL = ("\thummer_early_mark(18, \"calling serial_init\");\n"
+                   "\tconst unsigned int serial_exists = serial_init();\n"
+                   "\thummer_early_mark(19, \"serial_init returned\");\n")
 
-	/* Setup debugging output. */
-	hummer_early_mark(18, "calling serial_init");
-	const unsigned int serial_exists = serial_init();
-	hummer_early_mark(19, "serial_init returned");
-	kernel_startup_initialize_upto(STARTUP_SUB_KPRINTF);
-	kprintf("kprintf initialized\n");
-	hummer_early_mark(25, "kprintf up");
-'''
-
-ARM_INIT_CONSOLE = r'''	PE_create_console();
-	hummer_early_mark(26, "PE_create_console done");
-
-	/* setup console output */
-	PE_init_printf(FALSE);
-	hummer_early_mark(27, "PE_init_printf done");
-'''
+ARM_INIT_KPRINTF_ANCHOR = '\tkprintf("kprintf initialized\\n");\n'
+ARM_INIT_CONSOLE_ANCHOR = "\tPE_create_console();\n"
+ARM_INIT_PRINTF_ANCHOR = "\tPE_init_printf(FALSE);\n"
 
 # --------------------------------------------------------------------------
 # pe_serial.c: kprintf -> panel
@@ -491,9 +472,32 @@ class Patcher:
         text = self.read(path)
         n = text.count(old)
         if n != 1:
+            self._diagnose(path, old, tag, text, n)
             raise SystemExit(
-                f"hummer-console: {tag}: expected exactly one anchor in {path}, found {n}")
+                f"error: hummer-console: {tag}: expected exactly one anchor in {path}, found {n}")
         self.write(path, text.replace(old, new, 1))
+
+    @staticmethod
+    def _diagnose(path, old, tag, text, n):
+        """Dump the neighbourhood of the anchor so the CI log says what to use.
+
+        Every line is prefixed with "error:" so it survives the workflow's
+        failure-summary grep.
+        """
+        print(f"error: hummer-console: {tag}: {n} match(es) in {path}", flush=True)
+        words = re.findall(r"[A-Za-z_][A-Za-z0-9_]{9,}", old)
+        if not words:
+            return
+        needle = words[0]
+        idx = text.find(needle)
+        if idx < 0:
+            print(f"error: hummer-console: '{needle}' appears nowhere in {path}",
+                  flush=True)
+            return
+        print(f"error: hummer-console: context around first '{needle}':", flush=True)
+        start = text.rfind("\n", 0, max(0, idx - 600))
+        for line in text[start + 1:idx + 800].splitlines():
+            print("error: hummer-console: | " + line, flush=True)
 
     def insert_before(self, path, anchor, block, tag):
         self.swap(path, anchor, block + anchor, tag)
@@ -545,46 +549,31 @@ def main():
     p.insert_before(ARM_VM_INIT,
                     "#define ARM64_PHYSMAP_SLIDE_RANGE (1ULL << 30) // 1 GB\n",
                     VM_INIT_RENDERER, "arm_vm_init renderer")
-    p.swap(ARM_VM_INIT,
-           r'''	arm_set_user_tbi();
-
-	arm_vm_physmap_init(args);
-	set_mmu_ttb_alternate(cpu_ttep & TTBR_BADDR_MASK);
-
-	ml_enable_monitor();
-
-	set_mmu_ttb(invalid_ttep & TTBR_BADDR_MASK);
-
-	flush_mmu_tlb();
-	kva_active = TRUE;
-	// global table pointers may need to be different due to physical aperture remapping
-	cpu_tte = (tt_entry_t*)(phystokv(cpu_ttep));
-	invalid_tte = (tt_entry_t*)(phystokv(invalid_ttep));
-''', VM_INIT_CALL_SITE, "arm_vm_init call site")
+    p.swap(ARM_VM_INIT, VM_INIT_ALIAS_ANCHOR, VM_INIT_ALIAS,
+           "arm_vm_init: alias + mark 20")
+    p.insert_after(ARM_VM_INIT,
+                   "\tinvalid_tte = (tt_entry_t*)(phystokv(invalid_ttep));\n",
+                   "\thummer_early_mark(21, \"bootstrap TTBR0 gone\");\n",
+                   "arm_vm_init: mark 21")
     p.swap(ARM_VM_INIT, "\tpmap_bootstrap(dynamic_memory_begin);\n",
            VM_INIT_PMAP, "pmap_bootstrap mark")
 
     # ---- arm_init.c ----
     p.insert_after(ARM_INIT, "#include <arm64/proc_reg.h>\n",
                    "#include <arm64/hummer_early.h>\n", "arm_init include")
-    p.swap(ARM_INIT, "\tarm_vm_init(xmaxmem, args);\n", ARM_INIT_HEAD,
-           "arm_vm_init return mark")
-    p.swap(ARM_INIT, r'''	if (debug_boot_arg) {
-		patch_low_glo();
-	}
-''', ARM_INIT_PATCH_LOW_GLO, "patch_low_glo mark")
-    p.swap(ARM_INIT, r'''	PE_consistent_debug_inherit();
-
-	/* Setup debugging output. */
-	const unsigned int serial_exists = serial_init();
-	kernel_startup_initialize_upto(STARTUP_SUB_KPRINTF);
-	kprintf("kprintf initialized\n");
-''', ARM_INIT_SERIAL, "serial_init marks")
-    p.swap(ARM_INIT, r'''	PE_create_console();
-
-	/* setup console output */
-	PE_init_printf(FALSE);
-''', ARM_INIT_CONSOLE, "console marks")
+    p.swap(ARM_INIT, ARM_INIT_MARK15_ANCHOR,
+           ARM_INIT_MARK15_ANCHOR + ARM_INIT_MARK15, "mark 15")
+    p.swap(ARM_INIT, ARM_INIT_DEBUG_ANCHOR, ARM_INIT_DEBUG, "marks 16/17")
+    p.swap(ARM_INIT, ARM_INIT_SERIAL_ANCHOR, ARM_INIT_SERIAL, "marks 18/19")
+    p.swap(ARM_INIT, ARM_INIT_KPRINTF_ANCHOR,
+           ARM_INIT_KPRINTF_ANCHOR + "\thummer_early_mark(25, \"kprintf up\");\n",
+           "mark 25")
+    p.swap(ARM_INIT, ARM_INIT_CONSOLE_ANCHOR,
+           ARM_INIT_CONSOLE_ANCHOR + "\thummer_early_mark(26, \"PE_create_console done\");\n",
+           "mark 26")
+    p.swap(ARM_INIT, ARM_INIT_PRINTF_ANCHOR,
+           ARM_INIT_PRINTF_ANCHOR + "\thummer_early_mark(27, \"PE_init_printf done\");\n",
+           "mark 27")
 
     # ---- pe_serial.c ----
     p.insert_after(PE_SERIAL, "#include <arm64/proc_reg.h>\n",
