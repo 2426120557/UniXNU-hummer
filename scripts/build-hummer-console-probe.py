@@ -94,6 +94,9 @@ void hummer_early_attach(uintptr_t va, uint32_t width, uint32_t height,
 /* Draw one character, '\n' and '\r' behave as usual. */
 void hummer_early_putc(char c);
 
+/* Print "<label>=0x<8 hex digits>\n". Nothing happens before attach. */
+void hummer_early_u32x(const char *label, unsigned int value);
+
 /* Print "HUM <stage>: <label>\n". Nothing happens before attach. */
 void hummer_early_mark(unsigned int stage, const char *label);
 
@@ -263,6 +266,27 @@ hummer_early_mark(unsigned int stage, const char *label)
 	hummer_early_putc('\n');
 }
 
+void
+hummer_early_u32x(const char *label, unsigned int value)
+{
+	int hummer_i;
+
+	if (!hummer_ready) {
+		return;
+	}
+	while (*label != '\0') {
+		hummer_early_putc(*label++);
+	}
+	hummer_early_putc('=');
+	hummer_early_putc('0');
+	hummer_early_putc('x');
+	for (hummer_i = 28; hummer_i >= 0; hummer_i -= 4) {
+		unsigned int hummer_nib = (value >> hummer_i) & 0xfu;
+		hummer_early_putc((char)((hummer_nib < 10) ? ('0' + hummer_nib) : ('a' + hummer_nib - 10)));
+	}
+	hummer_early_putc('\n');
+}
+
 /*
  * L2 slot for va, or NULL if the covering L1 entry is not a table (in which
  * case this VA range cannot take a block descriptor at all).
@@ -417,6 +441,7 @@ ARM_INIT_PRINTF_ANCHOR = "\tPE_init_printf(FALSE);\n"
 HUMMER_PROTOS = r'''/* ---- hummer: panel console (renderer lives in arm_vm_init.c) ------------- */
 extern void hummer_early_putc(char c);
 extern void hummer_early_mark(unsigned int stage, const char *label);
+extern void hummer_early_u32x(const char *label, unsigned int value);
 extern int hummer_early_console_ready(void);
 '''
 
@@ -654,6 +679,28 @@ def main():
     # because of this.  Spell the prototypes out instead.
     p.insert_after(ARM_INIT, "#include <arm64/proc_reg.h>\n",
                    HUMMER_PROTOS, "arm_init protos")
+    # v21: print the CPU topology state right where the kernel builds it --
+    # ArmCpu::start panicked because ml_processor_register() returned 5
+    # (KERN_FAILURE), which for the boot CPU means an empty/odd topology_info.
+    p.swap(ARM_INIT, "\tml_parse_cpu_topology();\n",
+           "\tml_parse_cpu_topology();\n"
+           "\t{\n"
+           "\t\tconst ml_topology_info_t *hummer_ti = ml_get_topology_info();\n"
+           "\t\tDTEntry hummer_dt = 0;\n"
+           "\t\thummer_early_u32x(\"topo num_cpus\", hummer_ti->num_cpus);\n"
+           "\t\thummer_early_u32x(\"topo max_cpu_id\", hummer_ti->max_cpu_id);\n"
+           "\t\thummer_early_u32x(\"topo num_clusters\", hummer_ti->num_clusters);\n"
+           "\t\thummer_early_u32x(\"topo boot_cpu?\", hummer_ti->boot_cpu != 0);\n"
+           "\t\thummer_early_u32x(\"dt find /cpus\", (unsigned int)SecureDTLookupEntry(0, \"/cpus\", &hummer_dt));\n"
+           "\t\thummer_early_u32x(\"dt entry\", (unsigned int)(uintptr_t)hummer_dt);\n"
+           "\t}\n",
+           "topology probe")
+    p.swap(ARM_INIT, "\tmaster_cpu = ml_get_boot_cpu_number();\n",
+           "\tmaster_cpu = ml_get_boot_cpu_number();\n"
+           "\thummer_early_u32x(\"master_cpu\", (unsigned int)master_cpu);\n"
+           "\thummer_early_u32x(\"ml max_cpu\", (unsigned int)ml_get_max_cpu_number());\n"
+           "\thummer_early_u32x(\"cpu_number(0)\", (unsigned int)ml_get_cpu_number(0));\n",
+           "topology after master_cpu")
     p.swap(ARM_INIT, ARM_INIT_DEBUG_ANCHOR, ARM_INIT_DEBUG, "marks 16/17")
     p.swap(ARM_INIT, ARM_INIT_SERIAL_ANCHOR, ARM_INIT_SERIAL, "marks 18/19")
     p.swap(ARM_INIT, ARM_INIT_KPRINTF_ANCHOR,
@@ -663,7 +710,8 @@ def main():
            ARM_INIT_CONSOLE_ANCHOR + "\thummer_early_mark(18, \"PE_create_console done\");\n",
            "mark 26")
     p.swap(ARM_INIT, ARM_INIT_PRINTF_ANCHOR,
-           ARM_INIT_PRINTF_ANCHOR + "\thummer_early_mark(19, \"PE_init_printf done\");\n",
+           ARM_INIT_PRINTF_ANCHOR + "\thummer_early_mark(19, \"PE_init_printf done\");\n"
+           + "\thummer_early_u32x(\"late num_cpus\", ml_get_topology_info()->num_cpus);\n",
            "mark 27")
 
     # ---- pe_serial.c ----
