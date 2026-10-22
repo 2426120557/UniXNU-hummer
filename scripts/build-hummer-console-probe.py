@@ -102,6 +102,9 @@ void hummer_early_u32x(const char *label, unsigned int value);
 /* Print "HUM <stage>: <label>\n". Nothing happens before attach. */
 void hummer_early_mark(unsigned int stage, const char *label);
 
+/* Print "<label>=<up to 384 bytes of text>\n". Nothing happens before attach. */
+void hummer_early_prints(const char *label, const char *value);
+
 /* True once hummer_early_attach() succeeded. */
 int hummer_early_console_ready(void);
 
@@ -289,6 +292,28 @@ hummer_early_u32x(const char *label, unsigned int value)
 	hummer_early_putc('\n');
 }
 
+/* v47: the exact command line the loader handed us.  Apple's own AMFI kext
+ * panics with "can't has cs_enforcement_disable", which can only happen when
+ * PE_parse_boot_argn() finds that name -- so print what XNU really sees. */
+void
+hummer_early_prints(const char *label, const char *value)
+{
+	unsigned int hummer_n = 0;
+
+	if (!hummer_ready) {
+		return;
+	}
+	while (*label != '\0') {
+		hummer_early_putc(*label++);
+	}
+	hummer_early_putc('=');
+	while (hummer_n < 384 && *value != '\0') {
+		hummer_early_putc(*value++);
+		hummer_n++;
+	}
+	hummer_early_putc('\n');
+}
+
 /*
  * L2 slot for va, or NULL if the covering L1 entry is not a table (in which
  * case this VA range cannot take a block descriptor at all).
@@ -404,6 +429,8 @@ hummer_fb_alias(boot_args *args)
 	__asm__ volatile("dsb ish\n\tisb" ::: "memory");
 	hummer_early_attach((uintptr_t)(first + (fb - base)), (uint32_t)width,
 	    (uint32_t)height, (uint32_t)stride, blocks * ARM_TT_L2_SIZE);
+	/* v47: console is up now, so this is the first place we can echo it. */
+	hummer_early_prints("cmdline", (const char *)args->CommandLine);
 }
 
 '''
