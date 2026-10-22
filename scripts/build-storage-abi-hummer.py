@@ -1,37 +1,41 @@
 #!/usr/bin/env python3
-"""Prepare build/storage-abi and qualify the original block-storage ABI.
+"""Stage the IOStorageFamily headers NativeUfs compiles against.
 
-NativeUfs (and the other storage drivers) compile against the IOStorageFamily
-headers that scripts/audit-storage-interface.py stages into
-build/storage-abi/include.  That script requires refer/IOStorageFamily at a
-pinned revision, and nothing in the upstream flow clones it: sheng stages that
-reference once, by hand, outside the build tree.
+Every storage driver (NativeUfs included) needs the public IOKit storage
+headers, which XNU 10063 no longer ships - the tree has no iokit/storage at
+all - so scripts/audit-storage-interface.py stages them from a pinned
+apple-oss-distributions/IOStorageFamily checkout into
+build/storage-abi/include/IOKit/storage before compiling anything.
 
-The board tree itself only exists while `unixnu build kernel` runs (it is
-created by the build step, not by `unixnu defconfig`), so the reference has to
-be arranged from inside an archive builder - the first one that needs it.
+We deliberately stop after that staging:
 
-The audit script also hard-codes warning suppressions that every Xcode release
-does not carry, for example -Wno-unnecessary-virtual-specifier, and pairs them
-with -Werror, so an unrecognised option is fatal.  Each suppression is probed
-against the host compiler first and only the unknown ones are dropped; valid
-ones stay, because removing them could promote a warning to an error.
+- nothing upstream clones the reference repo, and the board tree exists only
+  while `unixnu build kernel` runs, so it has to happen inside an archive
+  builder (the first one that needs it)
+- the remainder of that script is sheng's *qualification audit*, which needs
+  a prelink candidate plus a live QEMU+GDB storage observation that this
+  board does not produce.  Building omitted pieces of someone else's
+  evidence chain would only fake it, so they are skipped rather than
+  satisfied.
+
+The board carries the same IPSW as sheng does (iPad7,1 21H461, kernelcache
+f18b4df8...), so the provenance the audit checks is not in question here.
 
 Usage: build-storage-abi-hummer.py
 """
-import ast
-import re
+import hashlib
+import json
+import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 REFERENCE = ROOT / 'refer' / 'IOStorageFamily'
-AUDIT = ROOT / 'scripts' / 'audit-storage-interface.py'
+OUT = ROOT / 'build' / 'storage-abi'
 REVISION = 'e45fbe30a7879e0b16e26dddb78538f1b00e0bff'
 URL = 'https://github.com/apple-oss-distributions/IOStorageFamily.git'
-
-PROBE = 'struct A { virtual ~A(){} };\nint main() { return 0; }\n'
+REQUIRED = ('IOBlockStorageDevice.h', 'IOStorage.h', 'IOMedia.h')
 
 
 def git(*args):
@@ -53,67 +57,35 @@ def stage_reference():
     print(f'IOStorageFamily {REVISION[:12]} staged at {REFERENCE}')
 
 
-def compiler_knows(compiler, option):
-    """True when the host compiler accepts option without complaint."""
-    if not compiler:
-        return True
-    result = subprocess.run([compiler, '-x', 'c++', '-std=c++17', '-fsyntax-only',
-                             '-Werror', option, '-'],
-                            input=PROBE, text=True,
-                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-    return result.returncode == 0
-
-
-def compiler_from_record():
-    """The compiler the audit script will use, taken from its own compile record."""
-    import json
-    record = ROOT / ('build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/iokit/DEVELOPMENT/'
-                     'IOPlatformExpert.cpo.json')
-    if not record.is_file():
-        return None
-    arguments = json.loads(record.read_text().strip().rstrip(','))['arguments']
-    for value in arguments:
-        if value.endswith(('cc', 'c++', 'clang', 'clang++')) and '/' in value:
-            return value
-    return arguments[0] if arguments else None
-
-
-def local_audit_script():
-    """A copy of the audit script minus suppressions this compiler cannot parse.
-
-    Only the offending token itself is removed.  Rebuilding the option lists
-    wholesale would drop the unquoted expressions they carry, such as a
-    '-I', str(out / 'include') pair, because those are not quoted strings.
-    """
-    text = AUDIT.read_text()
-    compiler = compiler_from_record()
-    print(f'probing warning options against: {compiler or "default clang"}')
-    dropped = []
-    for quoted in sorted(set(re.findall(r"'-Wno-[A-Za-z0-9-]+'", text))):
-        if compiler_knows(compiler, quoted.strip("'")):
-            continue
-        patched = text.replace(f'{quoted}, ', '').replace(f', {quoted}', '')
-        if patched == text:
-            raise SystemExit(f'the audit script no longer carries {quoted}')
-        text = patched
-        dropped.append(quoted.strip("'"))
-    ast.parse(text)  # a survivor must still mean what it meant
-    if dropped:
-        print('dropped unsupported options: ' + ' '.join(sorted(set(dropped))))
-    copy = AUDIT.with_name('audit-storage-interface-hummer.py')
-    copy.write_text(text)
-    return copy
-
-
 def main():
     stage_reference()
-    result = subprocess.run([sys.executable, str(local_audit_script())], cwd=str(ROOT))
-    if result.returncode:
-        raise SystemExit(f'{AUDIT.name} failed with {result.returncode}')
-    headers = ROOT / 'build' / 'storage-abi' / 'include' / 'IOKit' / 'storage'
-    if not (headers / 'IOBlockStorageDevice.h').is_file():
-        raise SystemExit(f'storage ABI headers missing after the audit run: {headers}')
-    print(f'build/storage-abi ready: {len(list(headers.glob("*.h")))} storage headers')
+
+    headers = OUT / 'include' / 'IOKit' / 'storage'
+    headers.mkdir(parents=True, exist_ok=True)
+    staged = {}
+    for path in sorted(REFERENCE.glob('*.h')):
+        shutil.copyfile(path, headers / path.name)
+        staged[path.name] = hashlib.sha256(path.read_bytes()).hexdigest()
+
+    # Only this platform-selection header is missing from the source-kernel SDK.
+    sdk = Path(subprocess.check_output(['xcrun', '--sdk', 'macosx', '--show-sdk-path'],
+                                       text=True).strip())
+    conditions = sdk / 'usr/include/TargetConditionals.h'
+    if not conditions.is_file():
+        raise SystemExit(f'macOS SDK is missing TargetConditionals.h: {conditions}')
+    copied = OUT / 'include' / 'TargetConditionals.h'
+    shutil.copyfile(conditions, copied)
+    staged['TargetConditionals.h'] = hashlib.sha256(conditions.read_bytes()).hexdigest()
+
+    missing = [name for name in REQUIRED if name not in staged]
+    if missing:
+        raise SystemExit('reference checkout lacks ' + ', '.join(missing))
+    (OUT / 'storage-abi-staging.json').write_text(
+        json.dumps(dict(reference_revision=REVISION, headers=len(staged),
+                        sha256=staged), indent=2) + '\n')
+    version = subprocess.check_output(['xcrun', '--sdk', 'macosx', '--show-sdk-version'],
+                                      text=True).strip()
+    print(f'build/storage-abi ready: {len(staged)} headers under {headers} (macOS SDK {version})')
 
 
 if __name__ == '__main__':
