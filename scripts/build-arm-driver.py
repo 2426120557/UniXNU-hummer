@@ -83,18 +83,20 @@ if component == 'NativeUfs':
     # GccUfs.h in the submodule carries SM8550 offsets.  SM8750 moves every UFS PHY
     # branch register after the AXI branch up by 4 bytes, and the SM8550 AHB offset
     # (0x77024) is a reserved word there: the probe read 0, decided the AHB branch was
-    # gated, and never touched the host controller.  package/HummerGccUfs.h holds the
-    # gcc-sm8750.c facts and wins by defining the submodule's own include guard ahead
-    # of it.  -include is the only mechanism that works here: NativeUfs.cpp quotes the
-    # include, so the including file's directory always beats any -I.
+    # gated, and never touched the host controller.  kits/hummer/HummerGccUfs.h (staged
+    # from package/) holds the gcc-sm8750.c facts and wins by defining the submodule's
+    # own include guard ahead of it.  -include is the only mechanism that works here:
+    # NativeUfs.cpp quote-includes GccUfs.h, so the including file's directory always
+    # beats any -I.
     gcc_ufs = ROOT / 'drivers/NativeUfs/GccUfs.h'
-    override = ROOT / 'package/HummerGccUfs.h'
+    # package/ maps to kits/hummer in the assembled tree (board.toml kit = "hummer").
+    override = ROOT / 'kits/hummer/HummerGccUfs.h'
     if not gcc_ufs.exists():
         raise SystemExit(f'{gcc_ufs} is missing; the SM8750 UFS override has nothing to shadow')
     if '#ifndef NATIVE_UFS_GCC_UFS_H' not in gcc_ufs.read_text():
         raise SystemExit(f'{gcc_ufs} no longer uses NATIVE_UFS_GCC_UFS_H as its guard, so the SM8750 override would be shadowed')
     if not override.exists():
-        raise SystemExit(f'{override} is missing')
+        raise SystemExit(f'{override} is missing: package/HummerGccUfs.h did not map to kits/hummer')
     command += ['-include', str(override)]
 if component=='NativeOfflineGPU':
     command += ['-I',str(ROOT/'drivers/NativeVirtioConsole')]
