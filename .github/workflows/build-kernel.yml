@@ -514,13 +514,15 @@ jobs:
       # 7416ca4f… 那个 bundle —— 下面直接断言，不一致就判失败，不让镜像白刷。
       - name: Build the original trust cache bundle
         if: env.KERNEL_BUILT == 'yes'
+        working-directory: UniXNU
         run: |
-          ./unixnu ipsw fetch StaticTrustCache Cryptex1,SystemTrustCache 2>&1 | tail -20
+          ./unixnu ipsw fetch -D "$GITHUB_WORKSPACE" StaticTrustCache Cryptex1,SystemTrustCache 2>&1 | tail -20
           python3 - <<'PY'
-          import hashlib, json, struct, sys
+          import hashlib, json, os, struct, sys
           from pathlib import Path
 
-          cache = Path("UniXNU/out/ipsw/21H461")
+          workspace = Path(os.environ["GITHUB_WORKSPACE"])
+          cache = workspace / "UniXNU/out/ipsw/21H461"
           comps = {}
           for rec in sorted(cache.glob("*.json")):
               d = json.loads(rec.read_text())
@@ -562,6 +564,7 @@ jobs:
               ok = ver == 2 and len(body) == 24 + cnt * 24
               print("  %-26s raw=%d body=%d version=%d entries=%d %s"
                     % (component, len(raw), len(body), ver, cnt, "OK" if ok else "BAD"))
+              print("  %-26s sha256 %s" % ("", hashlib.sha256(body).hexdigest()))
               if not ok:
                   raise SystemExit("%s is not a complete version-2 trust module" % component)
               return body
@@ -569,7 +572,7 @@ jobs:
           static = module("StaticTrustCache")
           system = module("Cryptex1,SystemTrustCache")
           bundle = struct.pack("<3I", 2, 12, 12 + len(static)) + static + system
-          out = Path("trustcache.bundle")
+          out = workspace / "trustcache.bundle"
           out.write_bytes(bundle)
           digest = hashlib.sha256(bundle).hexdigest()
           print("bundle %d bytes, sha256 %s" % (len(bundle), digest))
