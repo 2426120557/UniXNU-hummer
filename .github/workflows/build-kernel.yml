@@ -18,11 +18,23 @@ jobs:
       - name: Checkout device repo
         uses: actions/checkout@v4
 
+      # 固定在 b6ae99c（2026-10-21 20:44），不跟 main。
+      #
+      # main 的 e95b37d（2026-10-22 08:17，"update NativeAdreno ..."）把
+      # patches/xnu/zzy-native-gpu-addon-mount.patch 里
+      # `#define BINDM_FORCE_ROOT 0x80000000ULL` 那一行弄丢了，但
+      # bind_vfsops.c 里对它的一次使用还在 —— 于是 bsd/miscfs/bindfs 编不过：
+      #
+      #   bind_vfsops.c:237:23: error: use of undeclared identifier 'BINDM_FORCE_ROOT'
+      #
+      # 同一个 commit 还把三条子模块 gitlink 挪到了远端已经不提供的 commit 上。
+      # b6ae99c 两者都正常。上游修好之后把 ref 换回 main 即可。
       - name: Checkout UniXNU
         uses: actions/checkout@v4
         with:
           repository: UniXNU/UniXNU
           path: UniXNU
+          ref: b6ae99c17194e6a18fd819d3148e69fe405e91fc
 
       # 不要用 submodules: recursive —— UniXNU 的 main 里常有 gitlink 指向远端
       # 已经删掉的 commit（上游 force-push），递归 checkout 撞到第一个就整体失败。
