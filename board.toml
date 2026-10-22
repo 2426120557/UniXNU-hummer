@@ -181,7 +181,14 @@ kernel_args = [
 [payload.adt]
 tool = "scripts/make-hummer-adt.py"
 chip_id = "207"                    # 软件身份种子（非 Apple silicon ID），沿用 sheng 约定
-owned_memory_size = "0x130000000"  # DarwinBoot 连续窗口 256MiB..8GiB，2MiB 对齐
+owned_memory_size = "0x40000000"   # DarwinBoot 连续窗口 256MiB..8GiB，2MiB 对齐。
+# 上限由 XNU 的 bootstrap 页表决定，不是由 DTB 或面板决定：
+# BOOTSTRAP_TABLE_SIZE 在 iOS 构建下是 8 页（makedefs/MakeInc.def 对非 MacOSX
+# 平台传 -UARM_LARGE_MEMORY），而 create_bootstrap_mapping 每 1 GiB 就要一页 L2，
+# V=P 和 KVA 各一套，再加两个 L1。原来的 0x130000000 (4.75GiB) 需要 12 页，
+# 写穿 8 页数组，溢出落在 bootstrap_pagetables 之后的数据上，内核在
+# start.s 里就死了 —— 表现就是入口探针画出来、arm_init 的标记一个没有。
+# 1 GiB 只需 6 页，留 2 页余量。要更大窗口必须改用 ARM_LARGE_MEMORY 构建。
 cpu_regs = "0,0x100,0x200,0x300,0x400,0x500,0x10000,0x10100"   # 6 性能核 + 2 Oryon 大核
 psci_method = "smc"
 packed_data_ramdisk = false
