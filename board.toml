@@ -70,7 +70,11 @@ archives = [
   # NativeUfs 编出 build/native-ufs/libNativeUfs.a，baseline.sh 在
   # XNU_NATIVE_UFS=1 时 force_load 进内核（KernelConfigTables 的
   # NativeUfsRoot personality 也随之编入）。
-  "audit-storage-interface.py",
+  # build-storage-abi-hummer.py 是我们的包装器： nothing upstream clones
+  # refer/IOStorageFamily, and the board tree only exists while `unixnu build
+  # kernel` runs (not after `defconfig`), so the ABI headers are staged from
+  # inside an archive builder; it then runs上游 audit-storage-interface.py。
+  "build-storage-abi-hummer.py",
   "build-arm-driver.py NativeUfs",
   # 注意：所有构建器都在 macOS 上跑（kernel.py 硬性要求 xcodebuild + iphoneos SDK）。
   #
