@@ -105,13 +105,33 @@ jobs:
             echo "kernel.macho not produced; see logs"
           fi
 
+      # v33：运存根探针镜像。做一个 64 MiB 的 APFS 卷，从 /dev/rdiskN 原样读出来，
+      # 去掉 DMG 外壳，得到一个"设备内容"字节流，正好能当 ramdisk 用。
+      # 为什么不是 zeros 而是真 APFS：zeros 只能证明 md0 被注册；真 APFS 还能顺带
+      # 验证 APFS kext 会不会认它当根，一次刷机能多拿一层信息。
+      - name: Build the RAM root image (APFS, raw)
+        if: env.KERNEL_BUILT == 'yes'
+        run: |
+          set -eux
+          hdiutil create -size 64m -fs APFS -volname System -format UDRW -ov "$RUNNER_TEMP/ram-root.dmg"
+          DEV=$(hdiutil attach -nomount -readonly "$RUNNER_TEMP/ram-root.dmg" | awk 'NR==1{print $1}')
+          echo "attached $DEV"
+          dd if="${DEV/disk/rdisk}" of="$GITHUB_WORKSPACE/ram-root.img" bs=1m
+          hdiutil detach "$DEV" || true
+          ls -la "$GITHUB_WORKSPACE/ram-root.img"
+          # 头一个块里应该能看到 APFS 容器超级块（magic 'NXSB' 在偏移 32）。
+          hexdump -C -n 64 "$GITHUB_WORKSPACE/ram-root.img" || true
+
       # payload：把 kernel.macho + ADT 打成 FAT 卷（boot 镜像的 ramdisk）。
       # 平台种子走 secret，未配则用下面的默认（软件身份种子，非真实机密）。
+      # --data-ramdisk 让它进 Payloads/scratch-data.img，并在 ADT 里生成
+      # /chosen/memory-map/RAMDisk 占位符；DarwinBoot 启动时把文件拷进内核窗口
+      # 并回填 {phys,size}，内核再 mdevadd 成 /dev/md0。
       - name: Build payload
         if: env.KERNEL_BUILT == 'yes'
         env:
           UNIXNU_UNIQUE_CHIP_ID: ${{ secrets.UNIXNU_UNIQUE_CHIP_ID || '0x38d960c942ad2137' }}
-        run: ./unixnu build payload -D "$GITHUB_WORKSPACE" 2>&1 | tee "$GITHUB_WORKSPACE/payload.log"
+        run: ./unixnu build payload -D "$GITHUB_WORKSPACE" --data-ramdisk "$GITHUB_WORKSPACE/ram-root.img" 2>&1 | tee "$GITHUB_WORKSPACE/payload.log"
         working-directory: UniXNU
 
       - name: Show build log tail

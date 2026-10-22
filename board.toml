@@ -228,11 +228,27 @@ panic_screen = false
 #   内核就从视频控制台切走，屏幕上彻底没有输出。首启必须 0。
 # cpus=1：只拉起 MPIDR 0 的启动核，避免 GIC/定时器没配好时次要核把启动线程搅死
 #   （ADT 里 cpu0 是 running、cpu1.. 是 waiting，两者要一致）。
+#
+# —— v33：把根放进运存（rd=md0）——
+# 用户不能动 userdata（ColorOS 的数据要留着），所以根不能再指望磁盘。XNU 自带的
+# 内存盘路径正好够用，三段都是现成的：
+#   1. payload 的 initrd 文件（DarwinBoot 拷进内核窗口）；
+#   2. ADT 的 /chosen/memory-map/RAMDisk 占位符（DarwinBoot 填 {phys,size}）；
+#   3. IOKitBSDInit.cpp 看到 RAMDisk 就 mdevadd() 出 /dev/md0，然后 rd=md0 就选它当根。
+# 全链路只读，不写任何分区。
+#
+# 容量上限（决定了"全量根进不来"）：
+#   - DarwinBoot 的连续窗口由 [payload.adt] owned_memory_size = 0x40000000（1 GiB）钉住；
+#     再大要改用 ARM_LARGE_MEMORY 编译（bootstrap 页表现在只有 8 页，见下面的注释）；
+#   - payload 卷 192 MiB，ramdisk 得先装进这个 FAT 卷；
+#   - ABL 要整块把 boot.img 装进 RAM，现在是 12 MB 量级。
+# 所以运存里能放的是"小根"（这里先放 64 MiB 的 APFS 卷），不是 7.88 GiB 的 iPadOS 全量根。
 kernel_args = [
   "-v",
   "serial=0",
   "debug=0x14e",
-  "cpus=1",
+  "cpus=8",
+  "rd=md0",
 ]
 
 [payload.adt]
