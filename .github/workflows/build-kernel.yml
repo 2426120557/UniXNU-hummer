@@ -111,46 +111,61 @@ jobs:
       # 上一轮只打了 feeds 那份，源码确实改了 5 处，但编出来的内核 __TEXT_EXEC
       # 与上一版**逐字节相同**、连 nonSLRW 字符串都没有 —— 白刷一次。
       # 所以这里对 out/ 下所有同名文件全打一遍，再在构建后用二进制校验兜底。
-      - name: Patch XNU rwlock panic for diagnostics
+      - name: Patch XNU diagnostics (rwlock panic + trust cache init)
         run: |
           python3 - <<'PY'
           import os, re, sys, pathlib
 
-          targets = [p for p in pathlib.Path("UniXNU/out").rglob("lock_rw.c")
-                     if p.parts[-2:] == ("kern", "lock_rw.c")]
-          if not targets:
-              print("::error::no osfmk/kern/lock_rw.c under UniXNU/out -- cannot patch")
-              sys.exit(1)
+          RULES = {
+              "osfmk/kern/lock_rw.c": [(
+                  re.compile(r'panic\(\s*"Taking non-sleepable RW lock with preemption enabled[^"]*"'
+                             r'(?:\s*,\s*__FILE__\s*,\s*__LINE__)?\s*\);'),
+                  'panic("nonSLRW lock=%p caller=%p w=%llx,%llx,%llx,%llx,%llx,%llx,%llx,%llx", '
+                  '(void *)lock, __builtin_return_address(0), '
+                  '(unsigned long long)((uint64_t *)lock)[0], '
+                  '(unsigned long long)((uint64_t *)lock)[1], '
+                  '(unsigned long long)((uint64_t *)lock)[2], '
+                  '(unsigned long long)((uint64_t *)lock)[3], '
+                  '(unsigned long long)((uint64_t *)lock)[4], '
+                  '(unsigned long long)((uint64_t *)lock)[5], '
+                  '(unsigned long long)((uint64_t *)lock)[6], '
+                  '(unsigned long long)((uint64_t *)lock)[7]);'),
+              ],
+              # v43：把 trust_cache_runtime_init() 的两条“接口不可用”panic
+              # 改成带实参的版本。开了 XNU_TRUST_CACHE_RUNTIME=1 之后，
+              # 这一行就是下一个墙的准确读数（img4if / amfi 到底是不是 NULL）。
+              "bsd/kern/kern_trustcache.c": [
+                  (re.compile(r'panic\(\s*"image4 interface not available"\s*\);'),
+                   'panic("HTC img4if=%p", (void *)img4if);'),
+                  (re.compile(r'panic\(\s*"amfi interface not available"\s*\);'),
+                   'panic("HTC amfi=%p", (void *)amfi);'),
+              ],
+          }
 
-          pat = re.compile(
-              r'panic\(\s*"Taking non-sleepable RW lock with preemption enabled[^"]*"'
-              r'(?:\s*,\s*__FILE__\s*,\s*__LINE__)?\s*\);')
-          NEW = (
-              'panic("nonSLRW lock=%p caller=%p w=%llx,%llx,%llx,%llx,%llx,%llx,%llx,%llx", '
-              '(void *)lock, __builtin_return_address(0), '
-              '(unsigned long long)((uint64_t *)lock)[0], '
-              '(unsigned long long)((uint64_t *)lock)[1], '
-              '(unsigned long long)((uint64_t *)lock)[2], '
-              '(unsigned long long)((uint64_t *)lock)[3], '
-              '(unsigned long long)((uint64_t *)lock)[4], '
-              '(unsigned long long)((uint64_t *)lock)[5], '
-              '(unsigned long long)((uint64_t *)lock)[6], '
-              '(unsigned long long)((uint64_t *)lock)[7]);')
-
+          root = pathlib.Path("UniXNU/out")
           total = 0
-          for target in targets:
-              src = target.read_text()
-              new, n = pat.subn(NEW, src)
-              print("patching %s (%d bytes): %d site(s)" % (target, len(src), n))
-              if n:
-                  target.write_text(new)
-                  total += n
-                  for i, ln in enumerate(new.splitlines(), 1):
-                      if "nonSLRW" in ln:
-                          print("    %d: %s" % (i, ln.strip()[:130]))
+          hits = 0
+          for src_rel, rules in RULES.items():
+              base = pathlib.Path(src_rel).name
+              targets = [p for p in root.rglob(base) if p.parts[-2:] == pathlib.Path(src_rel).parts[-2:]]
+              print("%s: %d candidate(s)" % (src_rel, len(targets)))
+              for target in targets:
+                  hits += 1
+                  text = target.read_text()
+                  n_all = 0
+                  for pat, new in rules:
+                      text, n = pat.subn(new, text)
+                      n_all += n
+                  if n_all:
+                      target.write_text(text)
+                      total += n_all
+                      print("  patched %s : %d site(s)" % (target, n_all))
           print("total patched sites:", total)
+          if hits == 0:
+              print("::error::no xnu source under UniXNU/out -- cannot patch")
+              sys.exit(1)
           if total == 0:
-              print("::error::panic string not matched anywhere -- xnu source layout changed")
+              print("::error::no diagnostic patch applied -- xnu source layout changed")
               sys.exit(1)
           PY
 
@@ -172,56 +187,71 @@ jobs:
           import glob, os, re, sys, time, pathlib
 
           ROOT = os.path.join(os.environ["GITHUB_WORKSPACE"], "UniXNU", "out")
-          pat = re.compile(
-              r'panic\(\s*"Taking non-sleepable RW lock with preemption enabled[^"]*"'
-              r'(?:\s*,\s*__FILE__\s*,\s*__LINE__)?\s*\);')
-          NEW = (
-              'panic("nonSLRW lock=%p caller=%p w=%llx,%llx,%llx,%llx,%llx,%llx,%llx,%llx", '
-              '(void *)lock, __builtin_return_address(0), '
-              '(unsigned long long)((uint64_t *)lock)[0], '
-              '(unsigned long long)((uint64_t *)lock)[1], '
-              '(unsigned long long)((uint64_t *)lock)[2], '
-              '(unsigned long long)((uint64_t *)lock)[3], '
-              '(unsigned long long)((uint64_t *)lock)[4], '
-              '(unsigned long long)((uint64_t *)lock)[5], '
-              '(unsigned long long)((uint64_t *)lock)[6], '
-              '(unsigned long long)((uint64_t *)lock)[7]);')
 
-          def candidates():
+          RULES = {
+              "osfmk/kern/lock_rw.c": [(
+                  re.compile(r'panic\(\s*"Taking non-sleepable RW lock with preemption enabled[^"]*"'
+                             r'(?:\s*,\s*__FILE__\s*,\s*__LINE__)?\s*\);'),
+                  'panic("nonSLRW lock=%p caller=%p w=%llx,%llx,%llx,%llx,%llx,%llx,%llx,%llx", '
+                  '(void *)lock, __builtin_return_address(0), '
+                  '(unsigned long long)((uint64_t *)lock)[0], '
+                  '(unsigned long long)((uint64_t *)lock)[1], '
+                  '(unsigned long long)((uint64_t *)lock)[2], '
+                  '(unsigned long long)((uint64_t *)lock)[3], '
+                  '(unsigned long long)((uint64_t *)lock)[4], '
+                  '(unsigned long long)((uint64_t *)lock)[5], '
+                  '(unsigned long long)((uint64_t *)lock)[6], '
+                  '(unsigned long long)((uint64_t *)lock)[7]);'),
+              ],
+              "bsd/kern/kern_trustcache.c": [
+                  (re.compile(r'panic\(\s*"image4 interface not available"\s*\);'),
+                   'panic("HTC img4if=%p", (void *)img4if);'),
+                  (re.compile(r'panic\(\s*"amfi interface not available"\s*\);'),
+                   'panic("HTC amfi=%p", (void *)amfi);'),
+              ],
+          }
+
+          def roots():
               out = []
               cache = os.path.join(ROOT, "hummer", "tree", ".cache")
               try:
                   for d in os.listdir(cache):
-                      out.append(os.path.join(cache, d, "osfmk", "kern", "lock_rw.c"))
+                      out.append(os.path.join(cache, d))
               except OSError:
                   pass
-              out.append(os.path.join(ROOT, "hummer", "tree", "osfmk", "kern", "lock_rw.c"))
+              out.append(os.path.join(ROOT, "hummer", "tree"))
               try:
                   for d in os.listdir(os.path.join(ROOT, "feeds")):
-                      out.append(os.path.join(ROOT, "feeds", d, "osfmk", "kern", "lock_rw.c"))
+                      out.append(os.path.join(ROOT, "feeds", d))
               except OSError:
                   pass
-              out += glob.glob(os.path.join(ROOT, "*", "*", "*", "osfmk", "kern", "lock_rw.c"))
-              out += glob.glob(os.path.join(ROOT, "*", "*", "*", "*", "osfmk", "kern", "lock_rw.c"))
+              out += glob.glob(os.path.join(ROOT, "*", "*", "*"))
+              out += glob.glob(os.path.join(ROOT, "*", "*", "*", "*"))
               return out
 
           deadline = time.time() + 3000
           seen = set()
           total = 0
           while time.time() < deadline:
-              for p in candidates():
-                  if not os.path.exists(p) or p in seen:
-                      continue
-                  try:
-                      src = pathlib.Path(p).read_text()
-                  except OSError:
-                      continue
-                  new, n = pat.subn(NEW, src)
-                  if n:
-                      pathlib.Path(p).write_text(new)
-                      seen.add(p)
-                      total += n
-                      print("[%6.1fs] patched %s : %d site(s)" % (time.time() % 10000, p, n), flush=True)
+              for rel, rules in RULES.items():
+                  for base in roots():
+                      p = os.path.join(base, rel)
+                      if p in seen or not os.path.exists(p):
+                          continue
+                      try:
+                          src = pathlib.Path(p).read_text()
+                      except OSError:
+                          continue
+                      new = src
+                      n_all = 0
+                      for pat, repl in rules:
+                          new, n = pat.subn(repl, new)
+                          n_all += n
+                      if n_all:
+                          pathlib.Path(p).write_text(new)
+                          seen.add(p)
+                          total += n_all
+                          print("[%6.1fs] patched %s : %d site(s)" % (time.time() % 10000, p, n_all), flush=True)
               time.sleep(1)
           print("patcher finished, total sites:", total, flush=True)
           PY
@@ -262,11 +292,27 @@ jobs:
           d = open(p, "rb").read()
           n = d.count(b"nonSLRW lock=%p caller=%p w=")
           old = d.count(b"Taking non-sleepable RW lock with preemption enabled")
+          tc = d.count(b"HTC img4if=%p")
+          tca = d.count(b"HTC amfi=%p")
+          # v43 的开关本身也要落到二进制里：trust_cache_runtime_init() 一旦被
+          # 编进去，它的 log 串 "trust_cache_init" 就会出现；没出现说明
+          # CONFIG_XNU_TRUST_CACHE_RUNTIME 没生效（那就是又一次白刷）。
+          tci = d.count(b"trust_cache_init")
           print("kernel.macho %d bytes" % len(d))
-          print("  nonSLRW  x%d   (must be >= 1)" % n)
-          print("  old text x%d" % old)
+          print("  nonSLRW     x%d   (must be >= 1)" % n)
+          print("  old text    x%d" % old)
+          print("  HTC img4if  x%d   (must be >= 1)" % tc)
+          print("  HTC amfi    x%d" % tca)
+          print("  trust_cache_init x%d (must be >= 1 when v43 knob is on)" % tci)
           if n < 1:
               print("::error::the lock diagnostic patch did not reach the kernel binary")
+              sys.exit(1)
+          if tc < 1:
+              print("::error::the trust-cache diagnostic patch did not reach the kernel binary")
+              sys.exit(1)
+          if tci < 1:
+              print("::error::CONFIG_XNU_TRUST_CACHE_RUNTIME did not take effect -- "
+                    "startup.c still compiles the trust_cache block out")
               sys.exit(1)
           PY
 

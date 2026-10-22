@@ -21,6 +21,21 @@ CONFIG_XNU_SHENG_PMGR=y
 
 CONFIG_XNU_CRYPTO_BOOTSTRAP="prelinked"
 
+# —— v43：信任缓存运行时（反推自 v42 真机 panic）——
+# v42 的 panic 已定位到字节：lock=0xfffffff007aeef58 就是内核符号
+# _trust_cache_rt_lock，caller=0xfffffff007716bc8 = _query_trust_cache+0x78
+# （反汇编 0xfffffff007716ba8：adrp/add 出 0xfffffff007aeef58，紧接着
+#  bl 0xfffffff00728de5c = lck_rw_lock_shared），锁前 24 字节全 0，即 can_sleep=0。
+# 根因：startup.c 里 trust_cache_runtime_init() 整段被 #ifndef BCM2837 挡掉
+# （本机 config 名就是 BCM2837），而 patches/xnu/native-trust-cache-runtime.patch
+# 只在 XNU_NATIVE_TRUST_CACHE=1 时放行。证据（对本轮 kernel.macho 实测）：
+#   - 字符串 "trust_cache_init" 出现 0 次 → 整段没编进去
+#   - _trust_cache_runtime_init 的调用者 0 个 → 扫完整个 8MiB __TEXT_EXEC
+#   - 函数体本身在，结尾是 b _lck_rw_init(&lock, &grp, 0)
+# 于是这把锁永远没人初始化，pmap 的 CS 校验查信任缓存时按“不可睡眠自旋锁”抢，
+# 而抢占是开着的 → panic。参考 UniXNU-sheng 的同名键也是 =y（它那套能进用户态）。
+CONFIG_XNU_TRUST_CACHE_RUNTIME=y
+
 # panic 区域从设备树 /chosen 读（embedded-panic-log-size + 对应 reg），
 # 而不是用 BCM2837 的硬编码地址 —— 那个地址在本机没有映射，panic 时写进去会
 # 二次异常，屏幕永远什么都看不到（参考 13T 的 oneplus13t_defconfig 原话：
