@@ -38,7 +38,8 @@ Two constraints this file has to respect, both learned the hard way:
 * Nothing may be added to `osfmk/conf/files.arm64` -- the object lists for the
   final link pass are frozen by the time these archive builders run, so the
   renderer lives inside `arm_vm_init.c`, which is already linked.  Its header
-  is new, which is free.
+  is new, which is free -- but only for arm_vm_init.c: files outside osfmk/
+  resolve <arm64/...> against EXPORT_HDRS, so they get inline prototypes.
 * Every anchor must sit *outside* the context of every UniXNU patch hunk.
   `build-xnu-4k-baseline.sh` re-runs `git apply --reverse --check` on each
   pass, so an insertion inside a hunk's context makes the check fail (the
@@ -72,8 +73,10 @@ HEADER = r'''/*
  * bootstrap translation tables gone.
  *
  * The alias and the renderer both live in osfmk/arm64/arm_vm_init.c (that
- * object is already in the link list); this header is only the contract other
- * files compile against.
+ * object is already in the link list).  arm_init.c and pe_serial.c spell the
+ * prototypes out inline instead of including this header: a new header only
+ * reaches EXPORT_HDRS if osfmk/arm64/Makefile lists it, and pe_serial.c
+ * resolves <arm64/...> exclusively against EXPORT_HDRS.
  */
 #ifndef _ARM64_HUMMER_EARLY_H_
 #define _ARM64_HUMMER_EARLY_H_
@@ -408,6 +411,15 @@ ARM_INIT_PRINTF_ANCHOR = "\tPE_init_printf(FALSE);\n"
 # --------------------------------------------------------------------------
 # pe_serial.c: kprintf -> panel
 # --------------------------------------------------------------------------
+# Prototypes for the renderer that lives in arm_vm_init.c.  Inlined instead of
+# `#include <arm64/hummer_early.h>` because that header is not in EXPORT_HDRS
+# (see the arm_init.c comment above).
+HUMMER_PROTOS = r'''/* ---- hummer: panel console (renderer lives in arm_vm_init.c) ------------- */
+extern void hummer_early_putc(char c);
+extern void hummer_early_mark(unsigned int stage, const char *label);
+extern int hummer_early_console_ready(void);
+'''
+
 PE_SERIAL_FNS = r'''/* ---- hummer: kprintf onto the panel -------------------------------------- */
 /*
  * The alias installed by arm_vm_init() is already in place, so this needs no
@@ -634,8 +646,14 @@ def main():
            "arm_vm_init: panel alias")
 
     # ---- arm_init.c ----
+    # Not `#include <arm64/hummer_early.h>`: only arm_vm_init.c can resolve that
+    # include (its object compiles with the osfmk source tree on the search
+    # path).  pe_serial.c resolves <arm64/...> against EXPORT_HDRS, and a new
+    # header only lands there if osfmk/arm64/Makefile lists it -- v20d died in
+    # the final pass with "'arm64/hummer_early.h' file not found" exactly
+    # because of this.  Spell the prototypes out instead.
     p.insert_after(ARM_INIT, "#include <arm64/proc_reg.h>\n",
-                   "#include <arm64/hummer_early.h>\n", "arm_init include")
+                   HUMMER_PROTOS, "arm_init protos")
     p.swap(ARM_INIT, ARM_INIT_DEBUG_ANCHOR, ARM_INIT_DEBUG, "marks 16/17")
     p.swap(ARM_INIT, ARM_INIT_SERIAL_ANCHOR, ARM_INIT_SERIAL, "marks 18/19")
     p.swap(ARM_INIT, ARM_INIT_KPRINTF_ANCHOR,
@@ -650,7 +668,7 @@ def main():
 
     # ---- pe_serial.c ----
     p.insert_after(PE_SERIAL, "#include <arm64/proc_reg.h>\n",
-                   "#include <arm64/hummer_early.h>\n", "pe_serial include")
+                   HUMMER_PROTOS, "pe_serial protos")
     p.insert_before(PE_SERIAL, "int\nserial_init(void)\n{\n",
                     PE_SERIAL_FNS, "pe_serial fbcon functions")
     p.swap(PE_SERIAL, PE_SERIAL_REGISTER_OLD, PE_SERIAL_REGISTER_NEW,
