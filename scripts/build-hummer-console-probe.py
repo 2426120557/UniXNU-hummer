@@ -16,26 +16,38 @@ usable UART -- exactly hummer's situation.
 
 How
 ---
-1. `arm_vm_init()`, right after `set_mmu_ttb_alternate()`, installs a 2 MB
-   (16K-page) block for the panel at `VM_MIN_KERNEL_ADDRESS + ARM_TT_L2_SIZE`:
-   above the low globals page, below `gVirtBase`, and never handed out by the
-   VM.  Two blocks if the next slot is free too, so there is room for ~25 text
-   lines.  `phystokv()` still refers to the bootstrap aperture at that point,
-   which is how the L2 table is reached.
+1. `arm_vm_init()` ends by building the real kernel tables (`init_ptpages`),
+   filling the physmap, switching TTBR1 to them and dropping the bootstrap
+   TTBR0 identity map.  Right after that switch, `hummer_fb_alias()` finds a
+   free run of L2 slots in the 1 GB window that holds the kernel image --
+   scanning *down* from just below `gVirtBase` -- and fills it with block
+   descriptors for the panel's physical window, as Normal non-cacheable /
+   write-combining memory, so the panel engine sees pixels with no cache
+   maintenance.  Only `ARM_TTE_EMPTY` slots are used and the scan never leaves
+   the kernel's own L1 window, so no real mapping can be displaced; the VA
+   below the image is never handed out by the VM either.
 2. The same file grows the renderer: 8x16 `iso_font` glyphs at 2x, straight
    stores into the aliased VA.  No locks, no allocation, no per-CPU state.
 3. `hummer_early_mark()` is sprinkled through `arm_vm_init()` and `arm_init()`
-   so every stage prints one line: "HUM 15: arm_vm_init returned" etc.
+   so every stage prints one line: "HUM 22: calling pmap_bootstrap" etc.
 4. `pe_serial.c` registers the same renderer as a serial device, so once
    kprintf comes up its output lands on the panel as well.
 
-Nothing is added to `osfmk/conf/files.arm64`: the object lists for the final
-link pass are already frozen by the time these archive builders run, so the
-renderer lives inside `arm_vm_init.c`, which is already linked.  Its header is
-new, which is free.
+Two constraints this file has to respect, both learned the hard way:
+
+* Nothing may be added to `osfmk/conf/files.arm64` -- the object lists for the
+  final link pass are frozen by the time these archive builders run, so the
+  renderer lives inside `arm_vm_init.c`, which is already linked.  Its header
+  is new, which is free.
+* Every anchor must sit *outside* the context of every UniXNU patch hunk.
+  `build-xnu-4k-baseline.sh` re-runs `git apply --reverse --check` on each
+  pass, so an insertion inside a hunk's context makes the check fail (the
+  patch is neither applied-cleanly nor reversed-cleanly) and the whole build
+  stops with "patch does not apply".  `check_reversibility()` below fails the
+  build here, with an explanation, instead of letting that happen later.
 """
 import re
-import sys
+import subprocess
 from pathlib import Path
 
 MARKER = "hummer: panel console"
@@ -46,6 +58,9 @@ ARM_VM_INIT = XNU / "osfmk/arm64/arm_vm_init.c"
 PE_SERIAL = XNU / "pexpert/arm/pe_serial.c"
 PROTOS = XNU / "pexpert/pexpert/arm/protos.h"
 HUMMER_H = XNU / "osfmk/arm64/hummer_early.h"
+
+PATCH_DIR = Path("patches/xnu")
+TOUCHED = (ARM_VM_INIT, ARM_INIT, PE_SERIAL, PROTOS)
 
 OBJECT_ROOT = Path("build/xnu/ios-obj")
 STALE_OBJECTS = ("arm_init.o", "arm_init.o.json",
@@ -69,14 +84,14 @@ HEADER = r'''/*
 extern "C" {
 #endif
 
-/* Called from arm_vm_init(): hand over the alias VA and the panel geometry. */
+/* Register the alias VA and the panel geometry. No-op until placement worked. */
 void hummer_early_attach(uintptr_t va, uint32_t width, uint32_t height,
     uint32_t stride_bytes, uint32_t window_bytes);
 
 /* Draw one character, '\n' and '\r' behave as usual. */
 void hummer_early_putc(char c);
 
-/* Print "HUM <stage>: <label>\n". Reaches the panel only once attached. */
+/* Print "HUM <stage>: <label>\n". Nothing happens before attach. */
 void hummer_early_mark(unsigned int stage, const char *label);
 
 /* True once hummer_early_attach() succeeded. */
@@ -94,23 +109,23 @@ int hummer_early_console_ready(void);
 # --------------------------------------------------------------------------
 VM_INIT_RENDERER = r'''/* ---- hummer: panel console ("serial" for a board with no UART) ---------- */
 /*
- * Written into the framebuffer VA that hummer_fb_alias() installs in the page
- * tables that outlive the bootstrap TTBR0.  Deliberately primitive: no locks,
- * no allocation, no per-CPU state, no ADT parsing, so it stays usable from the
- * very beginning of arm_vm_init() onwards and from panic paths later.
+ * Usable from the moment the final kernel tables are live, and from panic paths
+ * later on.  Deliberately primitive: no locks, no allocation, no per-CPU state,
+ * no ADT parsing.
  */
 #define HUMMER_SCALE        2u
 #define HUMMER_CELL_W       (8u * HUMMER_SCALE)
 #define HUMMER_CELL_H       (16u * HUMMER_SCALE)
 #define HUMMER_FG           0xffffffffu
 #define HUMMER_BG           0xff000000u
-#define HUMMER_FB_BLOCKS    2u
+/* Blocks to ask for, biggest first; each is ARM_TT_L2_SIZE (2 MB at 4 KB). */
+#define HUMMER_FB_WANT_BIG  4u
+#define HUMMER_FB_WANT_MID  2u
 
 extern unsigned char iso_font[256 * 16];
 
 static volatile uint32_t *hummer_fb;
 static uint32_t hummer_stride;
-static uint32_t hummer_width;
 static uint32_t hummer_cols;
 static uint32_t hummer_rows;
 static uint32_t hummer_col;
@@ -143,7 +158,6 @@ hummer_early_attach(uintptr_t va, uint32_t width, uint32_t height,
 	}
 	hummer_fb = (volatile uint32_t *)va;
 	hummer_stride = stride_bytes / 4;
-	hummer_width = width;
 	hummer_rows = rows;
 	hummer_cols = cols;
 	hummer_col = 0;
@@ -210,7 +224,7 @@ hummer_early_mark(unsigned int stage, const char *label)
 	hummer_early_putc('M');
 	hummer_early_putc(' ');
 	if (stage >= 100) {
-		digits[n++] = (char)('0' + stage / 100);
+		digits[n++] = (char)('0' + (stage / 100) % 10);
 	}
 	if (stage >= 10) {
 		digits[n++] = (char)('0' + (stage / 10) % 10);
@@ -228,147 +242,136 @@ hummer_early_mark(unsigned int stage, const char *label)
 }
 
 /*
- * Try to park the panel window at va_start.  The L1 entry has to already be a
- * table -- both candidates sit in a 1 GB span whose table exists -- and the L2
- * slots have to be empty, so this can never displace a real mapping.  Returns
- * how many 2 MB blocks were installed.
+ * L2 slot for va, or NULL if the covering L1 entry is not a table (in which
+ * case this VA range cannot take a block descriptor at all).
  */
-static unsigned int
-hummer_fb_map_at(vm_map_address_t va_start, uint64_t fb, unsigned int want,
-    vm_map_address_t *first_out)
+static tt_entry_t *
+hummer_l2_slot(vm_map_address_t va)
 {
-	vm_map_address_t va_l1 = va_start & ~ARM_TT_L1_OFFMASK;
-	tt_entry_t l1, *l2;
-	unsigned int i;
-	unsigned int blocks = 0;
+	tt_entry_t l1 = cpu_tte[(va & ARM_TT_L1_INDEX_MASK) >> ARM_TT_L1_SHIFT];
 
-	l1 = cpu_tte[(va_start & ARM_TT_L1_INDEX_MASK) >> ARM_TT_L1_SHIFT];
 	if ((l1 & (ARM_TTE_VALID | ARM_TTE_TYPE_MASK)) !=
 	    (ARM_TTE_VALID | ARM_TTE_TYPE_TABLE)) {
-		return 0;
+		return NULL;
 	}
-	l2 = (tt_entry_t *)phystokv(l1 & ARM_TTE_TABLE_MASK);
-
-	for (i = 0; i < 32 && blocks < want; i++) {
-		vm_map_address_t va = va_start + i * ARM_TT_L2_SIZE;
-		tt_entry_t *slot;
-
-		if ((va & ~ARM_TT_L1_OFFMASK) != va_l1) {
-			break;  /* only this L1 table has been resolved */
-		}
-		if (va + ARM_TT_L2_SIZE > gVirtBase) {
-			break;
-		}
-		slot = &l2[(va & ARM_TT_L2_INDEX_MASK) >> ARM_TT_L2_SHIFT];
-		if (*slot != ARM_TTE_EMPTY) {
-			if (blocks != 0) {
-				break;
-			}
-			continue;
-		}
-		if (blocks == 0) {
-			*first_out = va;
-		}
-		*slot = ((fb + blocks * ARM_TT_L2_SIZE) & ARM_TTE_BLOCK_L2_MASK)
-		    | ARM_TTE_TYPE_BLOCK | ARM_TTE_VALID
-		    | ARM_TTE_BLOCK_AF | ARM_TTE_BLOCK_NX
-		    | ARM_TTE_BLOCK_SH(SH_OUTER_MEMORY)
-		    | ARM_TTE_BLOCK_ATTRINDX(CACHE_ATTRINDX_WRITECOMB)
-		    | ARM_TTE_BLOCK_PNX;
-		blocks++;
-	}
-	return blocks;
+	return (tt_entry_t *)phystokv(l1 & ARM_TTE_TABLE_MASK) +
+	    ((va & ARM_TT_L2_INDEX_MASK) >> ARM_TT_L2_SHIFT);
 }
 
 /*
- * Map the panel into the kernel page tables that survive the bootstrap TTBR0
- * teardown, as Normal non-cacheable memory (write-combining: the panel engine
- * sees the pixels without any cache maintenance).
- *
- * Two candidate windows, both in kernel VA that the VM never hands out:
- *   1. VM_MIN_KERNEL_ADDRESS + 2 MB -- the window UniXNU-vermeer uses, right
- *      above the low globals;
- *   2. the 4 MB just below the kernel image, which is guaranteed to share the
- *      kernel's own L1 table whatever VM_MIN_KERNEL_ADDRESS happens to be for
- *      this board config.
- *
- * Failing to place the window must never take the boot down: the kernel just
- * keeps running without a console.
+ * Look for `want` consecutive unused L2 slots ending just below gVirtBase and
+ * map the panel into them.  Scanning downwards from the image keeps the console
+ * in the one 1 GB window whose table already exists (the kernel lives in it),
+ * and stopping at the window base means we can never wander into a range whose
+ * upper tables were not built.  Returns the number of blocks installed, 0 if
+ * the panel does not fit -- which the caller treats as "no console", never as
+ * an error: a boot without a console still boots.
+ */
+static unsigned int
+hummer_fb_place(uint64_t fb, unsigned int want, vm_map_address_t *first_out)
+{
+	vm_map_address_t top = gVirtBase & ~(ARM_TT_L2_SIZE - 1);
+	vm_map_address_t lo = gVirtBase & ~ARM_TT_L1_OFFMASK;
+	vm_map_address_t va;
+	unsigned int i;
+
+	for (va = top; va >= lo + want * ARM_TT_L2_SIZE; va -= ARM_TT_L2_SIZE) {
+		vm_map_address_t run = va - want * ARM_TT_L2_SIZE;
+		int usable = 1;
+
+		for (i = 0; i < want; i++) {
+			tt_entry_t *slot = hummer_l2_slot(run + i * ARM_TT_L2_SIZE);
+
+			if (slot == NULL || *slot != ARM_TTE_EMPTY) {
+				usable = 0;
+				break;
+			}
+		}
+		if (!usable) {
+			continue;
+		}
+		for (i = 0; i < want; i++) {
+			*hummer_l2_slot(run + i * ARM_TT_L2_SIZE) =
+			    ((fb + i * ARM_TT_L2_SIZE) & ARM_TTE_BLOCK_L2_MASK)
+			    | ARM_TTE_TYPE_BLOCK | ARM_TTE_VALID
+			    | ARM_TTE_BLOCK_AF | ARM_TTE_BLOCK_NX
+			    | ARM_TTE_BLOCK_SH(SH_OUTER_MEMORY)
+			    | ARM_TTE_BLOCK_ATTRINDX(CACHE_ATTRINDX_WRITECOMB)
+			    | ARM_TTE_BLOCK_PNX;
+		}
+		*first_out = run;
+		return want;
+	}
+	return 0;
+}
+
+/*
+ * Install the panel alias and start the console.  Called from arm_vm_init()
+ * right after the kernel tables are active and the identity map is gone, so the
+ * empty-slot search sees the *final* state of the tables.
  */
 static void
 hummer_fb_alias(boot_args *args)
 {
-	vm_map_address_t candidates[2];
-	vm_map_address_t first = 0;
 	uint64_t fb = args->Video.v_baseAddr;
 	uint64_t stride = args->Video.v_rowBytes;
 	uint64_t width = args->Video.v_width;
 	uint64_t height = args->Video.v_height;
-	unsigned int i;
-	unsigned int blocks = 0;
+	vm_map_address_t first = 0;
+	unsigned int blocks;
 
 	if (fb == 0 || stride == 0 || width == 0 || height == 0) {
 		return;
 	}
-	/* a 2 MB block can only describe a 2 MB aligned physical window */
+	/* a block descriptor can only describe an aligned physical window */
 	if ((fb & (ARM_TT_L2_SIZE - 1)) != 0) {
 		return;
 	}
-	if (stride < (width * 4)) {
+	if (stride < width * 4) {
+		return;
+	}
+	/* cheap sanity: the boot loader cannot have handed us a wild geometry */
+	if (stride > (4u << 20) || height > (1u << 16) || width > (1u << 16)) {
 		return;
 	}
 
-	candidates[0] = VM_MIN_KERNEL_ADDRESS + ARM_TT_L2_SIZE;
-	candidates[1] = (((gVirtBase - 1) & ~(ARM_TT_L2_SIZE - 1)) -
-	    ARM_TT_L2_SIZE);
-
-	for (i = 0; i < 2; i++) {
-		blocks = hummer_fb_map_at(candidates[i], fb, HUMMER_FB_BLOCKS,
-		    &first);
-		if (blocks != 0) {
-			break;
-		}
+	blocks = hummer_fb_place(fb, HUMMER_FB_WANT_BIG, &first);
+	if (blocks == 0) {
+		blocks = hummer_fb_place(fb, HUMMER_FB_WANT_MID, &first);
+	}
+	if (blocks == 0) {
+		blocks = hummer_fb_place(fb, 1, &first);
 	}
 	if (blocks == 0) {
 		return;
 	}
 
+	/*
+	 * Publish the new descriptors before anything touches the alias.  No TLBI
+	 * is strictly needed (this VA was never accessed and the TLB was flushed a
+	 * few lines ago), but a full invalidate is a few microseconds once.
+	 */
 	__asm__ volatile("dsb ishst" ::: "memory");
+	flush_mmu_tlb();
+	__asm__ volatile("dsb ish\n\tisb" ::: "memory");
 	hummer_early_attach((uintptr_t)first, (uint32_t)width, (uint32_t)height,
 	    (uint32_t)stride, blocks * ARM_TT_L2_SIZE);
 }
 
 '''
 
-VM_INIT_ALIAS_ANCHOR = "\tset_mmu_ttb_alternate(cpu_ttep & TTBR_BADDR_MASK);\n"
-
-VM_INIT_ALIAS = ("\t/*\n"
-                 "\t * hummer: install the panel alias in the tables that survive,\n"
-                 "\t * while phystokv() still walks the bootstrap aperture.\n"
-                 "\t */\n"
-                 "\thummer_fb_alias(args);\n"
-                 "\n"
-                 "\tset_mmu_ttb_alternate(cpu_ttep & TTBR_BADDR_MASK);\n"
-                 "\n"
-                 "\thummer_early_mark(20, \"fb alias live, TTBR1 active\");\n")
-
-VM_INIT_PMAP = r'''	hummer_early_mark(22, "calling pmap_bootstrap");
-	pmap_bootstrap(dynamic_memory_begin);
-	hummer_early_mark(23, "pmap_bootstrap done");
-'''
-
 # --------------------------------------------------------------------------
 # arm_init.c: the marks around the code that dies
 #
-# Every anchor here is a single line: UniXNU's own XNU patch series already
-# rewrote this neighbourhood (non-apple-cache-monitor.patch wraps
-# ml_enable_monitor() in #if XNU_MONITOR, zzz-boot-progress.patch adds
-# boot_progress_stage() calls around arm_vm_init), so multi-line context does
-# not survive.
+# Every anchor is a single line: UniXNU's own XNU patch series already rewrote
+# this neighbourhood (non-apple-cache-monitor.patch wraps ml_enable_monitor()
+# in #if XNU_MONITOR, zzz-boot-progress.patch inserts boot_progress_stage()
+# around the arm_vm_init() call), so multi-line context does not survive.
+#
+# There is deliberately no mark right after arm_vm_init(): zzz-boot-progress
+# already put "arm_vm_init returned" there, and a second insertion on that line
+# would break that patch's reverse context.
 # --------------------------------------------------------------------------
-ARM_INIT_MARK15_ANCHOR = "\tarm_vm_init(xmaxmem, args);\n"
-ARM_INIT_MARK15 = "\thummer_early_mark(15, \"arm_vm_init returned\");\n"
-
 ARM_INIT_DEBUG_ANCHOR = "\tPE_consistent_debug_inherit();\n"
 ARM_INIT_DEBUG = ("\thummer_early_mark(16, \"low_glo / s2r done\");\n"
                   "\tPE_consistent_debug_inherit();\n"
@@ -392,6 +395,8 @@ PE_SERIAL_FNS = r'''/* ---- hummer: kprintf onto the panel ---------------------
  * device tree node and no ml_io_map(): it just forwards characters to the same
  * renderer the stage marks use.
  */
+static bool hummer_fbcon_registered = false;
+
 static unsigned int
 hummer_fbcon_transmit_ready(void)
 {
@@ -439,10 +444,14 @@ PE_SERIAL_REGISTER_OLD = r'''	struct pe_serial_functions *fns = gPESF;
 	 * Even if the serial devices have already been initialized on cold boot,
 '''
 
+# register_serial_functions() prepends without checking for duplicates, so a
+# second serial_init() would point our node at itself and turn every later walk
+# of gPESF into an infinite loop.  serial_init() is called more than once.
 PE_SERIAL_REGISTER_NEW = r'''	struct pe_serial_functions *fns = gPESF;
 
 	/* hummer: register the panel console before any Apple UART probing. */
-	if (hummer_early_console_ready()) {
+	if (!hummer_fbcon_registered && hummer_early_console_ready()) {
+		hummer_fbcon_registered = true;
 		register_serial_functions(&hummer_fbcon_serial_functions);
 	}
 
@@ -512,6 +521,31 @@ class Patcher:
         return [str(p) for p in self.pending]
 
 
+def check_reversibility():
+    """Which UniXNU patches still reverse-apply cleanly against the work tree?
+
+    build-xnu-4k-baseline.sh re-runs `git apply --reverse --check` for every
+    patch on every pass (that is how it decides whether a patch is already
+    applied).  An insertion that lands inside a hunk's context makes that check
+    fail, so the next pass tries to apply an already-applied patch and the build
+    stops with a patch error that says nothing about this script.  Returns None
+    when the check is not possible here (no work tree / no patch series).
+    """
+    if not PATCH_DIR.is_dir() or not (XNU / ".git").exists():
+        return None
+    include = []
+    for path in TOUCHED:
+        include += ["--include=" + path.relative_to(XNU).as_posix()]
+    report = {}
+    for patch in sorted(PATCH_DIR.glob("*.patch")):
+        proc = subprocess.run(
+            ["git", "-C", str(XNU), "apply", "--reverse", "--check"]
+            + include + [str(patch.resolve())],
+            capture_output=True)
+        report[patch.name] = proc.returncode == 0
+    return report
+
+
 def drop_objects():
     dropped = []
     if not OBJECT_ROOT.is_dir():
@@ -532,12 +566,20 @@ def main():
 
     if MARKER in ARM_VM_INIT.read_text():
         print("hummer-console: sources already patched")
+        report = check_reversibility()
+        broken = [name for name, ok in (report or {}).items() if not ok]
+        if broken:
+            print("warning: hummer-console: these patches no longer reverse-apply "
+                  "and build-xnu-4k-baseline.sh will refuse to re-apply them: "
+                  + ", ".join(broken))
         drop_objects()
         return
 
     for path in (ARM_INIT, ARM_VM_INIT, PE_SERIAL, PROTOS):
         if not path.is_file():
             raise SystemExit(f"hummer-console: {path} is missing")
+
+    before = check_reversibility()
 
     # ---- header (new file, free: nothing to add to the object lists) ----
     p = Patcher()
@@ -549,20 +591,23 @@ def main():
     p.insert_before(ARM_VM_INIT,
                     "#define ARM64_PHYSMAP_SLIDE_RANGE (1ULL << 30) // 1 GB\n",
                     VM_INIT_RENDERER, "arm_vm_init renderer")
-    p.swap(ARM_VM_INIT, VM_INIT_ALIAS_ANCHOR, VM_INIT_ALIAS,
-           "arm_vm_init: alias + mark 20")
-    p.insert_after(ARM_VM_INIT,
-                   "\tinvalid_tte = (tt_entry_t*)(phystokv(invalid_ttep));\n",
-                   "\thummer_early_mark(21, \"bootstrap TTBR0 gone\");\n",
-                   "arm_vm_init: mark 21")
     p.swap(ARM_VM_INIT, "\tpmap_bootstrap(dynamic_memory_begin);\n",
-           VM_INIT_PMAP, "pmap_bootstrap mark")
+           "\thummer_early_mark(22, \"calling pmap_bootstrap\");\n"
+           "\tpmap_bootstrap(dynamic_memory_begin);\n"
+           "\thummer_early_mark(23, \"pmap_bootstrap done\");\n",
+           "pmap_bootstrap marks")
+    # The identity map is gone, the kernel tables are live: this is the first
+    # moment the panel can be mapped for good.
+    p.swap(ARM_VM_INIT,
+           "\tinvalid_tte = (tt_entry_t*)(phystokv(invalid_ttep));\n",
+           "\tinvalid_tte = (tt_entry_t*)(phystokv(invalid_ttep));\n"
+           "\thummer_fb_alias(args);\n"
+           "\thummer_early_mark(20, \"kernel tables live, panel mapped\");\n",
+           "arm_vm_init: panel alias")
 
     # ---- arm_init.c ----
     p.insert_after(ARM_INIT, "#include <arm64/proc_reg.h>\n",
                    "#include <arm64/hummer_early.h>\n", "arm_init include")
-    p.swap(ARM_INIT, ARM_INIT_MARK15_ANCHOR,
-           ARM_INIT_MARK15_ANCHOR + ARM_INIT_MARK15, "mark 15")
     p.swap(ARM_INIT, ARM_INIT_DEBUG_ANCHOR, ARM_INIT_DEBUG, "marks 16/17")
     p.swap(ARM_INIT, ARM_INIT_SERIAL_ANCHOR, ARM_INIT_SERIAL, "marks 18/19")
     p.swap(ARM_INIT, ARM_INIT_KPRINTF_ANCHOR,
@@ -598,7 +643,19 @@ def main():
     print("hummer-console: patched " + ", ".join(
         str(x.relative_to(XNU)) for x in (ARM_VM_INIT, ARM_INIT, PE_SERIAL, PROTOS)))
     print(f"hummer-console: wrote {HUMMER_H}")
-    print("hummer-console: marks 15..27 will appear on the panel as 'HUM <n>: ...'")
+
+    after = check_reversibility()
+    if before and after:
+        broke = sorted(name for name in before if before[name] and not after[name])
+        if broke:
+            raise SystemExit(
+                "error: hummer-console: these patches reverse-applied before the "
+                "edit and do not any more, so an anchor landed inside a patch hunk "
+                "and the next pass will fail to re-apply them: " + ", ".join(broke))
+        print("hummer-console: all " + str(len(after))
+              + " touched patches still reverse-apply")
+
+    print("hummer-console: marks 16..27 will appear on the panel as 'HUM <n>: ...'")
     drop_objects()
 
 
