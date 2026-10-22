@@ -1,0 +1,218 @@
+name: build-kernel
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+
+# 试水目标：验证 macOS CI 能否编出 hummer 的 XNU 4K 内核 + 通用平台专家。
+# 已知：build kernel 会在 prelink 阶段因缺少 kernelcache/IPSW 失败（预期内），
+# 本 workflow 以「内核 Mach-O 是否产出」为通过判据。
+jobs:
+  kernel:
+    runs-on: macos-15          # 与 UniXNU 官方 macOS build workflow 一致
+    timeout-minutes: 300       # 上限 360，留点余量
+    permissions:
+      contents: write          # 只为把产物/日志挂到 ci-latest release
+    steps:
+      - name: Checkout device repo
+        uses: actions/checkout@v4
+
+      # 固定在 b6ae99c（2026-10-21 20:44），不跟 main。
+      #
+      # main 的 e95b37d（2026-10-22 08:17，"update NativeAdreno ..."）把
+      # patches/xnu/zzy-native-gpu-addon-mount.patch 里
+      # `#define BINDM_FORCE_ROOT 0x80000000ULL` 那一行弄丢了，但
+      # bind_vfsops.c 里对它的一次使用还在 —— 于是 bsd/miscfs/bindfs 编不过：
+      #
+      #   bind_vfsops.c:237:23: error: use of undeclared identifier 'BINDM_FORCE_ROOT'
+      #
+      # 同一个 commit 还把三条子模块 gitlink 挪到了远端已经不提供的 commit 上。
+      # b6ae99c 两者都正常。上游修好之后把 ref 换回 main 即可。
+      - name: Checkout UniXNU
+        uses: actions/checkout@v4
+        with:
+          repository: UniXNU/UniXNU
+          path: UniXNU
+          ref: b6ae99c17194e6a18fd819d3148e69fe405e91fc
+
+      # 不要用 submodules: recursive —— UniXNU 的 main 里常有 gitlink 指向远端
+      # 已经删掉的 commit（上游 force-push），递归 checkout 撞到第一个就整体失败。
+      #
+      # 但只取三个也不够：`unixnu build` 自己会跑
+      # `git submodule update --init --recursive`（scripts/unixnu/feeds.py），
+      # 失败即中止，于是 build 连第一步都进不去。所以这里先按 .gitmodules 逐个
+      # 更新，失败的把 gitlink 改指远端默认分支 HEAD（那个一定存在），把 checkout
+      # 修好再交给 unixnu。
+      - name: Repair the UniXNU submodule checkout
+        shell: bash
+        working-directory: UniXNU
+        run: bash "$GITHUB_WORKSPACE/ci/fix-unixnu-submodules.sh"
+
+      # 关键：固定 Python 3.12。系统默认的 3.14 会让 XNU 的 LDFILELIST 等脚本静默失败。
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Resolve UniXNU commit (cache key)
+        run: echo "UNIXNU_SHA=$(git -C UniXNU rev-parse HEAD)" >> "$GITHUB_ENV"
+
+      - name: Install build dependencies
+        run: |
+          brew install cmake ninja unifdef llvm mtools dtc
+          echo "$(brew --prefix llvm)/bin" >> "$GITHUB_PATH"
+
+      - name: Toolchain versions
+        run: |
+          xcodebuild -version
+          python3 --version
+          clang --version | head -1
+          cmake --version | head -1
+
+      - name: Cache fetched sources
+        uses: actions/cache@v4
+        with:
+          path: UniXNU/out/feeds
+          key: unixnu-feeds-${{ env.UNIXNU_SHA }}
+
+      - name: Select defconfig
+        run: ./unixnu defconfig hummer_defconfig -D "$GITHUB_WORKSPACE"
+        working-directory: UniXNU
+
+      - name: Show status
+        run: ./unixnu status -D "$GITHUB_WORKSPACE"
+        working-directory: UniXNU
+
+      - name: Build kernel (prelink fails without IPSW, expected)
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: ./unixnu build kernel -D "$GITHUB_WORKSPACE" 2>&1 | tee "$GITHUB_WORKSPACE/kernel.log"
+        working-directory: UniXNU
+
+      # 判据 = prelink 的最终产物（prelink 成功后才算内核完整产出）。
+      # 注意路径：产物在 UniXNU/out/hummer/ 下，不是 UniXNU/build/。
+      - name: Check kernel artifact
+        id: check
+        run: |
+          K="UniXNU/out/hummer/kernel/kernel.macho"
+          if [ -f "$K" ]; then
+            echo "KERNEL_BUILT=yes" >> "$GITHUB_ENV"
+            ls -la "$K"
+          else
+            echo "KERNEL_BUILT=no" >> "$GITHUB_ENV"
+            echo "kernel.macho not produced; see logs"
+          fi
+
+      # v33：运存根探针镜像。做一个 64 MiB 的 APFS 卷，从 /dev/rdiskN 原样读出来，
+      # 去掉 DMG 外壳，得到一个"设备内容"字节流，正好能当 ramdisk 用。
+      # 为什么不是 zeros 而是真 APFS：zeros 只能证明 md0 被注册；真 APFS 还能顺带
+      # 验证 APFS kext 会不会认它当根，一次刷机能多拿一层信息。
+      - name: Build the RAM root image (APFS, raw)
+        if: env.KERNEL_BUILT == 'yes'
+        run: |
+          set -eux
+          hdiutil create -size 64m -fs APFS -volname System -format UDRW -ov "$RUNNER_TEMP/ram-root.dmg"
+          DEV=$(hdiutil attach -nomount -readonly "$RUNNER_TEMP/ram-root.dmg" | awk 'NR==1{print $1}')
+          echo "attached $DEV"
+          dd if="${DEV/disk/rdisk}" of="$GITHUB_WORKSPACE/ram-root.img" bs=1m
+          hdiutil detach "$DEV" || true
+          ls -la "$GITHUB_WORKSPACE/ram-root.img"
+          # 头一个块里应该能看到 APFS 容器超级块（magic 'NXSB' 在偏移 32）。
+          hexdump -C -n 64 "$GITHUB_WORKSPACE/ram-root.img" || true
+
+      # payload：把 kernel.macho + ADT 打成 FAT 卷（boot 镜像的 ramdisk）。
+      # 平台种子走 secret，未配则用下面的默认（软件身份种子，非真实机密）。
+      # --data-ramdisk 让它进 Payloads/scratch-data.img，并在 ADT 里生成
+      # /chosen/memory-map/RAMDisk 占位符；DarwinBoot 启动时把文件拷进内核窗口
+      # 并回填 {phys,size}，内核再 mdevadd 成 /dev/md0。
+      - name: Build payload
+        if: env.KERNEL_BUILT == 'yes'
+        env:
+          UNIXNU_UNIQUE_CHIP_ID: ${{ secrets.UNIXNU_UNIQUE_CHIP_ID || '0x38d960c942ad2137' }}
+        run: ./unixnu build payload -D "$GITHUB_WORKSPACE" --data-ramdisk "$GITHUB_WORKSPACE/ram-root.img" 2>&1 | tee "$GITHUB_WORKSPACE/payload.log"
+        working-directory: UniXNU
+
+      - name: Show build log tail
+        if: always()
+        run: |
+          LOG="UniXNU/out/hummer/logs/kernel-bootstrap.log"
+          if [ -f "$LOG" ]; then
+            echo "===== 报错上下文（grep error） ====="
+            grep -n -iE "error:|error |Error [0-9]|undefined|No such file|ld: |command not found" "$LOG" | head -40 || true
+            echo ""
+            echo "===== 日志最后 40 行 ====="
+            tail -40 "$LOG"
+          else
+            echo "(no kernel-bootstrap.log)"
+            ls -la UniXNU/out/hummer/logs/ 2>/dev/null || true
+          fi
+
+      # 失败时把日志尾巴写进 job summary：summary 会直接渲染在 run 页面上，
+      # 不用登录、不用下 artifact 就能看到失败原因。
+      - name: Build summary
+        if: always()
+        run: |
+          {
+            echo "## build-kernel: KERNEL_BUILT=${KERNEL_BUILT:-unknown}"
+            echo
+            for f in kernel.log payload.log \
+                     UniXNU/out/hummer/logs/kernel-bootstrap.log \
+                     UniXNU/out/hummer/logs/kernel.log \
+                     UniXNU/out/hummer/logs/prelink.log; do
+              [ -f "$f" ] || { echo "- \`$f\`: 不存在"; continue; }
+              echo "### $f"
+              echo '```'
+              grep -n -iE "error:|error |Error [0-9]|undefined|No such file|ld: |command not found|Traceback|raise |fatal:" "$f" | tail -40 || true
+              echo '--- last 60 lines ---'
+              tail -60 "$f"
+              echo '```'
+            done
+            echo
+            echo "### logs 目录"
+            ls -la UniXNU/out/hummer/logs/ 2>/dev/null || echo "(none)"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # 把产物和日志挂到一个滚动 release（tag ci-latest）上：release 资产不需要
+      # token 就能下载，日志和 kernel.macho 都能直接从命令行取。
+      - name: Publish build outputs
+        if: always()
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tar czf ci-logs.tar.gz kernel.log payload.log UniXNU/out/hummer/logs 2>/dev/null || true
+          gh release view ci-latest >/dev/null 2>&1 \
+            || gh release create ci-latest --title "ci latest" \
+                 --notes "Rolling build outputs of build-kernel. Overwritten on every run." 
+          FILES=()
+          for f in ci-logs.tar.gz UniXNU/out/hummer/kernel/kernel.macho; do
+            [ -f "$f" ] && FILES+=("$f")
+          done
+          if [ -f UniXNU/out/hummer/payload/payload.img ]; then
+            FILES+=("UniXNU/out/hummer/payload/payload.img")
+          fi
+          echo "uploading: ${FILES[*]:-<nothing>}"
+          [ ${#FILES[@]} -gt 0 ] && gh release upload ci-latest "${FILES[@]}" --clobber
+
+      - name: Upload kernel and logs
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: kernel-logs
+          path: |
+            kernel.log
+            payload.log
+            UniXNU/out/hummer/kernel/
+            UniXNU/out/hummer/payload/
+            UniXNU/out/hummer/logs/
+
+      - name: Result
+        run: |
+          if [ "$KERNEL_BUILT" = "yes" ]; then
+            echo "✅ kernel.macho built and prelinked — download it from the kernel-logs artifact"
+          else
+            echo "❌ kernel did not build — check the uploaded logs"
+            exit 1
+          fi
