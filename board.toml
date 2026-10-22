@@ -7,7 +7,9 @@
 #               已定位屏幕无声的原因：boot_args.Video 给的是帧缓冲物理地址
 #               0xFC000000，而内核从来没映射过它，图形控制台第一次写像素就
 #               data abort。修法见 [kernel] archives 的最后一项。
-#   [ipsw]/[userdata] 仍是脚手架；[payload]/[payload.adt] 已能产出可启动的 FAT 卷。
+#   [ipsw]/[userdata] 的几何已从真机读回（见下面 [userdata] 的注释），
+#               镜像本身还没构建（需要 hdiutil，走 macOS CI）；
+#               [payload]/[payload.adt] 已能产出可启动的 FAT 卷。
 
 [board]
 name = "hummer"
@@ -32,16 +34,32 @@ fetch = ["KernelCache", "DeviceTree", "StaticTrustCache", "Cryptex1,SystemTrustC
 "044-76040-038.dmg" = "3f99b859c9728379110b66657c7b15285bcb1925ad8b5726542e2cdcf8b1028d"
 "044-76034-038.dmg" = "b4908cde41d23e6bc05e6af51a2c9eeb00cf0f863a6a18b1600c96a3fd70414f"
 
-# userdata 分区的原始镜像（OS + SystemOS 盘映像）。first/last_lba 需从真机 GPT 读。
-# TODO: hummer 的 userdata LBA 尚未从真机读取。
-# [userdata]
-# first_lba = 0x0
-# last_lba = 0x0
-# lba_bytes = 4096
-# windows = [
-#   { name = "OS", component = "OS" },
-#   { name = "SystemOS", component = "Cryptex1,SystemOS" },
-# ]
+# userdata 分区的原始镜像（OS + SystemOS 盘映像）。
+#
+# 下面三个数字是 2026-10-22 从真机读回来的，来源是 native-ufs-probe=10 的
+# findRootLayout()：它把 LBA 1 的 GPT 头读出来、校验了头 CRC 和条目数组 CRC，
+# 再按名字精确匹配 "userdata"。所以这不是猜的，是设备自己的 GPT 说的：
+#
+#   userdata first=3a1421 last=3ad07fa      (4096 字节扇区)
+#
+# 换算：起始 3a1421 * 4096 = 15,590,363,136 字节 = 14.52 GiB
+#       容量 (3ad07fa - 3a1421 + 1) * 4096 = 237,015,769,088 字节 = 220.74 GiB
+# 与 256 GiB 机型相符（sheng 那边是 0x2f3840..0x3d0abfa = 220.9 GiB，同一量级）。
+#
+# 同一轮还读到首块 ext4magic=2b41（不是 0xef53）、manifest status=1：
+# ColorOS 的 userdata 不是 ext4（f2fs + 元数据加密，首块就是密文），而且从未
+# 烧过我们的 SHNGROOT 清单。这两点都符合预期。
+#
+# 注意：userdata 步骤会把这个分区整个覆盖掉，ColorOS 的数据不会保留。
+# 镜像大小上限 220.74 GiB，OS + SystemOS 两个窗口按 1 MiB 对齐后必须塞得进去。
+[userdata]
+first_lba = 0x3a1421
+last_lba = 0x3ad07fa
+lba_bytes = 4096
+windows = [
+  { name = "OS", component = "OS" },
+  { name = "SystemOS", component = "Cryptex1,SystemOS" },
+]
 
 [kernel]
 defconfig = "hummer_defconfig"
