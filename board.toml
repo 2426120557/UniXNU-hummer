@@ -249,6 +249,14 @@ kernel_args = [
   "debug=0x14e",
   "cpus=8",
   "rd=md0",
+  # pid 1 那个探针是手搓的 Mach-O，没有 LC_CODE_SIGNATURE。v35 已经证明
+  # 内核会把 /sbin/launchd 当 pid 1 去 exec（errno 2 @kern_exec.c:7334），
+  # 这次要验的是"签名之外还有没有别的拦路者"，所以先把两边都放开：
+  #   amfi_get_out_of_my_way   —— AppleMobileFileIntegrity 的检查整个跳过
+  #   cs_enforcement_disable   —— XNU 自己的 cs_* 强制也关掉
+  # 两个都是宽容开关，不会影响已经跑通的路径。
+  "amfi_get_out_of_my_way=1",
+  "cs_enforcement_disable=1",
 ]
 
 [payload.adt]

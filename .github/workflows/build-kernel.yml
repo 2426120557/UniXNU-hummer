@@ -135,8 +135,26 @@ jobs:
           fi
 
           if [ "$mkfs" = yes ]; then
+            # 卷里放 pid 1 的探针：/sbin/launchd 是一个手搓的静态 arm64 Mach-O
+            # （scripts/make-launchd-stub.py），只做 write(1, "HUMMER: userland alive")
+            # 然后自旋。v35 已经证明内核会 exec /sbin/launchd 并且只差这个文件
+            # （errno 2 @kern_exec.c:7334），所以这一刷的判据是 errno 变了没有。
+            python3 "$GITHUB_WORKSPACE/scripts/make-launchd-stub.py" "$RUNNER_TEMP/launchd-stub"
+            MP="$RUNNER_TEMP/ram-root"
+            rm -rf "$MP"; mkdir -p "$MP"
+            DEV=$(hdiutil attach -nobrowse -mountpoint "$MP" "$IMG" | awk 'NR==1{print $1}')
+            echo "attached $DEV at $MP"
+            ls -la "$MP"
+            sudo mkdir -p "$MP/sbin"
+            sudo cp "$RUNNER_TEMP/launchd-stub" "$MP/sbin/launchd"
+            sudo chmod 755 "$MP/sbin/launchd"
+            sudo chown 0:0 "$MP/sbin/launchd"
+            sudo ls -la "$MP/sbin"
+            sync
+            hdiutil detach "$MP" || hdiutil detach "$DEV"
+
             DEV=$(hdiutil attach -nomount -readonly "$IMG" | awk 'NR==1{print $1}')
-            echo "attached $DEV"
+            echo "attached $DEV (no mount)"
             dd if="${DEV/disk/rdisk}" of="$OUT" bs=1m || rm -f "$OUT"
             hdiutil detach "$DEV" || true
           fi
@@ -196,6 +214,14 @@ jobs:
             echo "RESULT: APFS container at offset 0, $(stat -f%z "$OUT") bytes"
           else
             echo "RESULT: zeros fallback -- md0 will register, but there is nothing to mount"
+          fi
+
+          # 直接证据：探针里的字符串应该能在镜像里搜到（APFS 默认不压缩）。
+          at=$(LC_ALL=C grep -abo "HUMMER: userland alive" "$OUT" | head -1 | cut -d: -f1)
+          if [ -n "$at" ]; then
+            echo "RESULT: launchd stub present at image offset $at"
+          else
+            echo "::warning::the launchd stub string is not visible in the image"
           fi
 
           test -s "$OUT"
