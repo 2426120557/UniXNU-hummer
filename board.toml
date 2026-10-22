@@ -58,6 +58,12 @@ archives = [
   "build-arm-driver.py ArmCpu",
   "build-libpthread-kernel.py",
   "build-native-probe-stubs.py",
+  # AMFI "No PMGR?" 修复：从 prelinked 的 com.apple.driver.ApplePMGR 造出真的
+  # ApplePMGRNub 并在 bsd_init 后段发布（上游 sheng-platform-power.patch 的
+  # 钩子，CONFIG_XNU_SHENG_PMGR=y 激活）。归档产到 baseline.sh 约定的
+  # build/sheng-platform-power/libShengPlatformPower.a，由它 force_load 进内核。
+  # 放在源码修改器之前：它不改源码，只编译 package/HummerPlatformPower.cpp。
+  "build-hummer-platform-power.py",
   # 注意：所有构建器都在 macOS 上跑（kernel.py 硬性要求 xcodebuild + iphoneos SDK）。
   #
   # 已下线 build-hummer-video-map.py：它在 PE_create_console() 前面调

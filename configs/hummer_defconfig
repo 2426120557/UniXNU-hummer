@@ -10,6 +10,15 @@ CONFIG_XNU_SOURCE_PTHREAD=y
 CONFIG_XNU_ARM_DT_PLATFORM=y
 CONFIG_XNU_ARMCPU=y
 
+# AMFI "No PMGR?" fix: 上游 patches/xnu/sheng-platform-power.patch 在
+# bsd/kern/bsd_init.c（bsd_bufferinit 之后）调用 sheng_pmgr_run()，本标志把它
+# 编译进去；符号由 build-hummer-platform-power.py 产出的归档提供（见
+# board.toml [kernel] archives 的 build-hummer-platform-power.py）。它从
+# prelinked 的 com.apple.driver.ApplePMGR 造出真的 ApplePMGRNub 并发布，
+# 让 AMFI 的物理平台分支拿到 PMGR（参考 UniXNU-sheng 已验证的同名机制）。
+# 前置：XNU_SOURCE_CORECRYPTO14=1（build-xnu-4k-baseline.sh 强制，已满足）。
+CONFIG_XNU_SHENG_PMGR=y
+
 CONFIG_XNU_CRYPTO_BOOTSTRAP="prelinked"
 
 # panic 区域从设备树 /chosen 读（embedded-panic-log-size + 对应 reg），
