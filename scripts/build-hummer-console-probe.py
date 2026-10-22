@@ -58,15 +58,17 @@ ARM_INIT = XNU / "osfmk/arm/arm_init.c"
 ARM_VM_INIT = XNU / "osfmk/arm64/arm_vm_init.c"
 PE_SERIAL = XNU / "pexpert/arm/pe_serial.c"
 PROTOS = XNU / "pexpert/pexpert/arm/protos.h"
+MACH_ROUT = XNU / "osfmk/arm64/machine_routines.c"
 HUMMER_H = XNU / "osfmk/arm64/hummer_early.h"
 
 PATCH_DIR = Path("patches/xnu")
-TOUCHED = (ARM_VM_INIT, ARM_INIT, PE_SERIAL, PROTOS)
+TOUCHED = (ARM_VM_INIT, ARM_INIT, PE_SERIAL, PROTOS, MACH_ROUT)
 
 OBJECT_ROOT = Path("build/xnu/ios-obj")
 STALE_OBJECTS = ("arm_init.o", "arm_init.o.json",
                  "arm_vm_init.o", "arm_vm_init.o.json",
-                 "pe_serial.o", "pe_serial.o.json")
+                 "pe_serial.o", "pe_serial.o.json",
+                 "machine_routines.o", "machine_routines.o.json")
 
 HEADER = r'''/*
  * hummer: framebuffer console for the part of arm_init() that runs with the
@@ -432,6 +434,20 @@ ARM_INIT_KPRINTF_ANCHOR = '\tkprintf("kprintf initialized\\n");\n'
 ARM_INIT_CONSOLE_ANCHOR = "\tPE_create_console();\n"
 ARM_INIT_PRINTF_ANCHOR = "\tPE_init_printf(FALSE);\n"
 
+# v22: print the state inside ml_processor_register() on every call.
+# The real-device run showed num_cpus=1 (cpus=1 boot arg) while the boot
+# CPU registration still failed with 5; the only remaining explanation is
+# reg_cpu_count already consumed by an earlier caller (ArmDTPlatform?).
+MLPR_PROBE = r'''/* ---- hummer: processor registration probe ------------------------------- */
+{
+	extern void hummer_early_u32x(const char *label, unsigned int value);
+	hummer_early_u32x("mlpr log_id", in_processor_info->log_id);
+	hummer_early_u32x("mlpr max_cpu", ml_get_max_cpu_number());
+	hummer_early_u32x("mlpr num_cpus", topology_info.num_cpus);
+	hummer_early_u32x("mlpr reg_count", reg_cpu_count);
+}
+'''
+
 # --------------------------------------------------------------------------
 # pe_serial.c: kprintf -> panel
 # --------------------------------------------------------------------------
@@ -713,6 +729,11 @@ def main():
            ARM_INIT_PRINTF_ANCHOR + "\thummer_early_mark(19, \"PE_init_printf done\");\n"
            + "\thummer_early_u32x(\"late num_cpus\", ml_get_topology_info()->num_cpus);\n",
            "mark 27")
+
+    # ---- machine_routines.c ----
+    p.insert_before(MACH_ROUT,
+                    "\tif (in_processor_info->log_id > (uint32_t)ml_get_max_cpu_number()) {\n",
+                    MLPR_PROBE, "mlpr probe")
 
     # ---- pe_serial.c ----
     p.insert_after(PE_SERIAL, "#include <arm64/proc_reg.h>\n",
