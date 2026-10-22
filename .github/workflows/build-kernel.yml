@@ -136,9 +136,16 @@ jobs:
 
           if [ "$mkfs" = yes ]; then
             # 卷里放 pid 1 的探针：/sbin/launchd 是一个手搓的静态 arm64 Mach-O
-            # （scripts/make-launchd-stub.py），只做 write(1, "HUMMER: userland alive")
-            # 然后自旋。v35 已经证明内核会 exec /sbin/launchd 并且只差这个文件
-            # （errno 2 @kern_exec.c:7334），所以这一刷的判据是 errno 变了没有。
+            # （scripts/make-launchd-stub.py）。v35 已证明内核会 exec 它、只差文件
+            # （errno 2 @kern_exec.c:7334），所以这一刷看的是 errno 变不变。
+            #
+            # stub 结尾是 exit(42) 而不是死循环：内核根本不给 pid 1 任何 fd
+            # （bsd_init 从不开 /dev/console，而我们的 ramdisk 连 /dev 目录都没有，
+            # devfs 无处可挂），所以 write(1) 可能一直是 EBADF。死循环的"屏幕静止"
+            # 和卡死分不开；exit 则必然让 kern_exit.c 打出
+            #   panic: initproc failed to start -- no exit reason available --
+            #          (signal 0, exit status 42)
+            # 这个 panic 和 exec 失败的 panic 一眼可分。
             python3 "$GITHUB_WORKSPACE/scripts/make-launchd-stub.py" "$RUNNER_TEMP/launchd-stub"
             MP="$RUNNER_TEMP/ram-root"
             rm -rf "$MP"; mkdir -p "$MP"
