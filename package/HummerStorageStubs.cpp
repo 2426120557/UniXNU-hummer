@@ -8,21 +8,28 @@
 // The same unit also references VerifiedRoot (com.apple root verification) and
 // an optional boot-progress observer, neither of which we build yet.
 //
-// Design rules for this file:
+// The IOBlockStorageDevice base methods are NOT listed here by hand: the vtable
+// of NativeUfsBlock needs every non-overridden virtual of the base class, i.e.
+// a list that follows whatever the storage-abi headers of the day declare.
+// scripts/build-hummer-storage-stubs.py reads the object's real undefined
+// symbols and generates a thunk for each one, so this stays correct by
+// construction.  This file only carries the things that cannot be a thunk:
+// the vtable storage, the VerifiedRoot data, and the shared refusal function.
 //
-//   - Everything is hidden.  These definitions exist to satisfy references
-//     made by our own dead code (nothing in the probe path constructs
-//     NativeUfsBlock).  They must NOT be exported from the kernel, because
-//     prelink binds every kext's undefined symbols against the kernel's symbol
-//     table - a global stub here would let a real storage kext bind its call to
-//     our panic instead of the IOStorageFamily implementation.  Private extern
-//     (hidden) visibility keeps them resolvable at static link time only.
+// Design rules:
+//
+//   - Nothing is exported.  These definitions exist to satisfy references made
+//     by our own dead code (nothing in the probe path constructs
+//     NativeUfsBlock).  Prelink binds every kext's undefined symbols against
+//     the kernel's symbol table, so an exported stub here would let a real
+//     storage kext bind its call to our panic instead of the IOStorageFamily
+//     implementation.  Everything is private extern / hidden.
 //
 //   - Every named object is explicitly `extern` as well as `const`.  At
 //     namespace scope C++ gives a const object internal linkage, which would
 //     make the definition invisible to NativeUfs.o and leave the link broken.
 //
-//   - Nothing pretends to succeed.  Every callable stub prints and panics.  The
+//   - Nothing pretends to succeed.  Every callable path prints and panics.  The
 //     VerifiedRoot data is empty by construction (policy count 0), so
 //     NativeUfsBlock::configureVerification() takes its "policy count invalid"
 //     soft-failure path and the root stays closed rather than half-open.
@@ -44,22 +51,22 @@ extern "C" {
 extern int kprintf(const char *format, ...);
 extern void panic(const char *format, ...) __attribute__((noreturn));
 
-// ---- IOBlockStorageDevice placeholders (the real class is a prelinked kext) ----
+// Tail-call target of every generated IOBlockStorageDevice thunk.  It cannot
+// name the method (a thunk carries no metadata), so it names the consequence.
+void hummer_storage_unavailable(void)
+{
+	kprintf("HUMMER STUB: an IOBlockStorageDevice base method was called; "
+		"the storage class is not built into this probe image\n");
+	panic("HUMMER STUB: IOBlockStorageDevice base method");
+}
+
+// ---- IOBlockStorageDevice vtable storage (the real class is a prelinked kext) ----
 //
-// 190 slots is the vtable length our NativeUfs.o was compiled against; the
-// array only has to exist so the reference resolves.  It is zero, so any
-// accidental virtual dispatch faults immediately instead of running something.
+// 190 slots is the length our NativeUfs.o was compiled against; the array only
+// has to exist so the vtable reference resolves.  It is zero, so an accidental
+// virtual dispatch through it faults instead of running something.
 extern void *hummer_storage_device_vtable[190] __asm__("__ZTV20IOBlockStorageDevice");
 void *hummer_storage_device_vtable[190] = {};
-
-extern void *hummer_storage_device_get_property(const void *, const void *)
-	__asm__("__ZNK20IOBlockStorageDevice11getPropertyEPK8OSSymbol");
-void *hummer_storage_device_get_property(const void *, const void *)
-{
-	kprintf("HUMMER STUB: IOBlockStorageDevice::getProperty reached; "
-		"storage verification is not built into this image\n");
-	panic("HUMMER STUB: IOBlockStorageDevice::getProperty");
-}
 
 // ---- VerifiedRoot: present, but refuses to authenticate anything ----
 struct hummer_vr_crypto_stub {
@@ -82,7 +89,7 @@ extern int vr_open(const uint8_t *, size_t, const uint8_t[395], uint64_t,
 int vr_open(const uint8_t *, size_t, const uint8_t[395], uint64_t,
 	    const struct hummer_vr_crypto_stub *, struct hummer_vr_view_stub *)
 {
-	kprintf("HUMMER STUB: vr_open reached; storage verification is not built into this image\n");
+	kprintf("HUMMER STUB: vr_open reached; the owner root is not built into this probe image\n");
 	panic("HUMMER STUB: vr_open");
 }
 
@@ -92,7 +99,7 @@ int vr_verify_block(const struct hummer_vr_view_stub *, uint64_t, const void *, 
 		    const struct hummer_vr_crypto_stub *)
 {
 	kprintf("HUMMER STUB: vr_verify_block reached; "
-		"storage verification is not built into this image\n");
+		"the owner root is not built into this probe image\n");
 	panic("HUMMER STUB: vr_verify_block");
 }
 

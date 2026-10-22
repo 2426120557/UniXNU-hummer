@@ -75,15 +75,17 @@ archives = [
   # kernel` runs (not after `defconfig`), so the ABI headers are staged from
   # inside an archive builder; it then runs上游 audit-storage-interface.py。
   "build-storage-abi-hummer.py",
+  "build-arm-driver.py NativeUfs",
   # v25：probe 阶段的链接桩。NativeUfs.cpp 是单文件，里面还带
   # NativeUfsBlock : IOBlockStorageDevice —— 该类只存在于 prelinked 的
   # com.apple.iokit.IOStorageFamily kext 里（XNU 10063 根本没有 iokit/storage
   # 目录），另有 VerifiedRoot 与可选 boot_progress_poll 的引用。probe=2 从不
-  # 构造块设备，引用是死代码，但静态链接仍然要它们有定义。桩全部 panic 且带
-  # hidden visibility（不允许任何 kext 绑到桩上），归档由 defconfig 的
-  # XNU_EXTRA_LD_ARCHIVES force_load。
+  # 构造块设备，引用是死代码，但 `vtable for NativeUfsBlock` 会把基类的每一个
+  # 未覆盖虚函数都拉进来，静态链接必须全部有定义。
+  # 必须排在 NativeUfs 之后：它读 build/native-ufs/NativeUfs.o 的真实未定义
+  # 符号表，据此自动生成 thunk（不在脚本里硬编码签名，也就不会随 storage-abi
+  # 头漂移）。归档由 defconfig 的 XNU_EXTRA_LD_ARCHIVES force_load。
   "build-hummer-storage-stubs.py",
-  "build-arm-driver.py NativeUfs",
   # 注意：所有构建器都在 macOS 上跑（kernel.py 硬性要求 xcodebuild + iphoneos SDK）。
   #
   # 已下线 build-hummer-video-map.py：它在 PE_create_console() 前面调
