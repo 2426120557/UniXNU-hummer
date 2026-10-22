@@ -147,24 +147,55 @@ jobs:
           fi
 
           ls -la "$OUT"
+
+          # hdiutil 会给这个镜像套一层 GPT（"EFI PART" 在 0x200），APFS 容器在它的
+          # 分区里。而 md0 是裸整盘设备：mdevadd() 只建一个 IOMedia，没有分区方案去
+          # 遍历，所以文件系统必须落在偏移 0。做法是把那个 APFS 分区整块切出来 ——
+          # APFS 容器的块 0 就是分区起点，切出来仍然是一个合法的独立容器。
+          python3 - "$OUT" <<'PY'
+          import struct, sys
+          path = sys.argv[1]
+          data = open(path, "rb").read()
+          if data[512:520] != b"EFI PART":
+              print("no GPT header at 0x200: image stays as is (%d bytes)" % len(data))
+              sys.exit(0)
+          entries_lba, count, esize = struct.unpack_from("<QII", data, 512 + 72)
+          base = entries_lba * 512
+          print("GPT: %d entries of %d bytes at lba %d" % (count, esize, entries_lba))
+          for i in range(count):
+              e = data[base + i * esize: base + (i + 1) * esize]
+              if e[0:16] == bytes(16):
+                  continue
+              first, last = struct.unpack_from("<QQ", e, 32)
+              apfs = e[0:16] == bytes.fromhex("ef57347c0000aa11aa1100306543ecac")
+              print("partition %d: %s lba %d..%d (%d bytes, %d MiB)"
+                    % (i, "APFS" if apfs else e[0:16].hex(), first, last,
+                       (last - first + 1) * 512, (last - first + 1) // 2048))
+              if not apfs:
+                  continue
+              out = data[first * 512:(last + 1) * 512]
+              open(path, "wb").write(out)
+              print("stripped the partition map: %d -> %d bytes" % (len(data), len(out)))
+              break
+          else:
+              sys.exit("no APFS partition found in the GPT")
+          PY
+
+          ls -la "$OUT"
           echo "--- first 96 bytes ---"
           hexdump -C -n 96 "$OUT" || true
 
           # APFS 容器超级块：块内偏移 32 处是 'NXSB'（4e 58 53 42）。
           magic=$(dd if="$OUT" bs=1 skip=32 count=4 2>/dev/null | xxd -p)
           echo "bytes[32..36] = ${magic:-?}"
-          if [ "$magic" = "4e585342" ]; then
-            echo "RESULT: APFS container superblock present, filesystem sits at offset 0"
+          if [ "$mkfs" = yes ]; then
+            if [ "$magic" != "4e585342" ]; then
+              echo "::error::no NXSB at offset 32 -- the root image is not an APFS container"
+              exit 1
+            fi
+            echo "RESULT: APFS container at offset 0, $(stat -f%z "$OUT") bytes"
           else
-            echo "RESULT: no NXSB at offset 32"
-          fi
-
-          # 若有 GPT，说明文件系统不在偏移 0，md0 还需要分区方案才能找到卷。
-          gpt=$(dd if="$OUT" bs=1 skip=512 count=8 2>/dev/null | xxd -p)
-          if [ "$gpt" = "4546492050415254" ]; then
-            echo "RESULT: GPT header at 0x200 -- root fs is NOT at offset 0"
-          else
-            echo "RESULT: no partition map at 0x200"
+            echo "RESULT: zeros fallback -- md0 will register, but there is nothing to mount"
           fi
 
           test -s "$OUT"
