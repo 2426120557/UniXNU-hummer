@@ -84,6 +84,75 @@ jobs:
         run: ./unixnu status -D "$GITHUB_WORKSPACE"
         working-directory: UniXNU
 
+      # ── v42 诊断补丁 ─────────────────────────────────────────────────────
+      # v39（手搓 ad-hoc 签名的 16 KiB 探针）和 v41（从 21H461 固件里原样抽出来
+      # 的真 launchd 561,856 B + dyld 937,056 B）停在同一行：
+      #
+      #   panic(cpu 0 caller 0xfffffff007985a2c): Taking non-sleepable RW lock
+      #         with preemption enabled @lock_rw.c:1480
+      #
+      # 这一行在 lock_rw.c 的两个 internal_inline 里都有（shared / exclusive），
+      # 判据是 `!lock->lck_rw_can_sleep && get_preemption_level() == 0`：
+      # 有人在一把"不可睡眠"的 rwlock 上抢锁，而当时抢占是开着的。
+      # 但这条 panic 只说"抢错了"，不说"哪把锁、谁抢的"，而 XNU 的 panic
+      # 在这个平台层上不打印栈 —— 于是只能靠改内核把信息塞进消息本身：
+      #
+      #   lock     rwlock 结构地址
+      #   caller   调用 lck_rw_lock_shared() 那条指令的返回地址（可直接对符号）
+      #   w=...    锁结构前 64 字节；**全 0 就说明这把锁从没被 lck_rw_init 初始化过**
+      #            （未初始化的 rwlock 在 XNU 里正好被判成 non-sleepable），
+      #            那么问题就是"某个 init 没跑到"，而不是锁的用法有错。
+      #
+      # 判据检查：替换次数必须 > 0，否则 xnu 源码换版了，直接失败，别白跑一次。
+      - name: Patch XNU rwlock panic for diagnostics
+        run: |
+          python3 - <<'PY'
+          import os, re, sys, pathlib
+
+          target = None
+          for root in ("UniXNU/out", "UniXNU"):
+              if not os.path.isdir(root):
+                  continue
+              for p in pathlib.Path(root).rglob("lock_rw.c"):
+                  if p.parts[-2:] == ("kern", "lock_rw.c"):
+                      target = p
+                      break
+              if target:
+                  break
+          if target is None:
+              print("::error::osfmk/kern/lock_rw.c not found -- cannot patch")
+              sys.exit(1)
+          print("patching", target, target.stat().st_size, "bytes")
+
+          src = target.read_text()
+          pat = re.compile(
+              r'panic\(\s*"Taking non-sleepable RW lock with preemption enabled[^"]*"'
+              r'(?:\s*,\s*__FILE__\s*,\s*__LINE__)?\s*\);')
+          NEW = (
+              'panic("nonSLRW lock=%p caller=%p w=%llx,%llx,%llx,%llx,%llx,%llx,%llx,%llx", '
+              '(void *)lock, __builtin_return_address(0), '
+              '(unsigned long long)((uint64_t *)lock)[0], '
+              '(unsigned long long)((uint64_t *)lock)[1], '
+              '(unsigned long long)((uint64_t *)lock)[2], '
+              '(unsigned long long)((uint64_t *)lock)[3], '
+              '(unsigned long long)((uint64_t *)lock)[4], '
+              '(unsigned long long)((uint64_t *)lock)[5], '
+              '(unsigned long long)((uint64_t *)lock)[6], '
+              '(unsigned long long)((uint64_t *)lock)[7]);')
+          new, n = pat.subn(NEW, src)
+          print("patched sites:", n)
+          if n == 0:
+              for i, ln in enumerate(src.splitlines(), 1):
+                  if "non-sleepable RW lock" in ln:
+                      print("  found(unpatched) %d: %s" % (i, ln.strip()))
+              print("::error::panic string not matched -- xnu source layout changed")
+              sys.exit(1)
+          target.write_text(new)
+          for i, ln in enumerate(new.splitlines(), 1):
+              if "nonSLRW" in ln:
+                  print("  %d: %s" % (i, ln.strip()[:150]))
+          PY
+
       - name: Build kernel (prelink fails without IPSW, expected)
         continue-on-error: true
         env:
