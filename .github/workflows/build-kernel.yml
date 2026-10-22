@@ -12,6 +12,8 @@ jobs:
   kernel:
     runs-on: macos-15          # 与 UniXNU 官方 macOS build workflow 一致
     timeout-minutes: 300       # 上限 360，留点余量
+    permissions:
+      contents: write          # 只为把产物/日志挂到 ci-latest release
     steps:
       - name: Checkout device repo
         uses: actions/checkout@v4
@@ -117,11 +119,11 @@ jobs:
 
       # 失败时把日志尾巴写进 job summary：summary 会直接渲染在 run 页面上，
       # 不用登录、不用下 artifact 就能看到失败原因。
-      - name: Failure summary
-        if: failure()
+      - name: Build summary
+        if: always()
         run: |
           {
-            echo "## build-kernel 失败"
+            echo "## build-kernel: KERNEL_BUILT=${KERNEL_BUILT:-unknown}"
             echo
             for f in kernel.log payload.log \
                      UniXNU/out/hummer/logs/kernel-bootstrap.log \
@@ -130,15 +132,37 @@ jobs:
               [ -f "$f" ] || { echo "- \`$f\`: 不存在"; continue; }
               echo "### $f"
               echo '```'
-              grep -n -iE "error:|error |Error [0-9]|undefined|No such file|ld: |command not found|Traceback|raise " "$f" | tail -25 || true
-              echo '--- last 45 lines ---'
-              tail -45 "$f"
+              grep -n -iE "error:|error |Error [0-9]|undefined|No such file|ld: |command not found|Traceback|raise |fatal:" "$f" | tail -40 || true
+              echo '--- last 60 lines ---'
+              tail -60 "$f"
               echo '```'
             done
             echo
             echo "### logs 目录"
             ls -la UniXNU/out/hummer/logs/ 2>/dev/null || echo "(none)"
           } >> "$GITHUB_STEP_SUMMARY"
+
+      # 把产物和日志挂到一个滚动 release（tag ci-latest）上：release 资产不需要
+      # token 就能下载，日志和 kernel.macho 都能直接从命令行取。
+      - name: Publish build outputs
+        if: always()
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tar czf ci-logs.tar.gz kernel.log payload.log UniXNU/out/hummer/logs 2>/dev/null || true
+          gh release view ci-latest >/dev/null 2>&1 \
+            || gh release create ci-latest --title "ci latest" \
+                 --notes "Rolling build outputs of build-kernel. Overwritten on every run." 
+          FILES=()
+          for f in ci-logs.tar.gz UniXNU/out/hummer/kernel/kernel.macho; do
+            [ -f "$f" ] && FILES+=("$f")
+          done
+          if [ -f UniXNU/out/hummer/payload/payload.img ]; then
+            FILES+=("UniXNU/out/hummer/payload/payload.img")
+          fi
+          echo "uploading: ${FILES[*]:-<nothing>}"
+          [ ${#FILES[@]} -gt 0 ] && gh release upload ci-latest "${FILES[@]}" --clobber
 
       - name: Upload kernel and logs
         uses: actions/upload-artifact@v4
