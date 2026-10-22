@@ -19,6 +19,7 @@ ones stay, because removing them could promote a warning to an error.
 
 Usage: build-storage-abi-hummer.py
 """
+import ast
 import re
 import subprocess
 import sys
@@ -80,37 +81,27 @@ def compiler_from_record():
 def local_audit_script():
     """A copy of the audit script minus suppressions this compiler cannot parse.
 
-    The option lists span multiple lines and the last entry of each is followed
-    by a bracket, not a comma, so the lists are rebuilt rather than spliced.
+    Only the offending token itself is removed.  Rebuilding the option lists
+    wholesale would drop the unquoted expressions they carry, such as a
+    '-I', str(out / 'include') pair, because those are not quoted strings.
     """
     text = AUDIT.read_text()
     compiler = compiler_from_record()
     print(f'probing warning options against: {compiler or "default clang"}')
     dropped = []
-
-    # Only the compile-command lists are touched: rewriting arbitrary bracket
-    # expressions would corrupt expressions like parents[1].
-    pattern = re.compile(r"(command \+= \[)([^\]]*?)(\])", re.S)
-
-    def rebuild(match):
-        head, body, tail = match.groups()
-        options = re.findall(r"'([^']+)'", body)
-        kept = []
-        for option in options:
-            if option.startswith('-Wno-') and not compiler_knows(compiler, option):
-                dropped.append(option)
-                continue
-            kept.append(option)
-        rendered = ', '.join(f"'{option}'" for option in kept)
-        return f'{head}{rendered}{tail}'
-
-    patched, count = pattern.subn(rebuild, text)
-    if not count:
-        raise SystemExit('the audit script has no compile-command list to adjust')
+    for quoted in sorted(set(re.findall(r"'-Wno-[A-Za-z0-9-]+'", text))):
+        if compiler_knows(compiler, quoted.strip("'")):
+            continue
+        patched = text.replace(f'{quoted}, ', '').replace(f', {quoted}', '')
+        if patched == text:
+            raise SystemExit(f'the audit script no longer carries {quoted}')
+        text = patched
+        dropped.append(quoted.strip("'"))
+    ast.parse(text)  # a survivor must still mean what it meant
     if dropped:
         print('dropped unsupported options: ' + ' '.join(sorted(set(dropped))))
     copy = AUDIT.with_name('audit-storage-interface-hummer.py')
-    copy.write_text(patched)
+    copy.write_text(text)
     return copy
 
 
