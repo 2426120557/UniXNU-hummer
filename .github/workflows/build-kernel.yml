@@ -21,7 +21,27 @@ jobs:
         with:
           repository: UniXNU/UniXNU
           path: UniXNU
-          submodules: recursive
+
+      # 不要用 submodules: recursive。UniXNU 的 main 目前有三个子模块 gitlink
+      # 指向远端已经不存在的 commit（drivers/DarwinBoot d099354d、
+      # drivers/NativeAdreno 5cf11357、drivers/NativeRamBlock d4d22d98，
+      # 查询返回 422），递归 checkout 会在第一个上直接失败，而且和本板无关。
+      # 这里只取内核步骤真正需要的三个，任何一个取不到就退回它的默认分支。
+      - name: Checkout the UniXNU pieces this board needs
+        shell: bash
+        run: |
+          set -u
+          cd UniXNU
+          for p in drivers/ArmCpu drivers/ArmDTPlatform kits/NativePrelink; do
+            if git submodule update --init "$p" 2>/dev/null; then
+              echo "submodule $p: pinned commit"
+            else
+              echo "::warning::submodule $p is pinned to a commit upstream no longer serves; using its default branch"
+              rm -rf "$p"
+              git clone "https://github.com/UniXNU/$(basename "$p").git" "$p"
+            fi
+          done
+          ls -d drivers/ArmCpu drivers/ArmDTPlatform kits/NativePrelink
 
       # 关键：固定 Python 3.12。系统默认的 3.14 会让 XNU 的 LDFILELIST 等脚本静默失败。
       - name: Set up Python 3.12
