@@ -762,6 +762,33 @@ def main():
                     "\tif (in_processor_info->log_id > (uint32_t)ml_get_max_cpu_number()) {\n",
                     MLPR_PROBE, "mlpr probe")
 
+    # v48: pins inside ml_processor_register().  On the device the second
+    # registration prints its four probe lines and then the machine goes quiet
+    # -- but the first kprintf("[%d]%s>pset_find...") (two lines after
+    # lck_mtx_lock(&pset_create_lock)) never appears, even though kprintf is
+    # up and panic text renders.  So the hang is between the probes and that
+    # kprintf: the field assignments, kvtophys(), OSTestAndSet() or the lock.
+    # Bracket every step; the source here is xnu-10063.141.1 verbatim and no
+    # UniXNU patch touches this file, so these anchors are stable.
+    MLR2_DECL = "extern void hummer_early_u32x(const char *label, unsigned int value);"
+    p.insert_after(MACH_ROUT, "\t\tis_boot_cpu = TRUE;\n",
+                   "\t{ " + MLR2_DECL + "\n"
+                   "\t  hummer_early_u32x(\"mlr2 boot-cpu branch\", (unsigned int)in_processor_info->log_id); }\n",
+                   "mlr2 boot")
+    p.insert_after(MACH_ROUT,
+                   "\tthis_cpu_datap->cpu_reset_assist = kvtophys(in_processor_info->powergate_stub_addr);\n",
+                   "\t{ " + MLR2_DECL + "\n"
+                   "\t  hummer_early_u32x(\"mlr2 kvtophys done\", (unsigned int)in_processor_info->log_id); }\n",
+                   "mlr2 kvtop")
+    p.insert_after(MACH_ROUT, "\tlck_mtx_lock(&pset_create_lock);\n",
+                   "\t{ " + MLR2_DECL + "\n"
+                   "\t  hummer_early_u32x(\"mlr2 pset lock taken\", (unsigned int)in_processor_info->log_id); }\n",
+                   "mlr2 lock")
+    p.insert_after(MACH_ROUT, "\tlck_mtx_unlock(&pset_create_lock);\n",
+                   "\t{ " + MLR2_DECL + "\n"
+                   "\t  hummer_early_u32x(\"mlr2 pset lock released\", (unsigned int)in_processor_info->log_id); }\n",
+                   "mlr2 unlock")
+
     # ---- pe_serial.c ----
     p.insert_after(PE_SERIAL, "#include <arm64/proc_reg.h>\n",
                    HUMMER_PROTOS, "pe_serial protos")
