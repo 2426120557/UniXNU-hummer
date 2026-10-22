@@ -58,27 +58,34 @@ archives = [
   "build-arm-driver.py ArmCpu",
   "build-libpthread-kernel.py",
   "build-native-probe-stubs.py",
-  # 必须放在最后：kernel.py 的 build_archives() 跑在「引导编译 pass」和「最终
-  # 链接 pass」之间，这个脚本改 XNU 源码后删掉旧的 arm_init.o，最终 pass 就会
-  # 重编它。作用：把 boot_args.Video 里的帧缓冲（PA 0xFC000000）映射进内核高窗
-  # 并改成 write-combine；否则图形控制台第一次写像素就 data abort，panic 又在
-  # 同一处再崩一次，屏幕只剩 DARWINBOOT 最后一行（v12/v13 的现象）。
+  # 注意：所有构建器都在 macOS 上跑（kernel.py 硬性要求 xcodebuild + iphoneos SDK）。
   #
-  # 不能放前面：它删掉的 arm_init.o 还在 link.filelist 里，后面的 archive 步骤
-  # （build-corecrypto-14.py 等）会用 `xcrun nm` 扫整份 osfmk 目标文件列表，
-  # 碰到不存在的文件直接报 “No such file or directory” 并中断整个构建。
-  "build-hummer-video-map.py",
-  # 同样放在最后。这一项探 start.s 里 MMU 打开之前的两段路，那时 MMU 还关着
-  # （DarwinBoot 清过 SCTLR_EL1.M），直接往帧缓冲的物理地址写像素不需要页表：
-  #   洋红横带 y=64..96      start_first_cpu 入口（x0 还是 boot_args 物理指针）
-  #   青色横带 y=1200..1232  common_start 开头，即 create_bootstrap_mapping
-  #                          已经把 V=P 和 KVA 两套临时页表建完、两个栈和
-  #                          arm_init 的 KVA 也算完
-  # MMU 一开，0xFC000000 就没有映射了，内核在 arm_vm_init 建好 pmap 之前画不了
-  # 任何东西，所以更靠后的进度改用另一种信号：outputs/patch-reset-probe.py 把
-  # _arm_init 里那条 `bl arm_vm_init` 换成一段 cave，调用照做，然后等 6 秒用
-  # PSCI SYSTEM_RESET 复位。6 秒后重启 = arm_vm_init 返回了；不重启 = 死在里面。
+  # 已下线 build-hummer-video-map.py：它在 PE_create_console() 前面调
+  # pmap_map_bd_with_options 把帧缓冲映射到高窗再写像素。v13~v16 真机全无反应，
+  # 后来证明那段代码根本没被执行到（内核死得更早），而它一旦被执行到就是往
+  # 帧缓冲物理地址直接写、随时可能 data abort —— 留着是个地雷。
+  # 帧缓冲改由下面的 build-hummer-console-probe.py 用块映射接管。
+  #
+  # 不能把改源码的构建器放前面：它们删掉的 .o 还在 link.filelist 里，后面的
+  # archive 步骤会用 `xcrun nm` 扫整份 osfmk 目标文件列表，碰到不存在的文件
+  # 直接报 “No such file or directory” 并中断整个构建。
+  # MMU 打开之前的两段路用像素当信号（那时 MMU 关着，直接写帧缓冲物理地址）：
+  #   洋红横带 y=64..96      start_first_cpu 入口
+  #   青色横带 y=1200..1232  common_start 开头（bootstrap 页表已建完）
+  # 真机上这两条带出现过，证明入口和 common_start 都没问题。
   "build-hummer-entry-probe.py",
+  # 最后一项：给内核装一个真正的屏幕控制台（参考 xyyyds0106/ios-vermeer-lab
+  # 的 0010 / 0012 / 0003 三个补丁）。v18 已经证明 arm_vm_init 返回、v19 证明
+  # 死点在它返回之后、PE_create_console 之前，用「时间」当信号一次只能问一个
+  # 比特；这个构建器改成把面板映射进 arm_vm_init 换表后仍然有效的内核页表，
+  # 然后直接从 C 里往面板画字，于是：
+  #   1. arm_vm_init 里 20/21/22/23 四个阶段各打一行；
+  #   2. arm_init 里 15..19、25..27 各打一行（含 serial_init、PE_create_console、
+  #      PE_init_printf 前后）；
+  #   3. pe_serial.c 把同一套渲染器注册成串口设备，kprintf 的输出也落到屏幕上。
+  # 真机上只要看到 "HUM 15: arm_vm_init returned" 就说明控制台活了；哪一行是最后
+  # 一行，死点就在那一行和下一行之间。
+  "build-hummer-console-probe.py",
 ]
 
 # prelink：把 4K 页 XNU 内核 prelink 进原版 kernelcache。
