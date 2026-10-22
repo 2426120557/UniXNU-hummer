@@ -36,6 +36,22 @@ CONFIG_XNU_CRYPTO_BOOTSTRAP="prelinked"
 # 而抢占是开着的 → panic。参考 UniXNU-sheng 的同名键也是 =y（它那套能进用户态）。
 CONFIG_XNU_TRUST_CACHE_RUNTIME=y
 
+# —— v44：16K 页签名 → 4K 页内核的哈希缓存（反推自 v43 真机 panic）——
+# v43 把信任缓存修好之后，panic 从 "Taking non-sleepable RW lock" 变成了
+#   unexpected SIGKILL of launchd with reason -- namespace 9 code 0x0
+#   @_psignal_internal.cold.7
+# 即 namespace=OS_REASON_EXEC(9)、CS_KILLED 标记为空（unexpected_failure=TRUE），
+# 死点回到 v38 那层：签名不被接受。差异点在这里——
+# iOS 17.7 的 launchd 按 16 KiB 页算 CodeDirectory 哈希（pageSize=14），
+# 而本内核是 4 KiB 页（PAGE_SHIFT=12），ubc_subr.c:378 直接
+#   if (cd->pageSize != 12 && cd->pageSize != PAGE_SHIFT) return EBADEXEC;
+# 于是 cs_blob 根本建不起来，后面信任缓存查什么都白搭。
+# patches/xnu/native-4k-signature-hash-cache.patch 做的事：先用原始 16K 哈希
+# 验完整个限长区间，再派生 4K 摘要并设为只读，供 VM fault 快速校验。
+# 参考 UniXNU-sheng 的同名键也是 =y。
+# 前置：无（只给 ubc_subr.o 加 -DXNU_NATIVE_CS_HASH_CACHE=1）。
+CONFIG_XNU_NATIVE_CS_HASH_CACHE=y
+
 # panic 区域从设备树 /chosen 读（embedded-panic-log-size + 对应 reg），
 # 而不是用 BCM2837 的硬编码地址 —— 那个地址在本机没有映射，panic 时写进去会
 # 二次异常，屏幕永远什么都看不到（参考 13T 的 oneplus13t_defconfig 原话：

@@ -229,6 +229,37 @@ jobs:
               out += glob.glob(os.path.join(ROOT, "*", "*", "*", "*"))
               return out
 
+          # —— v44：process_signature() 分支诊断 ——
+          # v43 把信任缓存修好之后，panic 变成
+          #   unexpected SIGKILL of launchd ... namespace 9 code 0x0
+          # @_psignal_internal.cold.7。namespace 9 = OS_REASON_EXEC，
+          # 但 EXEC_EXIT_REASON_* 没有 0 这个值，而且行里没有 (CS_KILLED)
+          # 标记（= unexpected_failure 为真）。现有源码没法唯一对上分支，
+          # 所以每个 goto done 前打一个 SIGPn 标记，下一张照片直接读出路径。
+          def _lit(old, new):
+              return (re.compile(re.escape(old)), lambda m, s=new: s)
+
+          RULES["bsd/kern/kern_exec.c"] = [
+              _lit('\tkern_return_t kr = machine_task_process_signature(proc_get_task_raw(p), proc_platform(p), proc_sdk(p), &error_msg);\n\n\tif (kr != KERN_SUCCESS) {\n\t\terror = EINVAL;',
+                   '\tkern_return_t kr = machine_task_process_signature(proc_get_task_raw(p), proc_platform(p), proc_sdk(p), &error_msg);\n\n\tif (kr != KERN_SUCCESS) {\n\t\tprintf("SIGP1 kr=%d msg=%s\\n", kr, error_msg ? error_msg : "none");\n\t\terror = EINVAL;'),
+              _lit('\tif (imgp->ip_mac_return != 0) {\n\t\tKERNEL_DEBUG_CONSTANT(BSDDBG_CODE(DBG_BSD_PROC, BSD_PROC_EXITREASON_CREATE) | DBG_FUNC_NONE,\n\t\t    proc_getpid(p), OS_REASON_EXEC, EXEC_EXIT_REASON_SECURITY_POLICY, 0, 0);',
+                   '\tif (imgp->ip_mac_return != 0) {\n\t\tprintf("SIGP2 macret=%d\\n", imgp->ip_mac_return);\n\t\tKERNEL_DEBUG_CONSTANT(BSDDBG_CODE(DBG_BSD_PROC, BSD_PROC_EXITREASON_CREATE) | DBG_FUNC_NONE,\n\t\t    proc_getpid(p), OS_REASON_EXEC, EXEC_EXIT_REASON_SECURITY_POLICY, 0, 0);'),
+              _lit('\tif (imgp->ip_cs_error != OS_REASON_NULL) {\n\t\tsignature_failure_reason = imgp->ip_cs_error;',
+                   '\tif (imgp->ip_cs_error != OS_REASON_NULL) {\n\t\tprintf("SIGP3 ns=%d code=%llu\\n", imgp->ip_cs_error->osr_namespace, (unsigned long long)imgp->ip_cs_error->osr_code);\n\t\tsignature_failure_reason = imgp->ip_cs_error;'),
+              _lit('\tif ((error = mac_proc_check_launch_constraints(p, imgp, &launch_constraint_reason)) != 0) {\n\t\tsignature_failure_reason = launch_constraint_reason;',
+                   '\tif ((error = mac_proc_check_launch_constraints(p, imgp, &launch_constraint_reason)) != 0) {\n\t\tprintf("SIGP4 lc=%d\\n", error);\n\t\tsignature_failure_reason = launch_constraint_reason;'),
+              _lit('\tif (imgp->ip_csflags & CS_SIGNED) {\n\t\terror = 0;\n\t\tgoto done;\n\t}',
+                   '\tif (imgp->ip_csflags & CS_SIGNED) {\n\t\tprintf("SIGP5 signed ipcs=%x\\n", (unsigned)imgp->ip_csflags);\n\t\terror = 0;\n\t\tgoto done;\n\t}'),
+              _lit('\tif (KERN_SUCCESS != kr || !IPC_PORT_VALID(port)) {\n\t\terror = 0;',
+                   '\tif (KERN_SUCCESS != kr || !IPC_PORT_VALID(port)) {\n\t\tprintf("SIGP6 noport kr=%d\\n", kr);\n\t\terror = 0;'),
+              _lit('\tcase KERN_FAILURE:\n\t\terror = EACCES;',
+                   '\tcase KERN_FAILURE:\n\t\tprintf("SIGP7 taskgated_reject\\n");\n\t\terror = EACCES;'),
+              _lit('\tdefault:\n\t\terror = EACCES;\n\n\t\tKERNEL_DEBUG_CONSTANT(BSDDBG_CODE(DBG_BSD_PROC, BSD_PROC_EXITREASON_CREATE) | DBG_FUNC_NONE,\n\t\t    proc_getpid(p), OS_REASON_EXEC, EXEC_EXIT_REASON_TASKGATED_OTHER, 0, 0);',
+                   '\tdefault:\n\t\tprintf("SIGP8 taskgated_other kr=%d\\n", kr);\n\t\terror = EACCES;\n\n\t\tKERNEL_DEBUG_CONSTANT(BSDDBG_CODE(DBG_BSD_PROC, BSD_PROC_EXITREASON_CREATE) | DBG_FUNC_NONE,\n\t\t    proc_getpid(p), OS_REASON_EXEC, EXEC_EXIT_REASON_TASKGATED_OTHER, 0, 0);'),
+              _lit("done:\n\tif (0 == error) {\n\t\t/*\n\t\t * Update the new process's signature-dependent process state.",
+                   "done:\n\tprintf(\"SIGP9 err=%d unf=%d csfl=%x\\n\", error, unexpected_failure, (unsigned)proc_getcsflags(p));\n\tif (0 == error) {\n\t\t/*\n\t\t * Update the new process's signature-dependent process state."),
+          ]
+
           deadline = time.time() + 3000
           seen = set()
           total = 0
@@ -304,6 +335,19 @@ jobs:
           print("  HTC img4if  x%d   (must be >= 1)" % tc)
           print("  HTC amfi    x%d" % tca)
           print("  trust_cache_init x%d (must be >= 1 when v43 knob is on)" % tci)
+          # v44：process_signature() 的分支诊断。SIGP9 在 done: 之后无条件执行，
+          # 它出现就说明 kern_exec.c 真的参与了这一版编译。
+          sg9 = d.count(b"SIGP9 err=%d unf=%d csfl=%x")
+          sg5 = d.count(b"SIGP5 signed ipcs=%x")
+          sg1 = d.count(b"SIGP1 kr=%d msg=%s")
+          # v44 的开关：16K→4K 哈希缓存只在 ubc_subr.o 里编进去，
+          # 它的日志串是 "disallowing unsupported code signature page shift"
+          # 的反面 —— 用名字本身做指纹更直接。
+          hc = d.count(b"cs_native4k_hash_cache_version")
+          print("  SIGP9       x%d   (must be >= 1)" % sg9)
+          print("  SIGP5       x%d" % sg5)
+          print("  SIGP1       x%d" % sg1)
+          print("  native4k    x%d   (must be >= 1 when v44 knob is on)" % hc)
           if n < 1:
               print("::error::the lock diagnostic patch did not reach the kernel binary")
               sys.exit(1)
@@ -313,6 +357,13 @@ jobs:
           if tci < 1:
               print("::error::CONFIG_XNU_TRUST_CACHE_RUNTIME did not take effect -- "
                     "startup.c still compiles the trust_cache block out")
+              sys.exit(1)
+          if sg9 < 1:
+              print("::error::the process_signature diagnostics did not reach the kernel binary")
+              sys.exit(1)
+          if hc < 1:
+              print("::error::CONFIG_XNU_NATIVE_CS_HASH_CACHE did not take effect -- "
+                    "ubc_subr.c still rejects 16K-page code directories")
               sys.exit(1)
           PY
 
