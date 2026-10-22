@@ -123,6 +123,31 @@ jobs:
             ls -la UniXNU/out/hummer/logs/ 2>/dev/null || true
           fi
 
+      # 失败时把日志尾巴写进 job summary：summary 会直接渲染在 run 页面上，
+      # 不用登录、不用下 artifact 就能看到失败原因。
+      - name: Failure summary
+        if: failure()
+        run: |
+          {
+            echo "## build-kernel 失败"
+            echo
+            for f in kernel.log payload.log \
+                     UniXNU/out/hummer/logs/kernel-bootstrap.log \
+                     UniXNU/out/hummer/logs/kernel.log \
+                     UniXNU/out/hummer/logs/prelink.log; do
+              [ -f "$f" ] || { echo "- \`$f\`: 不存在"; continue; }
+              echo "### $f"
+              echo '```'
+              grep -n -iE "error:|error |Error [0-9]|undefined|No such file|ld: |command not found|Traceback|raise " "$f" | tail -25 || true
+              echo '--- last 45 lines ---'
+              tail -45 "$f"
+              echo '```'
+            done
+            echo
+            echo "### logs 目录"
+            ls -la UniXNU/out/hummer/logs/ 2>/dev/null || echo "(none)"
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Upload kernel and logs
         uses: actions/upload-artifact@v4
         if: always()
