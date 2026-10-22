@@ -29,7 +29,7 @@ How
 2. The same file grows the renderer: 8x16 `iso_font` glyphs at 2x, straight
    stores into the aliased VA.  No locks, no allocation, no per-CPU state.
 3. `hummer_early_mark()` is sprinkled through `arm_vm_init()` and `arm_init()`
-   so every stage prints one line: "HUM 22: calling pmap_bootstrap" etc.
+   so every stage prints one line: "HUM 11: calling pmap_bootstrap" etc.
 4. `pe_serial.c` registers the same renderer as a serial device, so once
    kprintf comes up its output lands on the panel as well.
 
@@ -138,6 +138,22 @@ hummer_early_console_ready(void)
 	return hummer_ready;
 }
 
+/* Black out the line the cursor is on, so the splash underneath cannot win. */
+static void
+hummer_clear_row(void)
+{
+	uint32_t y, x;
+
+	for (y = 0; y < HUMMER_CELL_H; y++) {
+		volatile uint32_t *line = hummer_fb +
+		    (hummer_row * HUMMER_CELL_H + y) * hummer_stride;
+
+		for (x = 0; x < hummer_cols * HUMMER_CELL_W; x++) {
+			line[x] = HUMMER_BG;
+		}
+	}
+}
+
 void
 hummer_early_attach(uintptr_t va, uint32_t width, uint32_t height,
     uint32_t stride_bytes, uint32_t window_bytes)
@@ -163,6 +179,7 @@ hummer_early_attach(uintptr_t va, uint32_t width, uint32_t height,
 	hummer_col = 0;
 	hummer_row = 0;
 	hummer_ready = 1;
+	hummer_clear_row();
 }
 
 void
@@ -183,6 +200,7 @@ hummer_early_putc(char c)
 		if (++hummer_row >= hummer_rows) {
 			hummer_row = 0;
 		}
+		hummer_clear_row();
 		return;
 	}
 	if (hummer_col >= hummer_cols) {
@@ -190,6 +208,7 @@ hummer_early_putc(char c)
 		if (++hummer_row >= hummer_rows) {
 			hummer_row = 0;
 		}
+		hummer_clear_row();
 	}
 	glyph = iso_font + (unsigned char)c * 16;
 	for (gy = 0; gy < 16; gy++) {
@@ -317,30 +336,30 @@ hummer_fb_alias(boot_args *args)
 	uint64_t stride = args->Video.v_rowBytes;
 	uint64_t width = args->Video.v_width;
 	uint64_t height = args->Video.v_height;
+	uint64_t base;
 	vm_map_address_t first = 0;
 	unsigned int blocks;
 
-	if (fb == 0 || stride == 0 || width == 0 || height == 0) {
+	if (fb == 0 || stride == 0 || height == 0) {
 		return;
 	}
-	/* a block descriptor can only describe an aligned physical window */
-	if ((fb & (ARM_TT_L2_SIZE - 1)) != 0) {
-		return;
-	}
-	if (stride < width * 4) {
-		return;
+	/* v_width is only ever consulted to bound the row; infer it if absent */
+	if (width == 0 || width * 4 > stride) {
+		width = stride / 4;
 	}
 	/* cheap sanity: the boot loader cannot have handed us a wild geometry */
 	if (stride > (4u << 20) || height > (1u << 16) || width > (1u << 16)) {
 		return;
 	}
+	/* a block descriptor can only describe a 2 MB aligned physical window */
+	base = fb & ~(ARM_TT_L2_SIZE - 1);
 
-	blocks = hummer_fb_place(fb, HUMMER_FB_WANT_BIG, &first);
+	blocks = hummer_fb_place(base, HUMMER_FB_WANT_BIG, &first);
 	if (blocks == 0) {
-		blocks = hummer_fb_place(fb, HUMMER_FB_WANT_MID, &first);
+		blocks = hummer_fb_place(base, HUMMER_FB_WANT_MID, &first);
 	}
 	if (blocks == 0) {
-		blocks = hummer_fb_place(fb, 1, &first);
+		blocks = hummer_fb_place(base, 1, &first);
 	}
 	if (blocks == 0) {
 		return;
@@ -354,8 +373,8 @@ hummer_fb_alias(boot_args *args)
 	__asm__ volatile("dsb ishst" ::: "memory");
 	flush_mmu_tlb();
 	__asm__ volatile("dsb ish\n\tisb" ::: "memory");
-	hummer_early_attach((uintptr_t)first, (uint32_t)width, (uint32_t)height,
-	    (uint32_t)stride, blocks * ARM_TT_L2_SIZE);
+	hummer_early_attach((uintptr_t)(first + (fb - base)), (uint32_t)width,
+	    (uint32_t)height, (uint32_t)stride, blocks * ARM_TT_L2_SIZE);
 }
 
 '''
@@ -373,14 +392,14 @@ hummer_fb_alias(boot_args *args)
 # would break that patch's reverse context.
 # --------------------------------------------------------------------------
 ARM_INIT_DEBUG_ANCHOR = "\tPE_consistent_debug_inherit();\n"
-ARM_INIT_DEBUG = ("\thummer_early_mark(16, \"low_glo / s2r done\");\n"
+ARM_INIT_DEBUG = ("\thummer_early_mark(13, \"low_glo / s2r done\");\n"
                   "\tPE_consistent_debug_inherit();\n"
-                  "\thummer_early_mark(17, \"consistent_debug_inherit done\");\n")
+                  "\thummer_early_mark(14, \"consistent_debug_inherit done\");\n")
 
 ARM_INIT_SERIAL_ANCHOR = "\tconst unsigned int serial_exists = serial_init();\n"
-ARM_INIT_SERIAL = ("\thummer_early_mark(18, \"calling serial_init\");\n"
+ARM_INIT_SERIAL = ("\thummer_early_mark(15, \"calling serial_init\");\n"
                    "\tconst unsigned int serial_exists = serial_init();\n"
-                   "\thummer_early_mark(19, \"serial_init returned\");\n")
+                   "\thummer_early_mark(16, \"serial_init returned\");\n")
 
 ARM_INIT_KPRINTF_ANCHOR = '\tkprintf("kprintf initialized\\n");\n'
 ARM_INIT_CONSOLE_ANCHOR = "\tPE_create_console();\n"
@@ -582,8 +601,17 @@ def main():
     before = check_reversibility()
 
     # ---- header (new file, free: nothing to add to the object lists) ----
+    # The first line identifies the file for humans, so it has to be a comment:
+    # a bare marker here is not C, and every file that includes this header
+    # fails with "type specifier missing, defaults to 'int'".  (v20c shipped
+    # exactly that and the whole pass-2 build died on it.)
     p = Patcher()
-    p.write(HUMMER_H, MARKER + "\n" + HEADER)
+    header_text = "/* " + MARKER + " */\n" + HEADER
+    if not (header_text.lstrip().startswith("/*")
+            and header_text.rstrip().endswith("*/")):
+        raise SystemExit("hummer-console: header is not a well-formed comment "
+                         "block; refusing to write it")
+    p.write(HUMMER_H, header_text)
 
     # ---- arm_vm_init.c ----
     p.insert_after(ARM_VM_INIT, "#include <arm64/lowglobals.h>\n",
@@ -592,9 +620,9 @@ def main():
                     "#define ARM64_PHYSMAP_SLIDE_RANGE (1ULL << 30) // 1 GB\n",
                     VM_INIT_RENDERER, "arm_vm_init renderer")
     p.swap(ARM_VM_INIT, "\tpmap_bootstrap(dynamic_memory_begin);\n",
-           "\thummer_early_mark(22, \"calling pmap_bootstrap\");\n"
+           "\thummer_early_mark(11, \"calling pmap_bootstrap\");\n"
            "\tpmap_bootstrap(dynamic_memory_begin);\n"
-           "\thummer_early_mark(23, \"pmap_bootstrap done\");\n",
+           "\thummer_early_mark(12, \"pmap_bootstrap done\");\n",
            "pmap_bootstrap marks")
     # The identity map is gone, the kernel tables are live: this is the first
     # moment the panel can be mapped for good.
@@ -602,7 +630,7 @@ def main():
            "\tinvalid_tte = (tt_entry_t*)(phystokv(invalid_ttep));\n",
            "\tinvalid_tte = (tt_entry_t*)(phystokv(invalid_ttep));\n"
            "\thummer_fb_alias(args);\n"
-           "\thummer_early_mark(20, \"kernel tables live, panel mapped\");\n",
+           "\thummer_early_mark(10, \"kernel tables live, panel mapped\");\n",
            "arm_vm_init: panel alias")
 
     # ---- arm_init.c ----
@@ -611,13 +639,13 @@ def main():
     p.swap(ARM_INIT, ARM_INIT_DEBUG_ANCHOR, ARM_INIT_DEBUG, "marks 16/17")
     p.swap(ARM_INIT, ARM_INIT_SERIAL_ANCHOR, ARM_INIT_SERIAL, "marks 18/19")
     p.swap(ARM_INIT, ARM_INIT_KPRINTF_ANCHOR,
-           ARM_INIT_KPRINTF_ANCHOR + "\thummer_early_mark(25, \"kprintf up\");\n",
+           ARM_INIT_KPRINTF_ANCHOR + "\thummer_early_mark(17, \"kprintf up\");\n",
            "mark 25")
     p.swap(ARM_INIT, ARM_INIT_CONSOLE_ANCHOR,
-           ARM_INIT_CONSOLE_ANCHOR + "\thummer_early_mark(26, \"PE_create_console done\");\n",
+           ARM_INIT_CONSOLE_ANCHOR + "\thummer_early_mark(18, \"PE_create_console done\");\n",
            "mark 26")
     p.swap(ARM_INIT, ARM_INIT_PRINTF_ANCHOR,
-           ARM_INIT_PRINTF_ANCHOR + "\thummer_early_mark(27, \"PE_init_printf done\");\n",
+           ARM_INIT_PRINTF_ANCHOR + "\thummer_early_mark(19, \"PE_init_printf done\");\n",
            "mark 27")
 
     # ---- pe_serial.c ----
@@ -655,7 +683,7 @@ def main():
         print("hummer-console: all " + str(len(after))
               + " touched patches still reverse-apply")
 
-    print("hummer-console: marks 16..27 will appear on the panel as 'HUM <n>: ...'")
+    print("hummer-console: marks 10..19 will appear on the panel as 'HUM <n>: ...'")
     drop_objects()
 
 
