@@ -22,26 +22,18 @@ jobs:
           repository: UniXNU/UniXNU
           path: UniXNU
 
-      # 不要用 submodules: recursive。UniXNU 的 main 目前有三个子模块 gitlink
-      # 指向远端已经不存在的 commit（drivers/DarwinBoot d099354d、
-      # drivers/NativeAdreno 5cf11357、drivers/NativeRamBlock d4d22d98，
-      # 查询返回 422），递归 checkout 会在第一个上直接失败，而且和本板无关。
-      # 这里只取内核步骤真正需要的三个，任何一个取不到就退回它的默认分支。
-      - name: Checkout the UniXNU pieces this board needs
+      # 不要用 submodules: recursive —— UniXNU 的 main 里常有 gitlink 指向远端
+      # 已经删掉的 commit（上游 force-push），递归 checkout 撞到第一个就整体失败。
+      #
+      # 但只取三个也不够：`unixnu build` 自己会跑
+      # `git submodule update --init --recursive`（scripts/unixnu/feeds.py），
+      # 失败即中止，于是 build 连第一步都进不去。所以这里先按 .gitmodules 逐个
+      # 更新，失败的把 gitlink 改指远端默认分支 HEAD（那个一定存在），把 checkout
+      # 修好再交给 unixnu。
+      - name: Repair the UniXNU submodule checkout
         shell: bash
-        run: |
-          set -u
-          cd UniXNU
-          for p in drivers/ArmCpu drivers/ArmDTPlatform kits/NativePrelink; do
-            if git submodule update --init "$p" 2>/dev/null; then
-              echo "submodule $p: pinned commit"
-            else
-              echo "::warning::submodule $p is pinned to a commit upstream no longer serves; using its default branch"
-              rm -rf "$p"
-              git clone "https://github.com/UniXNU/$(basename "$p").git" "$p"
-            fi
-          done
-          ls -d drivers/ArmCpu drivers/ArmDTPlatform kits/NativePrelink
+        working-directory: UniXNU
+        run: bash "$GITHUB_WORKSPACE/ci/fix-unixnu-submodules.sh"
 
       # 关键：固定 Python 3.12。系统默认的 3.14 会让 XNU 的 LDFILELIST 等脚本静默失败。
       - name: Set up Python 3.12

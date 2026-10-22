@@ -41,38 +41,54 @@ TARGET = Path(".cache/xnu-work/osfmk/arm/arm_init.c")
 OBJECT_DIR = Path("build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/osfmk/DEVELOPMENT")
 ANCHOR = "\tPE_create_console();\n"
 
-INJECT = """\t/*
-\t * hummer: map the framebuffer handed over in boot_args.Video.
-\t *
-\t * It arrives as a physical address and nothing maps it: the bootstrap
-\t * tables only cover [physBase, physBase + memSize), which on this board
-\t * starts at 0x8C0070000, while the panel is at 0xFC000000.  The console
-\t * created below writes pixels through that address, so without this the
-\t * first write faults, panic faults again in the same place, and the
-\t * machine stops with nothing on screen.
-\t *
-\t * PE_init_platform() has already copied the value into PE_state.video, so
-\t * it is available here, after arm_vm_init() has made the pmap usable.
-\t */
-\tif ((PE_state.video.v_display != 0) && (PE_state.video.v_baseAddr != 0)) {
-\t\tvm_offset_t fb_pa = (vm_offset_t)PE_state.video.v_baseAddr;
-\t\tvm_size_t   fb_len = (vm_size_t)PE_state.video.v_rowBytes * (vm_size_t)PE_state.video.v_height;
+INJECT = """	/*
+	 * hummer: map the framebuffer handed over in boot_args.Video.
+	 *
+	 * v_baseAddr arrives as a *physical* address and nothing maps it: the
+	 * bootstrap tables only cover [physBase, physBase + memSize), which on this
+	 * board starts at 0x8C0070000, while the panel sits at 0xFC000000.  The
+	 * console created below draws pixels straight through that address, so
+	 * without this the first write faults, the panic path faults again in the
+	 * same place, and the machine stops with nothing on screen.
+	 *
+	 * PE_init_platform() has already copied boot_args.Video into
+	 * PE_state.video and arm_vm_init() has already built the kernel pmap, so
+	 * both are usable here.  kprintf() is safe this early: printf.c routes it
+	 * to a no-op until PE_init_kprintf() runs.
+	 */
+	if ((PE_state.video.v_display != 0) && (PE_state.video.v_baseAddr != 0)) {
+		vm_size_t fb_len = (vm_size_t)PE_state.video.v_rowBytes *
+		    (vm_size_t)PE_state.video.v_height;
 
-\t\tif (fb_len != 0) {
-\t\t\tvm_map_address_t fb_va = pmap_map_high_window_bd(fb_pa, fb_len,
-\t\t\t                                                VM_PROT_READ | VM_PROT_WRITE);
+		if (fb_len < (vm_size_t)PE_state.video.v_length) {
+			fb_len = (vm_size_t)PE_state.video.v_length;
+		}
 
-\t\t\t/* A cacheable mapping never reaches the panel: re-map write-combining. */
-\t\t\tif ((fb_pa & (PAGE_SIZE - 1)) == 0) {
-\t\t\t\t(void)pmap_map_bd_with_options(fb_va, fb_pa, fb_pa + fb_len,
-\t\t\t\t                               VM_PROT_READ | VM_PROT_WRITE, PMAP_MAP_BD_WCOMB);
-\t\t\t}
+		if (fb_len != 0) {
+			vm_offset_t fb_pa = (vm_offset_t)(PE_state.video.v_baseAddr +
+			                                  PE_state.video.v_offset);
+			/* pmap_map_high_window_bd() aligns the address down by itself. */
+			vm_offset_t fb_page = fb_pa & ~(vm_offset_t)0xfff;
+			vm_size_t   fb_span = (vm_size_t)(fb_pa - fb_page) + fb_len;
+			vm_map_address_t fb_va = pmap_map_high_window_bd(fb_page, fb_span,
+			                                                VM_PROT_READ | VM_PROT_WRITE);
 
-\t\t\tPE_state.video.v_baseAddr = (unsigned long)fb_va;
-\t\t\tkprintf("hummer: framebuffer %#lx+%#lx mapped at %#lx\\n",
-\t\t\t        (unsigned long)fb_pa, (unsigned long)fb_len, (unsigned long)fb_va);
-\t\t}
-\t}
+			/*
+			 * The high window is mapped cacheable, and a cacheable mapping
+			 * never reaches the panel: re-map it write-combining.
+			 */
+			(void)pmap_map_bd_with_options(fb_va, fb_page, fb_page + fb_span,
+			                               VM_PROT_READ | VM_PROT_WRITE,
+			                               PMAP_MAP_BD_WCOMB);
+
+			PE_state.video.v_baseAddr = (unsigned long)(fb_va + (fb_pa - fb_page));
+			PE_state.video.v_offset = 0;
+
+			kprintf("hummer: framebuffer %#lx+%#lx mapped at %#lx\\n",
+			        (unsigned long)fb_pa, (unsigned long)fb_len,
+			        (unsigned long)PE_state.video.v_baseAddr);
+		}
+	}
 
 """
 
