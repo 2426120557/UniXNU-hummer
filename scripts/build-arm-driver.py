@@ -3,10 +3,59 @@
 import argparse
 import json
 from pathlib import Path
+import shutil
 import struct
 import subprocess
 
 ROOT = Path(__file__).resolve().parents[1]
+
+# drivers/NativeUfs is an upstream submodule, read-only for this overlay repository, so
+# the two SMMU edits below are applied to a private copy at build time.  They are exact
+# text replacements, each asserted to match exactly once, so an upstream refactor fails
+# the build instead of silently dropping the change.
+#
+# 1. Hand-off shortcut.  ABL programs apps_smmu before it hands over, and it drove this
+#    same controller.  If an exact-match SMR for the UFS stream already carries
+#    S2CR.TYPE=BYPASS, the controller's DMA is physical addressing already and the
+#    takeover writes must not happen at all.  (v27 died in the planner before it could
+#    look at the existing mapping.)
+# 2. The geometry refusal reported neither the ID registers it judged nor their derived
+#    values, which left the first hardware failure unattributable.
+NATIVE_UFS_EDITS = [
+    (
+        'SMMU: reuse the firmware\'s own pass-through entry',
+        '  UfsSmmuPlan plan = planUfsSmmu (stream, dma, bytes, [smmu](unsigned offset) { return read32 (smmu, offset); });\n',
+        """  {
+    uint32_t preId0 = read32 (smmu, 0x20);
+    unsigned preCount = preId0 & 0xff;
+    if (preCount > 128) preCount = 128;
+    for (unsigned preIndex = 0; preIndex < preCount; preIndex++) {
+      uint32_t preSmr = read32 (smmu, 0x800 + 4 * preIndex);
+      if (!(preSmr & 0x80000000U) || (preSmr & 0x7fffU) != stream) continue;
+      uint32_t preS2cr = read32 (smmu, 0xc00 + 4 * preIndex);
+      if (((preS2cr >> 16) & 3) != 1) continue;
+      gRootDiagnostic.smmuSlot = preIndex;
+      gRootDiagnostic.smr = preSmr;
+      gRootDiagnostic.s2cr = preS2cr;
+      report[0] = preIndex | (0xffffU << 16);
+      report[1] = preSmr;
+      report[2] = preS2cr;
+      return;
+    }
+  }
+  UfsSmmuPlan plan = planUfsSmmu (stream, dma, bytes, [smmu](unsigned offset) { return read32 (smmu, offset); });
+""",
+    ),
+    (
+        'SMMU: report the ID registers behind a geometry refusal',
+        '    panic ("NATIVE_UFS smmu: %s slot=%u smr=%x s2cr=%x", plan.error, plan.slot, plan.smr, plan.s2cr);\n',
+        """    panic ("NATIVE_UFS smmu: %s slot=%u smr=%x s2cr=%x\\n"
+           "scr0=%08x idr0=%08x idr1=%08x idr2=%08x",
+           plan.error, plan.slot, plan.smr, plan.s2cr,
+           read32 (smmu, 0x00), read32 (smmu, 0x20), read32 (smmu, 0x24), read32 (smmu, 0x28));
+""",
+    ),
+]
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('component', choices=['ArmVirtPlatform', 'ArmDTPlatform', 'ArmCpu', 'NativeAES', 'NativeVirtioBlock', 'NativeRamBlock', 'NativeMobileDisplay', 'NativeVirtioConsole', 'NativeLegacyDisplay', 'NativeGOPPresenter', 'NativeOfflineGPU', 'NativeOfflineAccelerator', 'NativeIOGPUProviderProbe', 'NativeUfs', 'NativeHidInput', 'NativeKeyStoreEvents', 'NativeAdreno'])
 parser.add_argument('--negative-aes-kat', action='store_true', help='Isolated own-source wrong-answer refusal control; never changes original inputs')
@@ -35,6 +84,21 @@ if args.verified_root:
     if args.verified_root_bundle:
         out = ROOT / 'build/native-virtio-block-verified-bundle'
 out.mkdir(parents=True, exist_ok=True)
+if component == 'NativeUfs':
+    # Compile a patched private copy: the quoted includes (GccUfs.h, SmmuTakeover.h) have
+    # to sit next to the translation unit, so the whole directory is staged.
+    staged = out / 'src'
+    if staged.exists():
+        shutil.rmtree(staged)
+    shutil.copytree(source.parent, staged)
+    patched = staged / source.name
+    text = patched.read_text()
+    for why, old, new in NATIVE_UFS_EDITS:
+        if text.count(old) != 1:
+            raise SystemExit(f'NativeUfs patch anchor is not unique ({text.count(old)} matches): {why}')
+        text = text.replace(old, new)
+    patched.write_text(text)
+    source = patched
 if args.negative_aes_kat:
     if component != 'NativeAES':
         parser.error('The own-source KAT control requires NativeAES')
