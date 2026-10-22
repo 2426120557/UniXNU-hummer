@@ -14,32 +14,103 @@ ROOT = Path(__file__).resolve().parents[1]
 # text replacements, each asserted to match exactly once, so an upstream refactor fails
 # the build instead of silently dropping the change.
 #
-# 1. Hand-off shortcut.  ABL programs apps_smmu before it hands over, and it drove this
-#    same controller.  If an exact-match SMR for the UFS stream already carries
-#    S2CR.TYPE=BYPASS, the controller's DMA is physical addressing already and the
-#    takeover writes must not happen at all.  (v27 died in the planner before it could
-#    look at the existing mapping.)
+# 1. Take over the stream entry the firmware already installed.  v28 (native-ufs-probe=7)
+#    read sCR0=002b0406, IDR0=4c017e84, IDR1=00000053, gFSR=0 and found SMR[0]=80000060
+#    (VALID, ID 0x60, MASK 0) with S2CR[0]=00000000: TYPE=TRANSLATE through context bank
+#    0.  Those stage-1 tables are ABL's and describe ABL's buffers, not this kernel's.
+#    The planner refuses while that entry exists and would leave it matching first anyway
+#    (SMR hits resolve by group index), so the entry itself is converted:
+#      a. plain S2CR bypass - cheapest, and correct unless this firmware silently turns
+#         BYPASS into FAULT, the quirk the driver comment records for the same IP;
+#      b. otherwise restore the firmware mapping and install the Qualcomm shape - a
+#         context bank with CBAR.TYPE=S1_TRANS_S2_BYPASS and stage 1 disabled, with the
+#         stream pointed at it by CBNDX - in the SAME slot.
+#    Both paths are read back before the controller is allowed to use them.
 # 2. The geometry refusal reported neither the ID registers it judged nor their derived
 #    values, which left the first hardware failure unattributable.
 NATIVE_UFS_EDITS = [
     (
-        'SMMU: reuse the firmware\'s own pass-through entry',
+        "SMMU: take over the firmware's own stream entry",
         '  UfsSmmuPlan plan = planUfsSmmu (stream, dma, bytes, [smmu](unsigned offset) { return read32 (smmu, offset); });\n',
         """  {
-    uint32_t preId0 = read32 (smmu, 0x20);
-    unsigned preCount = preId0 & 0xff;
-    if (preCount > 128) preCount = 128;
-    for (unsigned preIndex = 0; preIndex < preCount; preIndex++) {
-      uint32_t preSmr = read32 (smmu, 0x800 + 4 * preIndex);
-      if (!(preSmr & 0x80000000U) || (preSmr & 0x7fffU) != stream) continue;
-      uint32_t preS2cr = read32 (smmu, 0xc00 + 4 * preIndex);
-      if (((preS2cr >> 16) & 3) != 1) continue;
-      gRootDiagnostic.smmuSlot = preIndex;
-      gRootDiagnostic.smr = preSmr;
-      gRootDiagnostic.s2cr = preS2cr;
-      report[0] = preIndex | (0xffffU << 16);
-      report[1] = preSmr;
-      report[2] = preS2cr;
+    // A fixed 128-slot window rather than IDR0.NUMSMRG: the adopt path refused this SMMU
+    // once on a geometry judgement that the measured IDR1 does not support, so the ID
+    // registers are not trusted to bound a read-only sweep.  Unused groups read as zero.
+    unsigned cut = 0xffff;
+    uint32_t cutSmr = 0, cutS2cr = 0;
+    for (unsigned scan = 0; scan < 128; scan++) {
+      uint32_t smr = read32 (smmu, 0x800 + 4 * scan);
+      // Exact match only: a masked entry also covers neighbouring streams, and rewriting
+      // one of those would move traffic this kernel does not own.
+      if (!(smr & 0x80000000U) || ((smr >> 16) & 0x7fff) != 0 || (smr & 0xffff) != stream) continue;
+      cut = scan;
+      cutSmr = smr;
+      cutS2cr = read32 (smmu, 0xc00 + 4 * scan);
+      break;
+    }
+    if (cut != 0xffff) {
+      // arm_smmu_write_sme() order: an SMR must not be live while its S2CR changes.
+      write32 (smmu, 0x800 + 4 * cut, cutSmr & ~0x80000000U);
+      __asm__ volatile ("dsb sy" ::: "memory");
+      write32 (smmu, 0xc00 + 4 * cut, 0x00010000U);
+      __asm__ volatile ("dsb sy" ::: "memory");
+      write32 (smmu, 0x800 + 4 * cut, cutSmr);
+      __asm__ volatile ("dsb sy" ::: "memory");
+      // A translation cached from the firmware's tables would still serve this stream
+      // unless the non-secure TLB is invalidated (IHI 0062D.c 3.9).
+      write32 (smmu, 0x68, 0);
+      write32 (smmu, 0x70, 0);
+      for (unsigned spin = 0; spin < 1000 && (read32 (smmu, 0x74) & 1); spin++) IODelay (10);
+      if (((read32 (smmu, 0xc00 + 4 * cut) >> 16) & 3) != 1) {
+        // Put the firmware's own mapping back before trying anything else.
+        write32 (smmu, 0x800 + 4 * cut, cutSmr & ~0x80000000U);
+        __asm__ volatile ("dsb sy" ::: "memory");
+        write32 (smmu, 0xc00 + 4 * cut, cutS2cr);
+        __asm__ volatile ("dsb sy" ::: "memory");
+        write32 (smmu, 0x800 + 4 * cut, cutSmr);
+        __asm__ volatile ("dsb sy" ::: "memory");
+        // Qualcomm shape: the stream reaches a context bank whose CBAR says stage 1
+        // translate / stage 2 bypass with stage 1 disabled - how firmware produces a
+        // pass-through when a plain BYPASS does not stick.
+        uint32_t idr1 = read32 (smmu, 0x24);
+        unsigned pages = 1U << (((idr1 >> 28) & 7) + 1);
+        unsigned banks = idr1 & 0xff;
+        if (pages == 0 || pages > 128 || banks < 2 || banks > 128) {
+          // IDR1 disagreed with what probe=7 measured on this board (0x53).
+          pages = 2;
+          banks = 83;
+        }
+        unsigned bank = banks - 1;
+        unsigned cbOffset = (pages + bank) * 4096;
+        write32 (smmu, cbOffset, 0);
+        __asm__ volatile ("dsb sy" ::: "memory");
+        write32 (smmu, 0x1800 + 4 * bank, 1);
+        write32 (smmu, 0x1000 + 4 * bank, 0x00010000U);
+        __asm__ volatile ("dsb sy" ::: "memory");
+        if (read32 (smmu, cbOffset) != 0 || read32 (smmu, 0x1000 + 4 * bank) != 0x00010000U ||
+            read32 (smmu, 0x1800 + 4 * bank) != 1) {
+          panic ("NATIVE_UFS smmu: bank bypass config bank=%u pages=%u sctlr=%08x cbar=%08x cba2r=%08x",
+                 bank, pages, read32 (smmu, cbOffset), read32 (smmu, 0x1000 + 4 * bank),
+                 read32 (smmu, 0x1800 + 4 * bank));
+        }
+        write32 (smmu, 0xc00 + 4 * cut, bank);
+        __asm__ volatile ("dsb sy" ::: "memory");
+        write32 (smmu, 0x800 + 4 * cut, 0x80000000U | stream);
+        __asm__ volatile ("dsb sy" ::: "memory");
+        write32 (smmu, 0x68, 0);
+        write32 (smmu, 0x70, 0);
+        for (unsigned spin = 0; spin < 1000 && (read32 (smmu, 0x74) & 1); spin++) IODelay (10);
+        if (read32 (smmu, 0xc00 + 4 * cut) != bank) {
+          panic ("NATIVE_UFS smmu: bank bypass readback idx=%u want=%u got=%08x",
+                 cut, bank, read32 (smmu, 0xc00 + 4 * cut));
+        }
+      }
+      gRootDiagnostic.smmuSlot = cut;
+      gRootDiagnostic.smr = read32 (smmu, 0x800 + 4 * cut);
+      gRootDiagnostic.s2cr = read32 (smmu, 0xc00 + 4 * cut);
+      report[0] = cut;
+      report[1] = gRootDiagnostic.s2cr;
+      report[2] = cutS2cr;
       return;
     }
   }
@@ -56,6 +127,7 @@ NATIVE_UFS_EDITS = [
 """,
     ),
 ]
+
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('component', choices=['ArmVirtPlatform', 'ArmDTPlatform', 'ArmCpu', 'NativeAES', 'NativeVirtioBlock', 'NativeRamBlock', 'NativeMobileDisplay', 'NativeVirtioConsole', 'NativeLegacyDisplay', 'NativeGOPPresenter', 'NativeOfflineGPU', 'NativeOfflineAccelerator', 'NativeIOGPUProviderProbe', 'NativeUfs', 'NativeHidInput', 'NativeKeyStoreEvents', 'NativeAdreno'])
 parser.add_argument('--negative-aes-kat', action='store_true', help='Isolated own-source wrong-answer refusal control; never changes original inputs')
