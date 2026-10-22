@@ -36,8 +36,16 @@ CONFIG_XNU_DT_PANIC_REGION=y
 #   2) 本地树里 drivers/BootProgress 与 scripts/build-boot-progress.py 都不存在。
 # 要拿到内核早期可见输出，得先补齐这两样，或改走串口。
 
-# —— 后续阶段再启用（需 hummer kit / macOS 实测钉死）——
-# CONFIG_XNU_NATIVE_UFS=y
+# —— v25：存储驱动（Stage 6）——
+# NativeUfs：上游 UniXNU/NativeUfs submodule（sheng=SM8550 高通 UFS 上已验证）。
+# hummer 的 HC 地址与 SM8550 相同（ufshc@1d84000，DTB 已有），ABL 本身从 UFS 读
+# boot.img，控制器已被固件初始化。第一轮只开 native-ufs-probe=2 诊断
+# （panic 打印 GCC/GDSC/HC 寄存器实测值），不碰根发布。
+# 前置：build/storage-abi 头目录由 audit-storage-interface.py 生成（CI 多一步
+# clone refer/IOStorageFamily@e45fbe30）；归档由 build-arm-driver.py NativeUfs
+# 产到 build/native-ufs/libNativeUfs.a，baseline.sh 在 XNU_NATIVE_UFS=1 时
+# force_load。Root personality 匹配 IOPlatformExpertDevice，不依赖 ufshc 兼容串。
+CONFIG_XNU_NATIVE_UFS=y
 # CONFIG_XNU_NATIVE_AES=y
 # CONFIG_XNU_NATIVE_VIRTIO_BLOCK=y
 # CONFIG_XNU_NATIVE_RAM_BLOCK=y

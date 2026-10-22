@@ -64,6 +64,14 @@ archives = [
   # build/sheng-platform-power/libShengPlatformPower.a，由它 force_load 进内核。
   # 放在源码修改器之前：它不改源码，只编译 package/HummerPlatformPower.cpp。
   "build-hummer-platform-power.py",
+  # v25：Stage 6 存储路径。audit-storage-interface.py 生成 build/storage-abi
+  # 头目录（IOKit/storage 的 IOMedia/IOBlockStorageDevice ABI 头，从
+  # refer/IOStorageFamily@e45fbe30 拷贝；refer/ 由 CI workflow 预先 clone）。
+  # NativeUfs 编出 build/native-ufs/libNativeUfs.a，baseline.sh 在
+  # XNU_NATIVE_UFS=1 时 force_load 进内核（KernelConfigTables 的
+  # NativeUfsRoot personality 也随之编入）。
+  "audit-storage-interface.py",
+  "build-arm-driver.py NativeUfs",
   # 注意：所有构建器都在 macOS 上跑（kernel.py 硬性要求 xcodebuild + iphoneos SDK）。
   #
   # 已下线 build-hummer-video-map.py：它在 PE_create_console() 前面调
