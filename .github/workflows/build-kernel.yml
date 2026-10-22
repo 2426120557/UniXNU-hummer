@@ -135,28 +135,62 @@ jobs:
           fi
 
           if [ "$mkfs" = yes ]; then
-            # 卷里放 pid 1 的探针：/sbin/launchd 是一个手搓的静态 arm64 Mach-O
-            # （scripts/make-launchd-stub.py）。v35 已证明内核会 exec 它、只差文件
-            # （errno 2 @kern_exec.c:7334），所以这一刷看的是 errno 变不变。
+            # v41：卷里放的是从 21H461 固件里抽出来的真 launchd 和真 dyld
+            # （assets/launchd、assets/dyld），不再是手搓的 stub。
             #
-            # stub 结尾是 exit(42) 而不是死循环：内核根本不给 pid 1 任何 fd
-            # （bsd_init 从不开 /dev/console，而我们的 ramdisk 连 /dev 目录都没有，
-            # devfs 无处可挂），所以 write(1) 可能一直是 EBADF。死循环的"屏幕静止"
-            # 和卡死分不开；exit 则必然让 kern_exit.c 打出
-            #   panic: initproc failed to start -- no exit reason available --
-            #          (signal 0, exit status 42)
-            # 这个 panic 和 exec 失败的 panic 一眼可分。
-            python3 "$GITHUB_WORKSPACE/scripts/make-launchd-stub.py" "$RUNNER_TEMP/launchd-stub"
+            # 为什么换：v39 给 stub 补了 ad-hoc 签名，于是不再被 exec 直接拒绝，
+            # 而是死在 lck_rw_lock_shared_b 的"可抢占上下文拿自旋锁"断言上。
+            # 唯一变量就是那份签名，而死点落在签名之后的路径，所以真签名值得
+            # 一试 —— 真 launchd 带的是 Apple 自己的签名，走的是另一条路。
+            #
+            # 预期：exec 过（CS_SIGNED 由真签名置位），dyld 起来，找不到
+            # /usr/lib/libSystem.B.dylib（它在 3.09 GiB 的 shared cache 里，
+            # 256 MiB 的内存根放不下），然后退出。pid 1 退出必然 panic
+            # （kern_exit.c: p == initproc 无条件 panic），所以只要出现
+            #   initproc failed to start ... exit status N   (N != 42)
+            # 就说明真 iOS 用户态代码在这台手机上执行过了。
+            #
+            # 两个文件缺一个就退回 stub（stub 自己 exit(42)，一眼可分）。
+            ASSETS="$GITHUB_WORKSPACE/assets"
+            use_real=no
+            if [ -s "$ASSETS/launchd" ] && [ -s "$ASSETS/dyld" ]; then
+              use_real=yes
+              echo "assets: launchd $(stat -f%z "$ASSETS/launchd") bytes, dyld $(stat -f%z "$ASSETS/dyld") bytes"
+              for f in launchd dyld; do
+                magic=$(xxd -p -l4 "$ASSETS/$f")
+                echo "  $f magic = $magic"
+                if [ "$magic" != "cffaedfe" ]; then
+                  echo "::error::$f is not a little-endian 64-bit Mach-O"
+                  exit 1
+                fi
+              done
+            else
+              echo "::warning::assets/launchd or assets/dyld missing, falling back to the stub"
+              python3 "$GITHUB_WORKSPACE/scripts/make-launchd-stub.py" "$RUNNER_TEMP/launchd-stub"
+            fi
+
             MP="$RUNNER_TEMP/ram-root"
             rm -rf "$MP"; mkdir -p "$MP"
             DEV=$(hdiutil attach -nobrowse -mountpoint "$MP" "$IMG" | awk 'NR==1{print $1}')
             echo "attached $DEV at $MP"
             ls -la "$MP"
-            sudo mkdir -p "$MP/sbin"
-            sudo cp "$RUNNER_TEMP/launchd-stub" "$MP/sbin/launchd"
-            sudo chmod 755 "$MP/sbin/launchd"
-            sudo chown 0:0 "$MP/sbin/launchd"
-            sudo ls -la "$MP/sbin"
+            if [ "$use_real" = yes ]; then
+              # launchd 的 LC_LOAD_DYLINKER 写死 /usr/lib/dyld。内核 exec 时只是
+              # 把这个路径记进 dlp，真正去 open 它的是 dyld 自己 —— 所以这个文件
+              # 必须真的在卷里，否则连 dyld 都起不来，只会退回 v35 那种 errno 2。
+              sudo mkdir -p "$MP/sbin" "$MP/usr/lib"
+              sudo cp "$ASSETS/launchd" "$MP/sbin/launchd"
+              sudo cp "$ASSETS/dyld" "$MP/usr/lib/dyld"
+              sudo chmod 755 "$MP/sbin/launchd" "$MP/usr/lib/dyld"
+              sudo chown -R 0:0 "$MP/sbin" "$MP/usr/lib"
+              sudo ls -la "$MP/sbin" "$MP/usr/lib"
+            else
+              sudo mkdir -p "$MP/sbin"
+              sudo cp "$RUNNER_TEMP/launchd-stub" "$MP/sbin/launchd"
+              sudo chmod 755 "$MP/sbin/launchd"
+              sudo chown 0:0 "$MP/sbin/launchd"
+              sudo ls -la "$MP/sbin"
+            fi
             sync
             hdiutil detach "$MP" || hdiutil detach "$DEV"
 
@@ -223,12 +257,14 @@ jobs:
             echo "RESULT: zeros fallback -- md0 will register, but there is nothing to mount"
           fi
 
-          # 直接证据：探针里的字符串应该能在镜像里搜到（APFS 默认不压缩）。
-          at=$(LC_ALL=C grep -abo "HUMMER: userland alive" "$OUT" | head -1 | cut -d: -f1)
-          if [ -n "$at" ]; then
-            echo "RESULT: launchd stub present at image offset $at"
-          else
-            echo "::warning::the launchd stub string is not visible in the image"
+          # 直接证据：真 launchd / dyld 里的字符串应该能在镜像里搜到
+          # （APFS 默认不压缩普通文件）。
+          hit_launchd=$(LC_ALL=C grep -abo "com.apple.xpc.launchd" "$OUT" | head -1 | cut -d: -f1)
+          hit_dyld=$(LC_ALL=C grep -abo "libSystem.B.dylib" "$OUT" | head -1 | cut -d: -f1)
+          echo "RESULT: launchd marker at ${hit_launchd:-none}, dyld marker at ${hit_dyld:-none}"
+          if [ -z "$hit_launchd" ] || [ -z "$hit_dyld" ]; then
+            echo "::error::the real launchd/dyld did not make it into the root image"
+            exit 1
           fi
 
           test -s "$OUT"
