@@ -55,4 +55,9 @@ CONFIG_XNU_NATIVE_UFS=y
 
 # 试水阶段：无条件引用的 offline-probe 钩子（native_legacy_display_probe /
 # native_mobile_graphics_client_probe）用空 stub 满足链接。真正的显示驱动未移植。
-CONFIG_XNU_EXTRA_LD_ARCHIVES="-Wl,-force_load,{tree}/build/native-probe-stubs/libNativeProbeStubs.a"
+#
+# native-probe-stubs 之外再加 hummer-storage-stubs（v25）：NativeUfs 的
+# NativeUfsBlock 引用 prelinked IOStorageFamily 的 vtable/getProperty，以及
+# VerifiedRoot 和可选 boot_progress_poll；probe 阶段不构造块设备，用会 panic 的
+# hidden 桩满足静态链接（见 package/HummerStorageStubs.cpp）。
+CONFIG_XNU_EXTRA_LD_ARCHIVES="-Wl,-force_load,{tree}/build/native-probe-stubs/libNativeProbeStubs.a -Wl,-force_load,{tree}/build/hummer-storage-stubs/libHummerStorageStubs.a"
