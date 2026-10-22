@@ -104,27 +104,24 @@ jobs:
       #            那么问题就是"某个 init 没跑到"，而不是锁的用法有错。
       #
       # 判据检查：替换次数必须 > 0，否则 xnu 源码换版了，直接失败，别白跑一次。
+      #
+      # 注意（run 39838609251 的教训）：UniXNU 会把源码摊到**好几份**副本里，
+      #   out/feeds/xnu-*/osfmk/kern/lock_rw.c        ← feed 的原始解压
+      #   out/hummer/tree/.cache/xnu-work/osfmk/...   ← 真正参与编译的那份（build-xnu-4k-baseline.sh 在里面 make）
+      # 上一轮只打了 feeds 那份，源码确实改了 5 处，但编出来的内核 __TEXT_EXEC
+      # 与上一版**逐字节相同**、连 nonSLRW 字符串都没有 —— 白刷一次。
+      # 所以这里对 out/ 下所有同名文件全打一遍，再在构建后用二进制校验兜底。
       - name: Patch XNU rwlock panic for diagnostics
         run: |
           python3 - <<'PY'
           import os, re, sys, pathlib
 
-          target = None
-          for root in ("UniXNU/out", "UniXNU"):
-              if not os.path.isdir(root):
-                  continue
-              for p in pathlib.Path(root).rglob("lock_rw.c"):
-                  if p.parts[-2:] == ("kern", "lock_rw.c"):
-                      target = p
-                      break
-              if target:
-                  break
-          if target is None:
-              print("::error::osfmk/kern/lock_rw.c not found -- cannot patch")
+          targets = [p for p in pathlib.Path("UniXNU/out").rglob("lock_rw.c")
+                     if p.parts[-2:] == ("kern", "lock_rw.c")]
+          if not targets:
+              print("::error::no osfmk/kern/lock_rw.c under UniXNU/out -- cannot patch")
               sys.exit(1)
-          print("patching", target, target.stat().st_size, "bytes")
 
-          src = target.read_text()
           pat = re.compile(
               r'panic\(\s*"Taking non-sleepable RW lock with preemption enabled[^"]*"'
               r'(?:\s*,\s*__FILE__\s*,\s*__LINE__)?\s*\);')
@@ -139,18 +136,22 @@ jobs:
               '(unsigned long long)((uint64_t *)lock)[5], '
               '(unsigned long long)((uint64_t *)lock)[6], '
               '(unsigned long long)((uint64_t *)lock)[7]);')
-          new, n = pat.subn(NEW, src)
-          print("patched sites:", n)
-          if n == 0:
-              for i, ln in enumerate(src.splitlines(), 1):
-                  if "non-sleepable RW lock" in ln:
-                      print("  found(unpatched) %d: %s" % (i, ln.strip()))
-              print("::error::panic string not matched -- xnu source layout changed")
+
+          total = 0
+          for target in targets:
+              src = target.read_text()
+              new, n = pat.subn(NEW, src)
+              print("patching %s (%d bytes): %d site(s)" % (target, len(src), n))
+              if n:
+                  target.write_text(new)
+                  total += n
+                  for i, ln in enumerate(new.splitlines(), 1):
+                      if "nonSLRW" in ln:
+                          print("    %d: %s" % (i, ln.strip()[:130]))
+          print("total patched sites:", total)
+          if total == 0:
+              print("::error::panic string not matched anywhere -- xnu source layout changed")
               sys.exit(1)
-          target.write_text(new)
-          for i, ln in enumerate(new.splitlines(), 1):
-              if "nonSLRW" in ln:
-                  print("  %d: %s" % (i, ln.strip()[:150]))
           PY
 
       - name: Build kernel (prelink fails without IPSW, expected)
@@ -173,6 +174,28 @@ jobs:
             echo "KERNEL_BUILT=no" >> "$GITHUB_ENV"
             echo "kernel.macho not produced; see logs"
           fi
+
+      # 兜底：诊断补丁必须真的出现在最终二进制里。
+      # run 39838609251 就是栽在这里 —— 源码现场改了 5 处、日志也印了
+      # "patched sites: 5"，但打的是 out/feeds/ 那份，编译用的是
+      # out/hummer/tree/.cache/xnu-work/，于是 kernel.macho 的 __TEXT_EXEC
+      # 与上一版逐字节相同。没有这道校验，就会拿一个毫无变化的镜像去刷机。
+      - name: Verify the diagnostic patch reached the kernel
+        if: env.KERNEL_BUILT == 'yes'
+        run: |
+          python3 - <<'PY'
+          import sys
+          p = "UniXNU/out/hummer/kernel/kernel.macho"
+          d = open(p, "rb").read()
+          n = d.count(b"nonSLRW lock=%p caller=%p w=")
+          old = d.count(b"Taking non-sleepable RW lock with preemption enabled")
+          print("kernel.macho %d bytes" % len(d))
+          print("  nonSLRW  x%d   (must be >= 1)" % n)
+          print("  old text x%d" % old)
+          if n < 1:
+              print("::error::the lock diagnostic patch did not reach the kernel binary")
+              sys.exit(1)
+          PY
 
       # v33：运存根探针镜像。做一个 64 MiB 的 APFS 卷，从 /dev/rdiskN 原样读出来，
       # 去掉 DMG 外壳，得到一个"设备内容"字节流，正好能当 ramdisk 用。
