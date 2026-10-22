@@ -73,6 +73,10 @@ archives = [
   "build-corecrypto-14.py",
   "build-corecrypto-14.py --namespace",
   "build-arm-driver.py ArmDTPlatform",
+  # v49：必须在 build-arm-driver.py ArmCpu 之前跑 —— 它补丁 drivers/ArmCpu/ArmCpu.cpp
+  # （子模块工作树文件，可写），而 build-arm-driver.py 每次无条件重编 ArmCpu。
+  # 内容：拒绝 Aff2 prime 核的 boot 伪装（ml_get_cpu_number 掩码 bug）+ SMP 探针标记。
+  "build-hummer-armcpu-probe.py",
   "build-arm-driver.py ArmCpu",
   "build-libpthread-kernel.py",
   "build-native-probe-stubs.py",
@@ -258,6 +262,18 @@ kernel_args = [
   "debug=0x14e",
   "cpus=8",
   "rd=md0",
+  # ---- v49：SMP 开关，两项都来自文档与 sheng 参考（不是猜的） ----
+  #
+  # docs/zh/xnu/boot-arguments.md：
+  #   sheng-smp=1       启动 secondary CPU
+  #   armcpu-spi-ipi=1  使用 SPI 路径发送核间中断
+  # sheng 的 board.toml 里两项都有；hummer 此前一项都没有，于是
+  # ArmCpu::probe() 把所有 secondary nub 拒掉（"Secondary startup is
+  # opt-in (sheng-smp=1)"，ArmCpu.cpp:184-192）。armcpu-spi-ipi=1 是因为
+  # ArmCpu.cpp:35 的注释明说 ICC_SGI1R_EL1 在 Qualcomm 板上"generates
+  # nothing"（sheng=SM8550 实测），hummer 同为 Qualcomm（SM8750）。
+  "sheng-smp=1",
+  "armcpu-spi-ipi=1",
   # ---- 签名这一关：什么都不加，靠 trust cache 正经过 ----
   #
   # v46 起 payload 里终于带了原版 trust cache（StaticTrustCache +
