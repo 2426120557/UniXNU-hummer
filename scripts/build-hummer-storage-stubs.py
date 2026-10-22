@@ -63,7 +63,19 @@ DEFINED_IN_CXX = ('__ZTV20IOBlockStorageDevice',)
 
 # Vtable / typeinfo / guard variables are data, not code.
 DATA_PREFIXES = ('__ZTV', '__ZTI', '__ZTS', '__ZTT', '__ZGV')
-DATA_BYTES = 64
+DATA_BYTES = 256
+
+
+def is_data_symbol(name):
+    """True when the mangled name denotes an object rather than a function.
+
+    In the Itanium ABI a nested name ends with 'E', so `_ZN20IOBlockStorageDevice
+    10gMetaClassE` is the static data member gMetaClass, while a function keeps
+    going past that 'E' into its parameter list.  Getting this wrong is fatal
+    but silent: a code thunk placed where the linker expects an OSMetaClass
+    would make NativeUfsBlock's metaclass register with a garbage superclass.
+    """
+    return name.startswith(DATA_PREFIXES) or name.endswith('E')
 
 
 def run(command, **kwargs):
@@ -125,7 +137,7 @@ def generate_placeholders(symbols):
     code = 0
     data = 0
     for name in symbols:
-        if name.startswith(DATA_PREFIXES):
+        if is_data_symbol(name):
             alias = f'hummer_storage_data_{data}'
             data += 1
             lines += ['',
