@@ -207,7 +207,8 @@ MEMORY_PROTECTION = "TRUE"
 SHIP_MODE = "FALSE"
 BUILDID_STRING = "hummer-research"
 
-# boot 镜像的 ramdisk：FAT 卷，含 UniXNU 配置、内核、ADT 设备树。
+# boot 镜像的 ramdisk：FAT 卷，含 UniXNU 配置、内核、ADT 设备树，
+# 以及（v46 起）原版 trust cache 包。
 # loader(DarwinBoot) 已在固件卷内，所以 loader = "firmware"。
 [payload]
 volume = "HUMMERESP"
@@ -216,6 +217,14 @@ loader = "firmware"
 title = "hummer first boot: source 4K XNU to console"
 dram_size = "0x400000000"          # 16 GiB
 timeout = 3
+# v46：接受的 trust cache 包（docs/zh/guide/requirements.md: 负载的输入）。
+# 本机 [ipsw] 与 UniXNU-sheng 完全相同（iPad7,1 / 17.7.11 / 21H461 / j120ap /
+# chip 0x8011 / board 12），所以由那两个原版组件拼出的 bundle 与 sheng 已验证的
+# 原始 bundle 逐字节一致；这里钉死它的 sha256，打包时校验（其它包请走
+# --owner-trust-cache）。
+trust_cache_sha256 = [
+  "7416ca4f8377146626bb284e2133c76bee6cb4e3ee0af5d648b186235a7323a7",
+]
 # panic_screen 需要 scripts/patch-xnu-entry-probe.py，该脚本在 UniXNU 树里不存在
 # （git ls-files 查不到，GitHub main/master 也是 404），所以保持关闭。
 panic_screen = false

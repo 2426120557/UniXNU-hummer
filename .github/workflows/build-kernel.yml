@@ -493,16 +493,110 @@ jobs:
 
           test -s "$OUT"
 
+      # —— v46：把原版 trust cache 打进 payload（这是文档规定的必需输入）——
+      # docs/zh/guide/boot.md：DarwinBoot 读 kernel.macho / kernel.macho.adt /
+      #   kernel.macho.trustcache，并把 "ADT 和 trust cache 地址写入
+      #   /chosen/memory-map 占位符"。
+      # docs/zh/guide/requirements.md：trust cache 包是负载的输入（--trust-cache FILE）。
+      # docs/zh/devices/sheng.md：sheng 的命令行就是
+      #   ./unixnu build payload --unique-chip-id <hex> --trust-cache <bundle> --data-ramdisk <seed>
+      # 我们前面 40 多个版本从来没给过它，所以 XNU 的 load_static_trust_cache()
+      # 每次都走 "no external trust caches found (segment length is zero)"，
+      # 信任缓存是空的 —— iOS 17 的系统二进制本来就是 ad-hoc 签名 + 靠 trust
+      # cache 授权（CMS 为空是正常的），空缓存下 AMFI 必然拒绝 launchd。
+      #
+      # bundle 格式（UniXNU/scripts/build-original-system-trust.py）：
+      #   <3I: num_caches=2, off0=12, off1=12+len(static)> + static_module + system_module
+      # 两个 module 都是 version-2：头部 24 字节，之后 count × 24 字节。
+      # 数据来自 IPSW 的两个成员：StaticTrustCache / Cryptex1,SystemTrustCache。
+      # hummer 的 board.toml [ipsw] 与 UniXNU-sheng 完全相同（iPad7,1 / 21H461 /
+      # j120ap / 0x8011 / board 12），所以产物应当恰好等于 sheng 已验证的
+      # 7416ca4f… 那个 bundle —— 下面直接断言，不一致就判失败，不让镜像白刷。
+      - name: Build the original trust cache bundle
+        if: env.KERNEL_BUILT == 'yes'
+        run: |
+          ./unixnu ipsw fetch StaticTrustCache Cryptex1,SystemTrustCache 2>&1 | tail -20
+          python3 - <<'PY'
+          import hashlib, json, struct, sys
+          from pathlib import Path
+
+          cache = Path("UniXNU/out/ipsw/21H461")
+          comps = {}
+          for rec in sorted(cache.glob("*.json")):
+              d = json.loads(rec.read_text())
+              comps[d.get("component")] = rec.with_suffix("")
+          print("cached components:", sorted(k for k in comps if k))
+          for need in ("StaticTrustCache", "Cryptex1,SystemTrustCache"):
+              if need not in comps:
+                  print("::error::%s was not fetched" % need)
+                  sys.exit(1)
+
+          def der(data, at):
+              tag, size = data[at], data[at + 1]
+              at += 2
+              if size & 128:
+                  count = size & 127
+                  size = int.from_bytes(data[at:at + count], "big")
+                  at += count
+              return tag, data[at:at + size], at + size
+
+          def im4p_payload(blob):
+              tag, seq, end = der(blob, 0)
+              fields, cur = [], 0
+              while cur < len(seq):
+                  kind, body, cur = der(seq, cur)
+                  fields.append((kind, body))
+              if tag != 0x30 or [k for k, _ in fields][:1] != [0x16] or fields[0][1] != b"IM4P":
+                  raise SystemExit("not an IM4P")
+              return fields[3][1]
+
+          def module(component):
+              raw = comps[component].read_bytes()
+              # 直接就是 version-2 module 时不拆 IM4P
+              if len(raw) >= 24 and struct.unpack_from("<I", raw, 0)[0] == 2:
+                  body = raw
+              else:
+                  body = im4p_payload(raw)
+              ver = struct.unpack_from("<I", body, 0)[0]
+              cnt = struct.unpack_from("<I", body, 20)[0]
+              ok = ver == 2 and len(body) == 24 + cnt * 24
+              print("  %-26s raw=%d body=%d version=%d entries=%d %s"
+                    % (component, len(raw), len(body), ver, cnt, "OK" if ok else "BAD"))
+              if not ok:
+                  raise SystemExit("%s is not a complete version-2 trust module" % component)
+              return body
+
+          static = module("StaticTrustCache")
+          system = module("Cryptex1,SystemTrustCache")
+          bundle = struct.pack("<3I", 2, 12, 12 + len(static)) + static + system
+          out = Path("trustcache.bundle")
+          out.write_bytes(bundle)
+          digest = hashlib.sha256(bundle).hexdigest()
+          print("bundle %d bytes, sha256 %s" % (len(bundle), digest))
+
+          # sheng board.toml [payload] trust_cache_sha256 的两个值：
+          # 7416ca4f… 是 build-original-system-trust.py 的原始 bundle，
+          # 8900d6a9… 是 owner-signed 变体。我们做的是前者，必须命中。
+          want = "7416ca4f8377146626bb284e2133c76bee6cb4e3ee0af5d648b186235a7323a7"
+          if digest != want:
+              print("::error::bundle sha256 does not match the verified original-static-system bundle")
+              print("::error::expected %s" % want)
+              sys.exit(1)
+          print("bundle matches the bundle UniXNU-sheng ships -- safe to boot")
+          PY
+
       # payload：把 kernel.macho + ADT 打成 FAT 卷（boot 镜像的 ramdisk）。
       # 平台种子走 secret，未配则用下面的默认（软件身份种子，非真实机密）。
       # --data-ramdisk 让它进 Payloads/scratch-data.img，并在 ADT 里生成
       # /chosen/memory-map/RAMDisk 占位符；DarwinBoot 启动时把文件拷进内核窗口
       # 并回填 {phys,size}，内核再 mdevadd 成 /dev/md0。
+      # v46：--trust-cache 让 bundle 进 Payloads/kernel.macho.trustcache，并在
+      # ADT 里生成 /chosen/memory-map/TrustCache 占位符，由 DarwinBoot 回填。
       - name: Build payload
         if: env.KERNEL_BUILT == 'yes'
         env:
           UNIXNU_UNIQUE_CHIP_ID: ${{ secrets.UNIXNU_UNIQUE_CHIP_ID || '0x38d960c942ad2137' }}
-        run: ./unixnu build payload -D "$GITHUB_WORKSPACE" --data-ramdisk "$GITHUB_WORKSPACE/ram-root.img" 2>&1 | tee "$GITHUB_WORKSPACE/payload.log"
+        run: ./unixnu build payload -D "$GITHUB_WORKSPACE" --trust-cache "$GITHUB_WORKSPACE/trustcache.bundle" --data-ramdisk "$GITHUB_WORKSPACE/ram-root.img" 2>&1 | tee "$GITHUB_WORKSPACE/payload.log"
         working-directory: UniXNU
 
       - name: Show build log tail
