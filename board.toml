@@ -1,9 +1,13 @@
 # OnePlus Ace 5 Pro (hummer, SM8750) — UniXNU device repository.
 #
-# 当前状态：
-#   [firmware] 段已真机验证 —— UEFI 固件含 UniXNU 菜单，fastboot boot 成功。
-#   [kernel]/[ipsw]/[userdata]/[payload]/[payload.adt] 段是 XNU 内核 + 负载打包
-#   阶段的脚手架（TODO 标注），需要 macOS/Xcode 才能构建验证，尚未跑通。
+# 当前状态（2026-10-22）：
+#   [firmware]  真机验证通过 —— UEFI 含 UniXNU 菜单，fastboot boot 成功。
+#   [kernel]    真机验证到 DarwinBoot 交接：内核 Mach-O 被正确装载、boot_args
+#               校验通过、ExitBootServices 成功、跳进内核（顶部绿条）。
+#               已定位屏幕无声的原因：boot_args.Video 给的是帧缓冲物理地址
+#               0xFC000000，而内核从来没映射过它，图形控制台第一次写像素就
+#               data abort。修法见 [kernel] archives 的第一项。
+#   [ipsw]/[userdata] 仍是脚手架；[payload]/[payload.adt] 已能产出可启动的 FAT 卷。
 
 [board]
 name = "hummer"
@@ -48,6 +52,12 @@ defconfig = "hummer_defconfig"
 # build-arm-driver.py 从 UniXNU-sheng 原样拷贝（其 sheng 硬编码只在 NativeAdreno/GPU
 # 分支，对 ArmDTPlatform/ArmCpu 通用）。
 archives = [
+  # 必须放在最前：kernel.py 的 build_archives() 跑在「引导编译 pass」和
+  # 「最终链接 pass」之间，所以这里改 XNU 源码 + 删掉旧的 arm_init.o，
+  # 最终 pass 就会重编它。作用：把 boot_args.Video 里的帧缓冲（PA）映射进
+  # 内核高窗并改成 write-combine，否则图形控制台第一次写像素就 data abort，
+  # panic 又在同一处再崩一次，屏幕只剩 DARWINBOOT 最后一行（v12/v13 的现象）。
+  "build-hummer-video-map.py",
   "build-corecrypto-14.py",
   "build-corecrypto-14.py --namespace",
   "build-arm-driver.py ArmDTPlatform",
@@ -137,14 +147,23 @@ loader = "firmware"
 title = "hummer first boot: source 4K XNU to console"
 dram_size = "0x400000000"          # 16 GiB
 timeout = 3
-# panic_screen 需要 Mu-Silicium 检出(UNIXNU_UEFI)，CI 上没有，首启先关掉。
+# panic_screen 需要 scripts/patch-xnu-entry-probe.py，该脚本在 UniXNU 树里不存在
+# （git ls-files 查不到，GitHub main/master 也是 404），所以保持关闭。
 panic_screen = false
 # 首启最小 boot args。注意：绝不能加 native-ufs-root=1 —— payload 会校验
 # _sheng_pmgr_run 符号(需要 sheng PMGR 集成)，最小内核没有，会直接拒绝打包。
+#
+# serial=0：osfmk/arm/arm_init.c 里 serial=3 等于 SERIALMODE_INPUT|OUTPUT，
+#   紧接着 `if ((serialmode & SERIALMODE_OUTPUT) && serial_exists)
+#   switch_to_serial_console();` —— 只要 serial_init() 摸到一个 UART，
+#   内核就从视频控制台切走，屏幕上彻底没有输出。首启必须 0。
+# cpus=1：只拉起 MPIDR 0 的启动核，避免 GIC/定时器没配好时次要核把启动线程搅死
+#   （ADT 里 cpu0 是 running、cpu1.. 是 waiting，两者要一致）。
 kernel_args = [
   "-v",
-  "serial=3",
+  "serial=0",
   "debug=0x14e",
+  "cpus=1",
 ]
 
 [payload.adt]

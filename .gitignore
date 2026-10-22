@@ -1,2 +1,3 @@
 # UniXNU build/device artifacts
 .cache/
+__pycache__/
