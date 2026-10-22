@@ -258,21 +258,27 @@ kernel_args = [
   "debug=0x14e",
   "cpus=8",
   "rd=md0",
-  # pid 1 那个探针是手搓的 Mach-O，没有 LC_CODE_SIGNATURE。v35 已经证明
-  # 内核会把 /sbin/launchd 当 pid 1 去 exec（errno 2 @kern_exec.c:7334）。
+  # ---- 签名这一关：什么都不加，靠 trust cache 正经过 ----
   #
-  # 签名这关只留 amfi_get_out_of_my_way：
-  #   内核里这个字符串只被 cs_get_cs_config()（kern_codesigning.c）读一次，
-  #   没有任何前置条件，读进去直接 or 进 cs_config 的位。
+  # v46 起 payload 里终于带了原版 trust cache（StaticTrustCache +
+  # Cryptex1,SystemTrustCache，sha256 7416ca4f…，见上面的
+  # trust_cache_sha256）。iOS 17 的系统二进制本来就是 ad-hoc 签名 + 空 CMS，
+  # 由 trust cache 授权，所以不需要再关任何检查。
   #
-  # 绝对不要再加 cs_enforcement_disable（v37 就是被它炸的）：
-  #   AMFI 的 _initializeAppleMobileFileIntegrity() 里
-  #       if (PE_parse_boot_argn("cs_enforcement_disable", ...) && value)
-  #           if (!PE_i_can_has_debugger(NULL)) panic("can't has cs_enforcement_disable");
-  #   而 PE_i_can_has_debugger() 读的是 PE_state.debug_arg，这台机器上即使
-  #   命令行写了 debug=0x14e 它也是 0（参考实现 sheng 的日志里同样写着
-  #   "debug boot arg not present"）。所以这条路是不通的，也用不着。
-  "amfi_get_out_of_my_way=1",
+  # 绝对不要加 amfi_get_out_of_my_way=1（v46c1 实测）：
+  #   原版 AMFI kext 的 _initializeAppleMobileFileIntegrity() 会因此走到
+  #       panic("can't has cs_enforcement_disable" @AppleMobileFileIntegrity.cpp:5261)
+  #   证据：只把它去掉（其余参数不动），同内核同 payload 立刻不再 panic，转而
+  #   死在 ArmCpu.cpp:405 的 CPU 注册上 —— 说明 panic 确实由这个开关触发。
+  #
+  # 绝对不要加 cs_enforcement_disable（v37 就是被它炸的）：同一个 panic，
+  # 那条路的判据是 PE_i_can_has_debugger()，而本机它恒为假
+  # （参考实现的日志里同样写着 "debug boot arg not present"）。
+  #
+  # cpus=8 也不能改成 1（v21/v46c1a 实测）：
+  #   ml_processor_register() 的配额等于 num_cpus，启动核会被注册两次，所以
+  #   cpus=1 时第二次必然返回 KERN_FAILURE(5)，然后
+  #       panic: ArmCpu: CPU 0 registration failed: 5 @ArmCpu.cpp:405
 ]
 
 [payload.adt]
