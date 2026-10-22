@@ -35,17 +35,22 @@ B. SMP 探针标记（hummer_early_u32x，画面即串口）：
      arm5 sec enter / arm5 step6 / arm5 step7             —— 次核侧推进
 
 幂等：看到 "hummer: armcpu probe" 标记即跳过。锚点必须唯一，失败时 dump 上下文。
+
+CI 实测教训（run 39872264785）：clang 拒绝块作用域的 `extern "C"` 声明
+（"expected unqualified-id" 指向 "C"），所以声明只在文件顶部的全局声明区插一次
+（上游自己在那里就有 extern "C" 的 processor_start 声明），块内只写调用。
 """
 import re
-import subprocess
 from pathlib import Path
 
 MARKER = "hummer: armcpu probe"
 ARMCPU = Path("drivers/ArmCpu/ArmCpu.cpp")
 
-# hummer_early_u32x 定义在 arm_vm_init.c（C，外部链接）。ArmCpu.cpp 是 C++，
-# 函数内声明必须写 extern "C"，否则按 C++ 名字修饰链接失败。
-DECL = 'extern "C" void hummer_early_u32x (const char *, unsigned int);'
+# 全局声明锚：ArmCpu.cpp 顶部的 extern "C" 声明区（上游自己的 processor_start 就在此）。
+DECL_ANCHOR = 'extern "C" kern_return_t processor_start (processor_t);\n'
+DECL_NEW = (DECL_ANCHOR +
+            '/* hummer: panel console renderer (arm_vm_init.c). */\n'
+            'extern "C" void hummer_early_u32x (const char *, unsigned int);\n')
 
 
 class Patcher:
@@ -75,11 +80,6 @@ class Patcher:
                 f"error: armcpu-probe: {tag}: expected exactly one anchor in {path}, found {n}")
         self.write(path, text.replace(old, new, 1))
 
-    def commit(self):
-        for path, text in self.pending.items():
-            with open(path, "w", encoding="utf-8", newline="") as handle:
-                handle.write(text)
-
     @staticmethod
     def _diagnose(path, old, tag, n):
         print(f"error: armcpu-probe: {tag}: {n} match(es) in {path}", flush=True)
@@ -97,32 +97,37 @@ class Patcher:
         for line in text[start + 1:idx + 700].splitlines():
             print("error: armcpu-probe: | " + line, flush=True)
 
+    def commit(self):
+        for path, text in self.pending.items():
+            with open(path, "w", encoding="utf-8", newline="") as handle:
+                handle.write(text)
+
 
 def main():
     if not ARMCPU.is_file():
         raise SystemExit(f"armcpu-probe: {ARMCPU} missing: no drivers checkout")
-    src = Patcher.read(Patcher(), ARMCPU)
-    if MARKER in src:
+    if MARKER in Patcher.read(Patcher(), ARMCPU):
         print("armcpu-probe: ArmCpu.cpp already patched")
         return
 
     p = Patcher()
+
+    # ---- 0. 全局 extern "C" 声明（块内声明被 clang 拒绝，见文件头教训） ------
+    p.swap(ARMCPU, DECL_ANCHOR, DECL_NEW, "global decl")
 
     # ---- A. probe(): 打印每个候选 nub，并拒绝 Aff2 误匹配 --------------------
     p.swap(ARMCPU,
            "  memcpy (&id, reg->getBytesNoCopy (), sizeof (id));\n"
            "  if (ml_get_cpu_number (id) != ml_get_boot_cpu_number ()) {\n",
            "  memcpy (&id, reg->getBytesNoCopy (), sizeof (id));\n"
-           "  { " + DECL + "\n"
-           "    hummer_early_u32x (\"armP nub id\", id);\n"
+           "  { hummer_early_u32x (\"armP nub id\", id);\n"
            "    hummer_early_u32x (\"armP nub ml#\", static_cast<unsigned int> (ml_get_cpu_number (id))); }\n"
            "  /* " + MARKER + ": ml_get_cpu_number() masks MPIDR to AFF1|AFF0, so the two Oryon\n"
            "   * prime cores (AFF2 = 1, reg 0x10000/0x10100 on SM8750) collapse onto logical 0\n"
            "   * and would enter start() as a second boot CPU.  Reject any reg whose AFF1|AFF0\n"
            "   * bits are zero while the full value is not: the topology cannot address it yet. */\n"
            "  if (id != 0 && (id & 0xffffu) == 0) {\n"
-           "    { " + DECL + "\n"
-           "      hummer_early_u32x (\"armP nub REJECT aff2\", id); }\n"
+           "    { hummer_early_u32x (\"armP nub REJECT aff2\", id); }\n"
            "    return nullptr;\n"
            "  }\n"
            "  if (ml_get_cpu_number (id) != ml_get_boot_cpu_number ()) {\n",
@@ -132,22 +137,19 @@ def main():
     p.swap(ARMCPU,
            "  gController = controller;\n",
            "  gController = controller;\n"
-           "  { " + DECL + "\n"
-           "    hummer_early_u32x (\"arm0 intc done\", logicalId); }\n",
+           "  { hummer_early_u32x (\"arm0 intc done\", logicalId); }\n",
            "boot intc done")
 
     p.swap(ARMCPU,
            "  initCPU (true);\n",
            "  initCPU (true);\n"
-           "  { " + DECL + "\n"
-           "    hummer_early_u32x (\"arm0 initcpu done\", logicalId); }\n",
+           "  { hummer_early_u32x (\"arm0 initcpu done\", logicalId); }\n",
            "boot initcpu done")
 
     p.swap(ARMCPU,
            "  registerService ();\n  __atomic_store_n (&gBootRegistered",
            "  registerService ();\n"
-           "  { " + DECL + "\n"
-           "    hummer_early_u32x (\"arm0 regsvc done\", logicalId); }\n"
+           "  { hummer_early_u32x (\"arm0 regsvc done\", logicalId); }\n"
            "  __atomic_store_n (&gBootRegistered",
            "boot regsvc done")
 
@@ -156,8 +158,7 @@ def main():
            "  if (status != KERN_SUCCESS) { armcpu_smp_fail[logicalId] = 4; return false; }\n"
            "  setCPUNumber (info.log_id);",
            "  if (status != KERN_SUCCESS) { armcpu_smp_fail[logicalId] = 4; return false; }\n"
-           "  { " + DECL + "\n"
-           "    hummer_early_u32x (\"arm2 fs ok\", logicalId); }\n"
+           "  { hummer_early_u32x (\"arm2 fs ok\", logicalId); }\n"
            "  setCPUNumber (info.log_id);",
            "finishSecondary reg ok")
 
@@ -167,12 +168,10 @@ def main():
            "  // Blocks until the new core reaches the scheduler; a core that never arrives only stalls this helper thread.\n"
            "  processor_start (self->machProcessor);\n",
            "  armcpu_smp_step[self->logicalId] = 3;\n"
-           "  { " + DECL + "\n"
-           "    hummer_early_u32x (\"arm3 st pre ps\", self->logicalId); }\n"
+           "  { hummer_early_u32x (\"arm3 st pre ps\", self->logicalId); }\n"
            "  // Blocks until the new core reaches the scheduler; a core that never arrives only stalls this helper thread.\n"
            "  processor_start (self->machProcessor);\n"
-           "  { " + DECL + "\n"
-           "    hummer_early_u32x (\"arm3 st ps returned\", self->logicalId); }\n",
+           "  { hummer_early_u32x (\"arm3 st ps returned\", self->logicalId); }\n",
            "startThread bracket")
 
     # ---- E. startCPU(): PSCI CPU_ON 前后与返回码 -------------------------------
@@ -181,11 +180,9 @@ def main():
            "  int64_t result = psciCall (hvc, 0xc4000003ULL, affinity & 0xff00ffffffULL, entry, 0);\n"
            "  armcpu_smp_psci_rc[logicalId] = static_cast<int32_t> (result);",
            "  armcpu_smp_step[logicalId] = 4;\n"
-           "  { " + DECL + "\n"
-           "    hummer_early_u32x (\"arm4 pre psci\", logicalId); }\n"
+           "  { hummer_early_u32x (\"arm4 pre psci\", logicalId); }\n"
            "  int64_t result = psciCall (hvc, 0xc4000003ULL, affinity & 0xff00ffffffULL, entry, 0);\n"
-           "  { " + DECL + "\n"
-           "    hummer_early_u32x (\"arm4 psci rc\", static_cast<unsigned int> (result)); }\n"
+           "  { hummer_early_u32x (\"arm4 psci rc\", static_cast<unsigned int> (result)); }\n"
            "  armcpu_smp_psci_rc[logicalId] = static_cast<int32_t> (result);",
            "startCPU psci bracket")
 
@@ -194,8 +191,7 @@ def main():
         p.swap(ARMCPU,
                f"    armcpu_smp_step[logicalId] = {step};\n",
                f"    armcpu_smp_step[logicalId] = {step};\n"
-               "    { " + DECL + "\n"
-               f"      hummer_early_u32x (\"{tag}\", logicalId); }}\n",
+               f"    {{ hummer_early_u32x (\"{tag}\", logicalId); }}\n",
                f"initCPU step {step}")
 
     p.commit()
