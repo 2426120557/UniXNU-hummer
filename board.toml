@@ -6,7 +6,7 @@
 #               校验通过、ExitBootServices 成功、跳进内核（顶部绿条）。
 #               已定位屏幕无声的原因：boot_args.Video 给的是帧缓冲物理地址
 #               0xFC000000，而内核从来没映射过它，图形控制台第一次写像素就
-#               data abort。修法见 [kernel] archives 的第一项。
+#               data abort。修法见 [kernel] archives 的最后一项。
 #   [ipsw]/[userdata] 仍是脚手架；[payload]/[payload.adt] 已能产出可启动的 FAT 卷。
 
 [board]
@@ -52,18 +52,22 @@ defconfig = "hummer_defconfig"
 # build-arm-driver.py 从 UniXNU-sheng 原样拷贝（其 sheng 硬编码只在 NativeAdreno/GPU
 # 分支，对 ArmDTPlatform/ArmCpu 通用）。
 archives = [
-  # 必须放在最前：kernel.py 的 build_archives() 跑在「引导编译 pass」和
-  # 「最终链接 pass」之间，所以这里改 XNU 源码 + 删掉旧的 arm_init.o，
-  # 最终 pass 就会重编它。作用：把 boot_args.Video 里的帧缓冲（PA）映射进
-  # 内核高窗并改成 write-combine，否则图形控制台第一次写像素就 data abort，
-  # panic 又在同一处再崩一次，屏幕只剩 DARWINBOOT 最后一行（v12/v13 的现象）。
-  "build-hummer-video-map.py",
   "build-corecrypto-14.py",
   "build-corecrypto-14.py --namespace",
   "build-arm-driver.py ArmDTPlatform",
   "build-arm-driver.py ArmCpu",
   "build-libpthread-kernel.py",
   "build-native-probe-stubs.py",
+  # 必须放在最后：kernel.py 的 build_archives() 跑在「引导编译 pass」和「最终
+  # 链接 pass」之间，这个脚本改 XNU 源码后删掉旧的 arm_init.o，最终 pass 就会
+  # 重编它。作用：把 boot_args.Video 里的帧缓冲（PA 0xFC000000）映射进内核高窗
+  # 并改成 write-combine；否则图形控制台第一次写像素就 data abort，panic 又在
+  # 同一处再崩一次，屏幕只剩 DARWINBOOT 最后一行（v12/v13 的现象）。
+  #
+  # 不能放前面：它删掉的 arm_init.o 还在 link.filelist 里，后面的 archive 步骤
+  # （build-corecrypto-14.py 等）会用 `xcrun nm` 扫整份 osfmk 目标文件列表，
+  # 碰到不存在的文件直接报 “No such file or directory” 并中断整个构建。
+  "build-hummer-video-map.py",
 ]
 
 # prelink：把 4K 页 XNU 内核 prelink 进原版 kernelcache。
