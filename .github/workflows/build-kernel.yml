@@ -80,6 +80,21 @@ jobs:
         run: ./unixnu defconfig hummer_defconfig -D "$GITHUB_WORKSPACE"
         working-directory: UniXNU
 
+      # v25：NativeUfs 需要 IOKit/storage ABI 头，由 scripts/audit-storage-interface.py
+      # 生成，它要求 refer/IOStorageFamily 固定在 e45fbe30（Darwin 23 IOStorageFamily）。
+      # 必须在 defconfig 之后克隆：unixnu defconfig 才会创建 out/hummer/tree/ 构建树
+      # （v25 首跑的教训：克隆到 checkout 根对构建无效，归档脚本在树内找 refer/）。
+      # 位置与 baseline.sh 自己 clone refer/xnu 的位置一致，都在构建树根。
+      - name: Stage the IOStorageFamily reference
+        run: |
+          TREE=UniXNU/out/hummer/tree
+          if [ ! -d "$TREE" ]; then echo "FAIL: build tree missing after defconfig"; exit 1; fi
+          if [ ! -d "$TREE/refer/IOStorageFamily/.git" ]; then
+            mkdir -p "$TREE/refer"
+            git clone https://github.com/apple-oss-distributions/IOStorageFamily.git "$TREE/refer/IOStorageFamily"
+          fi
+          git -C "$TREE/refer/IOStorageFamily" checkout e45fbe30a7879e0b16e26dddb78538f1b00e0bff
+
       - name: Show status
         run: ./unixnu status -D "$GITHUB_WORKSPACE"
         working-directory: UniXNU
