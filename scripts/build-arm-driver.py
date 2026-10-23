@@ -10,7 +10,8 @@ import subprocess
 ROOT = Path(__file__).resolve().parents[1]
 
 # drivers/NativeUfs is an upstream submodule, read-only for this overlay repository, so
-# the two SMMU edits below are applied to a private copy at build time.  They are exact
+# the SMMU edits below (plus the v54 root-partition-name edits, which also touch
+# RootLayout.h) are applied to a private copy at build time.  They are exact
 # text replacements, each asserted to match exactly once, so an upstream refactor fails
 # the build instead of silently dropping the change.
 #
@@ -137,6 +138,73 @@ NATIVE_UFS_EDITS = [
            read32 (smmu, 0x00), read32 (smmu, 0x20), read32 (smmu, 0x24), read32 (smmu, 0x28));
 """,
     ),
+    (
+        # v54：双系统。sheng 是单系统，根镜像刷在 Android 自己的 userdata 里，驱动
+        # 就硬编码找名为 "userdata" 的 GPT 项。hummer 走 docs/zh/porting/
+        # dual-system-partition 的布局：userdata 保留给 ColorOS，根镜像在 unixnu。
+        # 加一个启动参数选分区名，默认仍是 "userdata"，sheng 的行为不变。
+        'root: select the partition that carries the manifest',
+        '  PE_parse_boot_argn ("native-ufs-root", &rootMode, sizeof (rootMode));\n'
+        '  native_ufs_probe_requested = probe != 0;\n',
+        """  PE_parse_boot_argn ("native-ufs-root", &rootMode, sizeof (rootMode));
+  {
+    // A dual-system board keeps Android's userdata and flashes the root image into a
+    // separately named partition: native-ufs-partition=unixnu. The GPT name field is
+    // UTF-16LE and 32 characters wide, so a longer value is not a name we can match.
+    char name[sizeof (gRootPartitionName)] = {};
+    if (PE_parse_boot_argn ("native-ufs-partition", name, sizeof (name)) && name[0]) {
+      unsigned i = 0;
+      for (; i + 1 < sizeof (gRootPartitionName) && name[i]; ++i) gRootPartitionName[i] = name[i];
+      gRootPartitionName[i] = '\\0';
+    }
+  }
+  native_ufs_probe_requested = probe != 0;
+""",
+    ),
+]
+
+# v54：上面那张表只作用于 NativeUfs.cpp（单个翻译单元）。分区名在 RootLayout.h 的
+# findRootLayout() 里，把 "userdata" 字面量换成启动参数选定的名字，匹配循环也要从
+# sizeof(字面量)（含结尾 NUL，长度固定 9）改成按实际名字长度比较，语义保持一致：
+# 逐字符比 UTF-16LE 低字节、高字节必须为 0，并且要求条目名恰好在该处结束。
+NATIVE_UFS_HEADER_EDITS = [
+    (
+        'RootLayout.h', 'root: default partition name',
+        'static uint8_t gScratch[kDataMax];\n',
+        """static uint8_t gScratch[kDataMax];
+
+// v54: the partition whose first block carries the root manifest. sheng keeps the
+// image in Android's own userdata; a dual-system board flashes it into a separate
+// partition and selects it with native-ufs-partition=<GPT name>.
+static char gRootPartitionName[32] = "userdata";
+""",
+    ),
+    (
+        'RootLayout.h', 'root: match the configured name',
+        '  static const char wanted[] = "userdata";\n',
+        """  const char *wanted = gRootPartitionName;
+  unsigned wantedLen = 0;
+  while (wantedLen < sizeof (gRootPartitionName) - 1 && wanted[wantedLen]) ++wantedLen;
+""",
+    ),
+    (
+        'RootLayout.h', 'root: compare the configured name length',
+        """    bool match = true;
+    for (unsigned c = 0; c < sizeof (wanted); c++) {
+      if (entry[56 + 2 * c] != static_cast<uint8_t> (wanted[c]) || entry[57 + 2 * c] != 0) {
+        match = false;
+        break;
+      }
+    }
+""",
+        """    bool match = wantedLen > 0;
+    for (unsigned c = 0; match && c <= wantedLen; c++) {
+      if (entry[56 + 2 * c] != static_cast<uint8_t> (wanted[c]) || entry[57 + 2 * c] != 0) {
+        match = false;
+      }
+    }
+""",
+    ),
 ]
 
 parser = argparse.ArgumentParser(description=__doc__)
@@ -181,6 +249,17 @@ if component == 'NativeUfs':
             raise SystemExit(f'NativeUfs patch anchor is not unique ({text.count(old)} matches): {why}')
         text = text.replace(old, new)
     patched.write_text(text)
+    # Header edits (v54): same exact-once discipline, applied to the staged copy.
+    for name in sorted({entry[0] for entry in NATIVE_UFS_HEADER_EDITS}):
+        target = staged / name
+        header = target.read_text()
+        for header_name, why, old, new in NATIVE_UFS_HEADER_EDITS:
+            if header_name != name:
+                continue
+            if header.count(old) != 1:
+                raise SystemExit(f'NativeUfs header anchor is not unique ({header.count(old)} matches): {why}')
+            header = header.replace(old, new)
+        target.write_text(header)
     source = patched
 if args.negative_aes_kat:
     if component != 'NativeAES':

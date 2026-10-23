@@ -42,19 +42,19 @@ fetch = ["KernelCache", "DeviceTree", "StaticTrustCache", "Cryptex1,SystemTrustC
 #
 #   userdata first=3a1421 last=3ad07fa      (4096 字节扇区)
 #
-# 换算：起始 3a1421 * 4096 = 15,590,363,136 字节 = 14.52 GiB
-#       容量 (3ad07fa - 3a1421 + 1) * 4096 = 237,015,769,088 字节 = 220.74 GiB
-# 与 256 GiB 机型相符（sheng 那边是 0x2f3840..0x3d0abfa = 220.9 GiB，同一量级）。
+# v54（双系统）：userdata 段改为双系统切出来的 unixnu 分区，不再指向 ColorOS 的
+# userdata。按 docs/zh/porting/dual-system-partition 用 scripts/dual_sys/partition.py
+# 从 userdata 尾部切出 32 GiB：
+#   起始 0x32d8f00 * 4096 = 55,997,235,200 字节
+#   容量 (0x3ad8eff - 0x32d8f00 + 1) * 4096 = 34,359,738,368 字节 = 32.00 GiB
+# 设备节点 /dev/block/by-name/unixnu；ColorOS 的 userdata（0x3a1421..0x3ad07fa）
+# 保留原名、原大小（188.87 GiB），两边互不覆盖。
 #
-# 同一轮还读到首块 ext4magic=2b41（不是 0xef53）、manifest status=1：
-# ColorOS 的 userdata 不是 ext4（f2fs + 元数据加密，首块就是密文），而且从未
-# 烧过我们的 SHNGROOT 清单。这两点都符合预期。
-#
-# 注意：userdata 步骤会把这个分区整个覆盖掉，ColorOS 的数据不会保留。
-# 镜像大小上限 220.74 GiB，OS + SystemOS 两个窗口按 1 MiB 对齐后必须塞得进去。
+# 镜像大小上限 32.00 GiB，OS + SystemOS 两个窗口按 1 MiB 对齐后必须塞得进去
+# （当前 IPSW 产出 9,382,658,048 字节 ≈ 8.74 GiB，余量充足）。
 [userdata]
-first_lba = 0x3a1421
-last_lba = 0x3ad07fa
+first_lba = 0x32d8f00
+last_lba = 0x3ad8eff
 lba_bytes = 4096
 windows = [
   { name = "OS", component = "OS" },
@@ -311,6 +311,21 @@ kernel_args = [
   #   ml_processor_register() 的配额等于 num_cpus，启动核会被注册两次，所以
   #   cpus=1 时第二次必然返回 KERN_FAILURE(5)，然后
   #       panic: ArmCpu: CPU 0 registration failed: 5 @ArmCpu.cpp:405
+  #
+  # ---- v54：Stage 6 存储栈（docs/zh/porting/bring-up.md「阶段 6：存储与根卷」）----
+  #
+  # 双系统布局下根镜像在 unixnu 分区（不是 ColorOS 的 userdata），所以给
+  # NativeUfs 加的分区名开关必须传：native-ufs-partition=unixnu（本仓库
+  # scripts/build-arm-driver.py 的 v54 改写，默认仍是 "userdata"）。
+  #
+  # native-ufs-probe=12 是驱动自带的媒体发现报告：起 UFS 控制器 → 读 GPT 与
+  # SHNGROOT 清单 → 把 OS/SystemOS 两个窗口包成 NativeUfsBlock → 等原始
+  # IOStorageFamily 发布 IOMedia（最多 20 秒）→ panic 打出 bsd 名/Content/
+  # Size/UUID 列表。这一轮要看的就是这份列表里有没有 9232A33A-… 的卷。
+  # 它故意 panic，所以本轮不会进 bsd_init；rd=md0 留着不影响这个探针，
+  # 下一轮（去掉 rd）才用它做真根。
+  "native-ufs-partition=unixnu",
+  "native-ufs-probe=12",
 ]
 
 [payload.adt]
@@ -335,3 +350,11 @@ psci_method = "smc"
 packed_data_ramdisk = false
 ipad_identity = false              # 首启不声明 Apple 身份
 unique_chip_id = "required"        # 平台种子不入仓库：--unique-chip-id / UNIXNU_UNIQUE_CHIP_ID
+# v54：根卷匹配（docs/zh/concepts/userdata.md「根卷匹配」、porting/bring-up.md 阶段 6）。
+# 取值是 OS 窗口内 GPT 的分区 GUID —— 分区方案把窗口里的分区发布成 IOMedia 卷，
+# XNU 按这个 UUID 选根设备。来源：outputs/build/userdata-root.img
+#   OS 窗口偏移 0x100000，窗口内 GPT 首项（APFS 类型 7c3457ef-...），5.66 GiB。
+# 交叉记录（排查用，不是这里要填的值）：
+#   APFS 容器 UUID 50f8a67f-afc1-4a1b-bcbb-82162674c67f，块大小 4096，1,483,776 块。
+# 换 IPSW 要重新从新镜像里取；sheng 参考值是 04769D26-2CA0-4825-B443-E2E5F88300F2。
+root_match_volume_uuid = "9232A33A-5F8A-4A09-9A43-E7D8BCFCF4BC"
