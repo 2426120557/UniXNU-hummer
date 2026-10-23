@@ -371,8 +371,16 @@ if component in ('NativeVirtioBlock', 'NativeRamBlock', 'NativeUfs'):
     if args.verified_root_bundle:
         command += ['-DNATIVE_VERIFIED_BLOCK_MULTI_POLICY=1']
 if component == 'NativeUfs':
+    # v56：不再强制 -DNATIVE_VERIFIED_BLOCK。带它的时候 configure() 一定走
+    # configureVerification()，而那条路要 owner 签发的策略包（policy count > 0，
+    # 由 kits/VerifiedRoot 提供）；本板的桩里策略数是 0，于是 v55 真机停在
+    # stage="policy count invalid"、prepared=0。不带它时 configure() 直接返回 true，
+    # doAsyncReadWrite 走普通读路径 —— 也正是 probe 阶段已经证明能读通的那条
+    # （GPT 与 SHNGROOT 清单都是这么读出来的）。
+    # 交付前要接回 verified 闭包：build-arm-driver.py NativeUfs --verified-root
+    # 配上真策略包，再把这个默认改回来。
     command += ['-I', str(ROOT / 'kits/VerifiedRoot/include'), '-I', str(ROOT / 'drivers/NativeVirtioBlock'),
-                '-DNATIVE_VERIFIED_BLOCK=1', '-DNATIVE_VERIFIED_BLOCK_MULTI_POLICY=1', '-mgeneral-regs-only']
+                '-mgeneral-regs-only']
     # GccUfs.h in the submodule carries SM8550 offsets.  SM8750 moves every UFS PHY
     # branch register after the AXI branch up by 4 bytes, and the SM8550 AHB offset
     # (0x77024) is a reserved word there: the probe read 0, decided the AHB branch was
