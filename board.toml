@@ -313,7 +313,13 @@ owned_memory_size = "0x40000000"   # DarwinBoot 连续窗口 256MiB..8GiB，2MiB
 # 写穿 8 页数组，溢出落在 bootstrap_pagetables 之后的数据上，内核在
 # start.s 里就死了 —— 表现就是入口探针画出来、arm_init 的标记一个没有。
 # 1 GiB 只需 6 页，留 2 页余量。要更大窗口必须改用 ARM_LARGE_MEMORY 构建。
-cpu_regs = "0,0x100,0x200,0x300,0x400,0x500,0x10000,0x10100"   # 6 性能核 + 2 Oryon 大核
+# v50: 只列 6 个 AFF1|AFF0 值域内的核（照 sheng 参考 board.toml:223 同款做法：
+# 多余核留 off；sheng 生成器拒绝 reg>0xffff，本生成器同样收回 0xffff 上限）。
+# 两个 Oryon prime 在 Affinity2（0x10000/0x10100），上游 ml_get_cpu_number()
+# 掩码 AFF1|AFF0 会把它们塌到 logical 0；v49 实测 ADT 8 核 + probe 拒掉 2 个后
+# AppleS8000CPU panic "CPU configuration in device tree is invalid"（DT 8 vs 6）。
+# 注意 [payload.adt] 的 cpu_regs 会显式传 --cpu-regs 覆盖生成器默认值（v50 教训）。
+cpu_regs = "0,0x100,0x200,0x300,0x400,0x500"   # 6 性能核；2 Oryon 大核留 off
 psci_method = "smc"
 packed_data_ramdisk = false
 ipad_identity = false              # 首启不声明 Apple 身份
