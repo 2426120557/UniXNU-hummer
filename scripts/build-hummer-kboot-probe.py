@@ -36,13 +36,16 @@ from pathlib import Path
 MARKER = "hummer: kboot probe"
 XNU = Path(".cache/xnu-work")
 PATCH = Path("patches/xnu/zzz-boot-progress.patch")
+PATCH2 = Path("patches/xnu/native-4k-signature-hash-cache.patch")
 
 STALE_OBJECTS = ("startup.o", "startup.o.json",
                  "bsd_init.o", "bsd_init.o.json",
                  "kern_exec.o", "kern_exec.o.json",
-                 "arm_init.o", "arm_init.o.json")
+                 "arm_init.o", "arm_init.o.json",
+                 "ubc_subr.o", "ubc_subr.o.json")
 
 DECL = 'extern void hummer_early_prints (const char *, const char *);'
+DECL_U32X = 'extern void hummer_early_u32x (const char *, unsigned int);'
 KBOOT_MARK = 'hummer_early_prints ("kboot"'
 
 # zzz 落盘后两个 log 函数体开头（变量 message 形式，补丁里也是 + 行）
@@ -139,17 +142,94 @@ def stale():
             print("kboot-probe: removed stale", j)
 
 
+# v52: exec 签名准备路径的检查点（native-4k-signature-hash-cache.patch 的
+# 调用点）。补丁侧在对应 + 行前后插 kboot + 行；源码侧在 ubc_subr.c 的
+# 同一行前后插（两侧行集合保持一致，反向 check 才能通过）。
+N4K_CALL = '\terror = cs_native4k_prepare(vp, &tmp_blob);\n'
+N4K_ENTER = '\t{ ' + DECL + ' hummer_early_prints ("kboot", "exec native4k prepare"); }\n'
+N4K_RC = '\t{ ' + DECL_U32X + ' hummer_early_u32x ("kboot n4k rc", (unsigned int) error); }\n'
+PATCH2_OPS = {
+    "file": "bsd/kern/ubc_subr.c",
+    "anchor": '+' + N4K_CALL,
+    "before": ['+' + N4K_ENTER],
+    "after": ['+' + N4K_RC],
+}
+
+
+def apply_ops_to_patch(patch_text, ops):
+    """Insert ops['before'] / ops['after'] lines around ops['anchor'] in the
+    ops['file'] section of the patch, growing that hunk's new-side count."""
+    out = []
+    current_file = None
+    hunk_new_count = None
+    done = False
+    for line in patch_text.splitlines(keepends=True):
+        m = re.match(r'^\+\+\+ b/(\S+)', line)
+        if m:
+            current_file = m.group(1)
+            out.append(line)
+            continue
+        m = re.match(r'^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@', line)
+        if m:
+            hunk_new_count = int(m.group(4)) if m.group(4) is not None else 1
+            out.append(line)
+            continue
+        if (not done and current_file == ops["file"] and hunk_new_count is not None
+                and line == ops["anchor"]):
+            for extra in ops["before"]:
+                out.append(extra)
+                hunk_new_count += 1
+            out.append(line)
+            for extra in ops["after"]:
+                out.append(extra)
+                hunk_new_count += 1
+            done = True
+            _fix_last_hunk_header(out, hunk_new_count)
+            continue
+        out.append(line)
+    if not done:
+        raise SystemExit(
+            "error: kboot-probe: %s: ops anchor not found in %s"
+            % (ops["file"], "the patch"))
+    return "".join(out)
+
+
+def extend_patch_file(patch_path, transform, label):
+    if not patch_path.is_file():
+        raise SystemExit(f"kboot-probe: {patch_path} missing")
+    text = patch_path.read_text(encoding="utf-8", errors="surrogateescape")
+    if 'hummer_early_prints' in text:
+        print(f"kboot-probe: {patch_path.name} already extended ({label})")
+        return
+    updated = transform(text)
+    if updated == text:
+        print(f"kboot-probe: WARNING: {patch_path.name} unchanged ({label})")
+        return
+    with open(patch_path.resolve(), "w", encoding="utf-8",
+              errors="surrogateescape", newline="") as handle:
+        handle.write(updated)
+    print("kboot-probe: extended", patch_path.resolve(),
+          "(%d -> %d bytes, %s)" % (len(text), len(updated), label))
+
+
 def main():
     targets = [XNU / "osfmk/kern/startup.c",
                XNU / "osfmk/arm/arm_init.c",
                XNU / "bsd/kern/bsd_init.c",
-               XNU / "bsd/kern/kern_exec.c"]
+               XNU / "bsd/kern/kern_exec.c",
+               XNU / "bsd/kern/ubc_subr.c"]
     patched_any = False
     for path in targets:
         if not path.is_file():
             raise SystemExit(f"kboot-probe: {path} missing")
         text = path.read_text(encoding="utf-8", errors="surrogateescape")
-        if KBOOT_MARK in text:
+        if path.name == "ubc_subr.c":
+            # v52 键：与 zzz 批次的 kboot 行分开判定（v51 交付的树已带
+            # 其他文件的 kboot，但 ubc_subr.c 是新目标）
+            if 'kboot n4k rc' in text:
+                print("kboot-probe: ubc_subr.c already patched")
+                continue
+        elif KBOOT_MARK in text:
             print(f"kboot-probe: {path.name} already patched")
             continue
         if path.name == "startup.c":
@@ -161,6 +241,13 @@ def main():
                         % (n, anchor))
                 text = text.replace(anchor, anchor + KBOOT_MESSAGE)
             text = kexpand(text)
+        elif path.name == "ubc_subr.c":
+            n = text.count(N4K_CALL)
+            if n != 1:
+                raise SystemExit(
+                    "error: kboot-probe: ubc_subr.c: cs_native4k_prepare "
+                    "call site found %d times" % n)
+            text = text.replace(N4K_CALL, N4K_ENTER + N4K_CALL + N4K_RC)
         else:
             text = kexpand(text)
             if KBOOT_MARK not in text:
@@ -179,20 +266,14 @@ def main():
 
     # 同步补丁文件本身：tree/patches/xnu 是指向 UniXNU checkout 的符号链接，
     # 写穿透的符号链接即可更新模块源文件。
-    if PATCH.is_file() and 'hummer_early_prints' not in PATCH.read_text(
-            encoding="utf-8", errors="replace"):
-        original = PATCH.read_text(encoding="utf-8", errors="surrogateescape")
-        updated = patch_kexpand(original)
-        if updated == original:
-            print("kboot-probe: WARNING: patch file unchanged -- no + stage lines matched")
-        else:
-            with open(PATCH.resolve(), "w", encoding="utf-8",
-                      errors="surrogateescape", newline="") as handle:
-                handle.write(updated)
-            print("kboot-probe: extended", PATCH.resolve(),
-                  "(%d -> %d bytes)" % (len(original), len(updated)))
-    else:
-        print("kboot-probe: patch file missing or already extended")
+    extend_patch_file(PATCH, patch_kexpand, "zzz stage lines")
+
+    # v52: exec 签名验证（native-4k-signature-hash-cache.patch 的
+    # cs_native4k_prepare）——v51 真机停在 "exec process signature enter"
+    # 且没有 "exec load_machfile returned"，死点在 load_machfile 内部的
+    # 签名准备路径。给调用点配 enter 行与返回码打印，同一套双改写机制。
+    extend_patch_file(PATCH2, lambda text: apply_ops_to_patch(text, PATCH2_OPS),
+                      "native4k prepare ops")
 
     stale()
     print("kboot-probe: kernel bootstrap checkpoints now visible on the panel")
