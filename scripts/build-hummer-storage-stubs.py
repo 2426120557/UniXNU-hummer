@@ -214,8 +214,11 @@ def build():
     # leave the link broken instead).
     names = run(['xcrun', 'nm', '-m', STUB_OBJ], text=True)
     (OUT / 'nm.txt').write_text(names)
+    # v57: __ZTV20IOBlockStorageDevice is no longer defined here — original-bindings.S
+    # points it (and the constructor/destructor/metaclass) at the prelinked class, so
+    # it cannot be part of what this object is expected to export.
     wanted = ('verified_root', 'vr_xnu_crypto', 'vr_open', 'vr_verify_block',
-              'boot_progress_poll', '__ZTV20IOBlockStorageDevice')
+              'boot_progress_poll')
     ours = [line for line in names.splitlines() if any(w in line for w in wanted)]
     missing = [w for w in wanted
                if not any(w in line and 'external' in line and 'non-external' not in line
