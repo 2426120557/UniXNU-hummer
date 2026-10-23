@@ -61,13 +61,14 @@ void hummer_storage_unavailable(const char *symbol)
 	panic("HUMMER STUB: %s", symbol);
 }
 
-// ---- IOBlockStorageDevice vtable storage (the real class is a prelinked kext) ----
+// ---- IOBlockStorageDevice vtable: bound, not owned --------------------------------
 //
-// 190 slots is the length our NativeUfs.o was compiled against; the array only
-// has to exist so the vtable reference resolves.  It is zero, so an accidental
-// virtual dispatch through it faults instead of running something.
-extern void *hummer_storage_device_vtable[190] __asm__("__ZTV20IOBlockStorageDevice");
-void *hummer_storage_device_vtable[190] = {};
+// v57: the real class dispatch table (and its constructor, destructor and
+// metaclass) lives in the prelinked IOStorageFamily kext.  build-hummer-storage-
+// stubs.py emits original-bindings.S with .set directives that point these
+// symbols at those addresses, so a virtual dispatch goes to the shipped code
+// instead of faulting on a zero table.  Nothing is defined here any more: a
+// second definition would collide with the assembly binding.
 
 // ---- VerifiedRoot: present, but refuses to authenticate anything ----
 struct hummer_vr_crypto_stub {
