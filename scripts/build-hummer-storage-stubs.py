@@ -133,7 +133,7 @@ def generate_placeholders(symbols):
              '',
              '#pragma GCC visibility push(hidden)',
              '',
-             'extern "C" void hummer_storage_unavailable(void);']
+             'extern "C" void hummer_storage_unavailable(const char *symbol);']
     code = 0
     data = 0
     for name in symbols:
@@ -143,12 +143,23 @@ def generate_placeholders(symbols):
             lines += ['',
                       f'extern "C" char {alias}[{DATA_BYTES}] __asm__("{name}");',
                       f'char {alias}[{DATA_BYTES}] = {{}};']
+        elif any(tag in name for tag in ('C1E', 'C2E', 'D0Ev', 'D1Ev', 'D2Ev')):
+            # Constructors and destructors cannot be refused: every other base
+            # method needs a constructed object, and the object allocator calls
+            # them before anything else. The base share of this class is a
+            # prelinked-kext detail (metaclass pointer), so the sub-object starts
+            # zeroed and the derived vtable is what the object actually runs on.
+            alias = f'hummer_storage_ctor_{code}'
+            code += 1
+            lines += ['',
+                      f'extern "C" void {alias}(void) __asm__("{name}");',
+                      f'void {alias}(void) {{ }}']
         else:
             alias = f'hummer_storage_call_{code}'
             code += 1
             lines += ['',
                       f'extern "C" void {alias}(void) __asm__("{name}");',
-                      f'void {alias}(void) {{ hummer_storage_unavailable(); }}']
+                      f'void {alias}(void) {{ hummer_storage_unavailable("{name}"); }}']
     lines += ['', '#pragma GCC visibility pop', '']
     PLACEHOLDER_SRC.write_text('\n'.join(lines))
     return code, data

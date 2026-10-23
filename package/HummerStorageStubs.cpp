@@ -51,13 +51,14 @@ extern "C" {
 extern int kprintf(const char *format, ...);
 extern void panic(const char *format, ...) __attribute__((noreturn));
 
-// Tail-call target of every generated IOBlockStorageDevice thunk.  It cannot
-// name the method (a thunk carries no metadata), so it names the consequence.
-void hummer_storage_unavailable(void)
+// Tail-call target of every generated IOBlockStorageDevice thunk.  Each thunk
+// passes its own mangled symbol, so the panic names the exact base method that
+// reached a stub instead of only its consequence.
+void hummer_storage_unavailable(const char *symbol)
 {
-	kprintf("HUMMER STUB: an IOBlockStorageDevice base method was called; "
-		"the storage class is not built into this probe image\n");
-	panic("HUMMER STUB: IOBlockStorageDevice base method");
+	kprintf("HUMMER STUB: %s reached; only the prelinked IOStorageFamily kext "
+		"carries this class", symbol);
+	panic("HUMMER STUB: %s", symbol);
 }
 
 // ---- IOBlockStorageDevice vtable storage (the real class is a prelinked kext) ----

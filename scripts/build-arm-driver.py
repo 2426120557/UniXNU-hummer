@@ -139,6 +139,46 @@ NATIVE_UFS_EDITS = [
 """,
     ),
     (
+        # v54a：IOBlockStorageDevice 的默认实现都在预链接的 IOStorageFamily kext 里，
+        # 本内核只能链到拒绝桩；而发布介质的路径会回调设备（init/getProperty/…），
+        # 一进桩就 panic。只读窗口设备能自己答的那几个直接实现，桩就不会被触到。
+        # 剩下真正属于基类的只有 ctor/dtor/metaclass（桩已是空体/零数据）。
+        'block device: answer the base methods the publication path calls',
+        '  const char *windowLabel () const { return label; }\n',
+        """  bool init (OSDictionary *properties) override
+  {
+    if (!IOService::init (properties)) return false;
+    return true;
+  }
+  OSObject *getProperty (const OSSymbol *key) const override
+  {
+    return IOService::getProperty (key);
+  }
+  IOReturn setProperties (OSObject *properties) override
+  {
+    return kIOReturnUnsupported;
+  }
+  IOReturn requestIdle (void) override { return kIOReturnSuccess; }
+  IOReturn doUnmap (IOBlockStorageDeviceExtent *extents, UInt32 extentsCount,
+                    IOStorageUnmapOptions options) override
+  {
+    return kIOReturnUnsupported;
+  }
+  IOReturn doSetPriority (IOBlockStorageDeviceExtent *extents, UInt32 extentsCount,
+                          IOStoragePriority priority) override
+  {
+    return kIOReturnUnsupported;
+  }
+  IOReturn doGetProvisionStatus (UInt64 block, UInt64 nblks, UInt32 *extentsCount,
+                                 IOBlockStorageProvisionDeviceExtent *extents,
+                                 IOStorageGetProvisionStatusOptions options) override
+  {
+    return kIOReturnUnsupported;
+  }
+  const char *windowLabel () const { return label; }
+""",
+    ),
+    (
         # v54：双系统。sheng 是单系统，根镜像刷在 Android 自己的 userdata 里，驱动
         # 就硬编码找名为 "userdata" 的 GPT 项。hummer 走 docs/zh/porting/
         # dual-system-partition 的布局：userdata 保留给 ColorOS，根镜像在 unixnu。
