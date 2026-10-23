@@ -260,7 +260,7 @@ kernel_args = [
   "-v",
   "serial=0",
   "debug=0x14e",
-  "cpus=8",
+  "cpus=6",
   "rd=md0",
   # ---- v49：SMP 开关，两项都来自文档与 sheng 参考（不是猜的） ----
   #
@@ -291,7 +291,12 @@ kernel_args = [
   # 那条路的判据是 PE_i_can_has_debugger()，而本机它恒为假
   # （参考实现的日志里同样写着 "debug boot arg not present"）。
   #
-  # cpus=8 也不能改成 1（v21/v46c1a 实测）：
+  # v50: cpus=6 —— 与 ADT 的 6 个 cpu 节点一致（照 sheng 参考：SM8550 8 核
+  # 但 ADT 只列 6 个能启动的核，多余核留 off；且 sheng 根本不传 cpus=，
+  # 核数全由 ADT 决定）。v49 实测：ADT 8 核 + ArmCpu 拒掉 2 个 Aff2 prime
+  # nub 后，AppleS8000CPU panic "CPU configuration in device tree is
+  # invalid"（DT 8 核 vs 实际 6 核不匹配）。
+  # cpus 不能改成 1（v21/v46c1a 实测）：
   #   ml_processor_register() 的配额等于 num_cpus，启动核会被注册两次，所以
   #   cpus=1 时第二次必然返回 KERN_FAILURE(5)，然后
   #       panic: ArmCpu: CPU 0 registration failed: 5 @ArmCpu.cpp:405

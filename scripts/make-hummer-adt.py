@@ -46,7 +46,15 @@ UFS_PHY_SIZE = 0x2000
 
 # hummer.dts /cpus reg values: 6 perf cores then 2 Oryon prime cores.
 # The boot CPU is cpu@0 (Affinity1 = 0).
-DEFAULT_CPU_REGS = "0,0x100,0x200,0x300,0x400,0x500,0x10000,0x10100"
+# v50: list ONLY the six cores whose MPIDR fits the upstream AFF1|AFF0 mask,
+# mirroring UniXNU-sheng (SM8550 8 cores, 6 listed, two little cores left
+# off).  The two Oryon prime cores live in Affinity2 (0x10000/0x10100);
+# upstream ml_get_cpu_number() masks to AFF1|AFF0, so they collapsed onto
+# logical 0 and, once ArmCpu::probe rejected them, AppleS8000CPU panicked
+# "CPU configuration in device tree is invalid" (DT 8 cores vs 6 matched).
+# Leaving them out of the ADT keeps the device tree consistent with what
+# the drivers accept; sheng's tool even refuses reg > 0xffff.
+DEFAULT_CPU_REGS = "0,0x100,0x200,0x300,0x400,0x500"
 
 
 def node(name, properties=(), children=()):
@@ -117,10 +125,10 @@ def main():
         cpu_regs = [int(value, 0) for value in args.cpu_regs.split(',')]
     except ValueError:
         parser.error('--cpu-regs must be integers')
-    # SM8750 numbers its prime cores in Affinity2 (0x10000), so the cap is
-    # relaxed from sheng's 0xffff; Affinity0 must still be 0 for every core.
+    # v50: cap restored to sheng's 0xffff -- the ADT now lists only cores
+    # within the upstream AFF1|AFF0 mask; Affinity0 must still be 0.
     if (not cpu_regs or cpu_regs[0] != 0 or len(set(cpu_regs)) != len(cpu_regs) or len(cpu_regs) > 8
-            or any(reg < 0 or reg > 0xffffff or reg & 0xff for reg in cpu_regs)):
+            or any(reg < 0 or reg > 0xffff or reg & 0xff for reg in cpu_regs)):
         parser.error('--cpu-regs: up to eight distinct cores, boot CPU 0 first, Affinity0 must be 0')
     cpus = [node('cpu%d' % index, [('state', b'running\0' if index == 0 else b'waiting\0'),
                                    ('reg', struct.pack('<I', reg)),

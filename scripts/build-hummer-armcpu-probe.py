@@ -12,9 +12,14 @@
      if (ml_get_cpu_number (id) != ml_get_boot_cpu_number ()) { ... opt-in ... }
 4. osfmk/arm64/machine_routines.c ml_get_cpu_number():
      phys_id &= MPIDR_AFF1_MASK | MPIDR_AFF0_MASK;   // 只看 AFF1|AFF0
-5. make-hummer-adt.py DEFAULT_CPU_REGS（SM8750 硬件事实，hummer.dts 的 MPIDR 布局）:
-     "0,0x100,0x200,0x300,0x400,0x500,0x10000,0x10100"
-   —— 2 个 Oryon prime 核在 Affinity2（reg 0x10000 / 0x10100）。
+5. make-hummer-adt.py DEFAULT_CPU_REGS（v50 起照 sheng 参考收编）:
+     "0,0x100,0x200,0x300,0x400,0x500"   —— 6 个 AFF1|AFF0 值域内的核
+   SM8750 的 2 个 Oryon prime 核在 Affinity2（0x10000/0x10100），已照
+   UniXNU-sheng 的做法留在 ADT 外（sheng board.toml:223："the other two
+   little cores are left off"；其生成器拒绝 reg > 0xffff）。
+   v49 实测：ADT 8 核 + probe 拒掉 2 个 prime 后，AppleS8000CPU panic
+   "CPU configuration in device tree is invalid"（DT 8 核 vs 6 核不匹配），
+   所以 v50 让 DT 与可启动核数一致，本脚本里的 REJECT 分支退居防御。
 
 4+5 => ml_get_cpu_number(0x10000) = 0x10000 & 0xFFFF = 0 = boot 的逻辑号：
 prime nub 在 probe() 里被误判为 boot CPU、跳过 opt-in 检查、进入 start() 走第二遍
@@ -137,7 +142,8 @@ def main():
     p.swap(ARMCPU,
            "  gController = controller;\n",
            "  gController = controller;\n"
-           "  { hummer_early_u32x (\"arm0 intc done\", logicalId); }\n",
+           "  { hummer_early_u32x (\"arm0 intc done\", logicalId); }\n"
+           "  { hummer_early_u32x (\"v50 cpus6\", logicalId); }\n",
            "boot intc done")
 
     p.swap(ARMCPU,
