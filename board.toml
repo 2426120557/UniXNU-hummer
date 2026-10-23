@@ -137,6 +137,13 @@ archives = [
   # 真机上只要看到 "HUM 10: kernel tables live, panel mapped" 就说明控制台活了；
   # 哪一行是最后一行，死点就在那一行和下一行之间。
   "build-hummer-console-probe.py",
+  # v51：把内核自己的 bootstrap 检查点打到面板（kboot）。zzz-boot-progress.patch
+  # 在 startup.c/bsd_init.c/kern_exec.c 里插的 boot_progress_stage 调用在
+  # XNU_BOOT_PROGRESS=0 时是空宏（boot_progress.h），所以 step7 之后面板静默。
+  # 完整诊断页需要 baseline 的 OWNER_ROOT_AUDIT/NATIVE_VIRTIO_BLOCK 前置和
+  # 上游未公开的 build-boot-progress.py 实现——暂不引入。本脚本照 zzz 补丁的
+  # 锚点给每个检查点配一行 hummer_early_prints("kboot", ...)，零新 CONFIG。
+  "build-hummer-kboot-probe.py",
 ]
 
 # prelink：把 4K 页 XNU 内核 prelink 进原版 kernelcache。
