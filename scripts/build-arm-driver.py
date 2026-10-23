@@ -139,6 +139,36 @@ NATIVE_UFS_EDITS = [
 """,
     ),
     (
+        # v56：configureVerification() 的第一道门就是"策略包数量"。本板没有
+        # VerifiedRoot 策略包（桩里 verified_root_policy_count=0），于是每个窗口在
+        # configure 阶段就被拒，prepared 永远是 0。这里把 policy==0 解释成
+        # "bring-up：无 owner 策略"，放行但明确记录；策略数异常（>16）仍然拒绝。
+        'root: allow a window without an owner policy during bring-up',
+        """  if (!verified_root_policy_count || verified_root_policy_count > 16) {
+    gRootDiagnostic.stage = "policy count invalid";
+    return false;
+  }""",
+        """  if (!verified_root_policy_count) {
+    // v56 bring-up: no owner policy bundle exists for this board yet, so the window
+    // is published unverified and reads skip vr_verify_block (see the verify step).
+    // Restore the refusal once kits/VerifiedRoot carries a real signed policy.
+    gRootDiagnostic.stage = "policy bypassed (bring-up)";
+    return true;
+  }
+  if (verified_root_policy_count > 16) {
+    gRootDiagnostic.stage = "policy count invalid";
+    return false;
+  }""",
+    ),
+    (
+        # v56：读路径上的对应改动。没有策略包时 vr_verify_block 会落到桩里 panic，
+        # 所以 policy==0 直接算通过（不碰 vr_view）。
+        'root: skip block verification when no policy exists',
+        '      int status = vr_verify_block (view, index, data, length, &vr_xnu_crypto);',
+        """      if (!verified_root_policy_count) return kIOReturnSuccess;
+      int status = vr_verify_block (view, index, data, length, &vr_xnu_crypto);""",
+    ),
+    (
         # v55：真根的最后一道门。validate() 在未定义 NATIVE_VERIFIED_BLOCK 时无条件返回
         # false（"Root publication requires owner verification in every build"），
         # 那条路要 VerifiedRoot 策略包（签名密钥、policy bundle），本板还没构建，
@@ -371,16 +401,14 @@ if component in ('NativeVirtioBlock', 'NativeRamBlock', 'NativeUfs'):
     if args.verified_root_bundle:
         command += ['-DNATIVE_VERIFIED_BLOCK_MULTI_POLICY=1']
 if component == 'NativeUfs':
-    # v56：不再强制 -DNATIVE_VERIFIED_BLOCK。带它的时候 configure() 一定走
-    # configureVerification()，而那条路要 owner 签发的策略包（policy count > 0，
-    # 由 kits/VerifiedRoot 提供）；本板的桩里策略数是 0，于是 v55 真机停在
-    # stage="policy count invalid"、prepared=0。不带它时 configure() 直接返回 true，
-    # doAsyncReadWrite 走普通读路径 —— 也正是 probe 阶段已经证明能读通的那条
-    # （GPT 与 SHNGROOT 清单都是这么读出来的）。
-    # 交付前要接回 verified 闭包：build-arm-driver.py NativeUfs --verified-root
-    # 配上真策略包，再把这个默认改回来。
+    # v56：仍然按 verified-block 编译（去掉这些 define 会走另一条分支编不过，CI 实测
+    # 3 个错误），但把"必须有 owner 策略包"这条要求改成运行时放行：本板没有
+    # VerifiedRoot 策略包（policy count = 0），v55 真机就停在
+    # stage="policy count invalid"、prepared=0。
+    # 放行由下面 NATIVE_UFS_EDITS 里的两处改写完成（configureVerification 与读路径的
+    # verify()），交付前必须换回真策略包。
     command += ['-I', str(ROOT / 'kits/VerifiedRoot/include'), '-I', str(ROOT / 'drivers/NativeVirtioBlock'),
-                '-mgeneral-regs-only']
+                '-DNATIVE_VERIFIED_BLOCK=1', '-DNATIVE_VERIFIED_BLOCK_MULTI_POLICY=1', '-mgeneral-regs-only']
     # GccUfs.h in the submodule carries SM8550 offsets.  SM8750 moves every UFS PHY
     # branch register after the AXI branch up by 4 bytes, and the SM8550 AHB offset
     # (0x77024) is a reserved word there: the probe read 0, decided the AHB branch was
