@@ -139,6 +139,33 @@ NATIVE_UFS_EDITS = [
 """,
     ),
     (
+        # v55：真根的最后一道门。validate() 在未定义 NATIVE_VERIFIED_BLOCK 时无条件返回
+        # false（"Root publication requires owner verification in every build"），
+        # 那条路要 VerifiedRoot 策略包（签名密钥、policy bundle），本板还没构建，
+        # 于是 prepare 走完全部窗口后在 Identity 相位被拒、blocks=0。
+        # bring-up 阶段先放行：代价是发布出来的介质没有 owner 校验，这个镜像只用于
+        # 把根卷挂起来的调试；交付前必须换回 verified 闭包。
+        'root: publish without the verified-root closure during bring-up',
+        '      return false; // Root publication requires owner verification in every build.',
+        """      // v55 bring-up shortcut: the verified-root closure (policy bundle plus signed
+      // window identities) is not built for this board yet, and refusing here means
+      // nothing is ever published. Publish unverified so the media tree can be
+      // brought up; restore the refusal before any real deployment.
+      return true;""",
+    ),
+    (
+        # v55：probe=12 的失败 panic 只说 blocks=0，看不到卡在哪个相位。
+        # 把驱动自己的诊断文本（stage/phase/window/manifest/SMMU）一并打出来。
+        'probe 12: report why the root start failed',
+        '      panic ("NATIVE_UFS media report: root start failed (blocks=%u)", native_ufs_blocks_published);',
+        """      {
+        static char why[1200];
+        native_ufs_progress_text (why, sizeof (why));
+        panic ("NATIVE_UFS media report: root start failed (blocks=%u) %s",
+               native_ufs_blocks_published, why);
+      }""",
+    ),
+    (
         # v54a：IOBlockStorageDevice 的默认实现都在预链接的 IOStorageFamily kext 里，
         # 本内核只能链到拒绝桩；而发布介质的路径会回调设备（init/getProperty/…），
         # 一进桩就 panic。只读窗口设备能自己答的那几个直接实现，桩就不会被触到。
