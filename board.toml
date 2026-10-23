@@ -267,6 +267,10 @@ kernel_args = [
   "-v",
   "serial=0",
   "debug=0x14e",
+  # v53：代码签名调试输出（docs/zh/xnu/boot-arguments.md「代码签名细节」；
+  # kern_cs.c:182 PE_parse_boot_argn("cs_debug")，mach_loader.c 2207/2215 与
+  # ubc_subr.c 在 blob 建立时按 cs_debug>1/>3 打印 cdhash 等信息）。
+  "cs_debug=9",
   "cpus=6",
   "rd=md0",
   # ---- v49：SMP 开关，两项都来自文档与 sheng 参考（不是猜的） ----
