@@ -26,15 +26,29 @@ extern "C" {
 #include "HummerTouchBoard.h"
 }
 
-// NativeHidInput's touch mailbox. Every symbol is weak: the driver runs - and
-// reports everything on the panic screen - even when the HID publisher is not
-// linked in (the minimal kernel, stage 1-3 bring-up).
+// NativeHidInput's touch mailbox.
+//
+// These are WEAK DEFINITIONS, not weak_import declarations. weak_import works
+// for functions (an absent symbol makes the address 0, which is what
+// `if (&native_touch_probe)` relies on), but the linker still rejects an
+// undefined weak_import DATA symbol. That is exactly what broke the kernel link
+// while NativeHidInput is not part of this board's build:
+//     Undefined symbols for architecture arm64:
+//       "_native_touch_seq", referenced from:
+//           publish(...) in libHummerTouch.a(HummerTouchProbe.o)
+//
+// Defining them weakly keeps the archive self-contained either way:
+//   - NativeHidInput not linked: these are the only definitions, so publish()
+//     writes here and is a harmless no-op. The panic screen still shows the
+//     real hardware state, which is what stage 1-4 bring-up reads.
+//   - NativeHidInput linked: its strong definitions win and the linker discards
+//     these, so publish() feeds the real HID digitizer.
 extern "C" {
-extern volatile uint32_t native_touch_seq __attribute__((weak_import));
-extern volatile uint32_t native_touch_count __attribute__((weak_import));
-extern volatile int native_touch_xs[12] __attribute__((weak_import));
-extern volatile int native_touch_ys[12] __attribute__((weak_import));
-extern volatile int native_touch_ids[12] __attribute__((weak_import));
+__attribute__((weak)) volatile uint32_t native_touch_seq;
+__attribute__((weak)) volatile uint32_t native_touch_count;
+__attribute__((weak)) volatile int native_touch_xs[12];
+__attribute__((weak)) volatile int native_touch_ys[12];
+__attribute__((weak)) volatile int native_touch_ids[12];
 }
 
 // The digitizer consumer (NativeHidInput::touchNotify) registers here; called from
@@ -297,7 +311,11 @@ int tcmConfigure(Session &s) {
 
 // Publish the finger set (seqlock mailbox, coordinates already in HID space).
 static void publish(unsigned count, const int *ids, const int *xs, const int *ys) {
-    if (!&native_touch_seq) return;   // HID publisher not linked: panic-screen diagnostics only
+    // The mailbox is always linked now (weak definitions above), so there is no
+    // null-guard left to take. When NativeHidInput is absent these writes land
+    // in the weak storage and are a harmless no-op - stage 1-4 bring-up reads
+    // the real hardware state off the panic screen anyway. When NativeHidInput
+    // is linked its strong definitions win and this feeds the HID digitizer.
     native_touch_seq = native_touch_seq + 1;
     __asm__ volatile("dmb ish" ::: "memory");
     native_touch_count = count;
