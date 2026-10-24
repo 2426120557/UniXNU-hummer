@@ -45,7 +45,15 @@ archives = [
   "build-corecrypto-14.py",
   "build-corecrypto-14.py --namespace",
   "build-libpthread-kernel.py",
+  # build-arm-platform.py 只按记录编译 ArmDTPlatform/ArmCpu，不产出归档；
+  # 而 13T 的 baseline.sh 硬性要求这两个归档存在（test -f）：
+  #   ARM_DT_ARCHIVE = build/armdt-platform/libArmDTPlatform.a
+  #   ARMCPU_ARCHIVE = build/armcpu/libArmCpu.a
+  # 这两个路径正是 build-arm-driver.py 的输出目录（见其 out 映射表），
+  # 所以必须显式跑这两个构建器。
   "build-arm-platform.py",
+  "build-arm-driver.py ArmDTPlatform",
+  "build-arm-driver.py ArmCpu",
   "build-native-aes.py",
   "build-native-ufs.py --root-windows",
   "build-ufs-storage-bindings.py --kernelcache ../../ipsw/21H461/kernelcache.decompressed",
