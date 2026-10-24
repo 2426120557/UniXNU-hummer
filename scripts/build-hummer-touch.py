@@ -25,6 +25,7 @@ CPP_RECORD = ROOT / 'build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/iokit/DEVELOPME
 C_RECORD = ROOT / 'build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/osfmk/DEVELOPMENT/startup.o.json'
 PROBE = ROOT / 'kits/hummer/HummerTouchProbe.cpp'
 GENI = ROOT / 'drivers/NativeGeniSpi/GeniSpi.c'
+GENI_H = ROOT / 'drivers/NativeGeniSpi/GeniSpi.h'
 
 
 def run(command, cwd):
@@ -95,7 +96,23 @@ if cpp_command and cpp_command[0] in ('clang', 'clang++'):
 run(cpp_command, cpp_dir)
 audit(OUT / 'HummerTouchProbe.o')
 
-c_command, c_dir = replay(C_RECORD, GENI, OUT / 'GeniSpi.o')
+# The engine's GeniSpi.h declares the full-duplex SPI opcode as 3. That is wrong: the
+# SPI command opcodes are SPI_TX_ONLY 1, SPI_RX_ONLY 2, SPI_TX_RX 7 (see
+# drivers/spi/spi-geni-qcom.c in AnyLaySys/linux_oneplus_ace5_pro, and get_spi_m_cmd()
+# which returns 7 whenever both tx and rx are present). With 3 the engine never starts
+# the transfer and every full-duplex read - which is how TouchComm reads a response -
+# times out with -110. The header is copied next to the source with that one value
+# corrected, so the engine tree itself stays untouched.
+geni_source = OUT / 'GeniSpi.c'
+geni_header = OUT / 'GeniSpi.h'
+header_text = GENI_H.read_text()
+opcode = '#define GENI_M_CMD_TX_RX 3'
+if opcode not in header_text:
+    raise SystemExit('GeniSpi.h no longer defines GENI_M_CMD_TX_RX as 3; re-check the SPI opcode')
+geni_header.write_text(header_text.replace(opcode, '#define GENI_M_CMD_TX_RX 7'))
+geni_source.write_text(GENI.read_text())
+
+c_command, c_dir = replay(C_RECORD, geni_source, OUT / 'GeniSpi.o')
 # GeniSpi.c is ENGINE code (drivers/NativeGeniSpi); compiling it with -Werror
 # fails on the engine's own warnings. Keep -mgeneral-regs-only for kernel code.
 c_command += ['-Wall', '-Wextra', '-mgeneral-regs-only',
