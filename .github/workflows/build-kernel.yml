@@ -66,9 +66,14 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
+          # OS(4.9 GiB) + SystemOS(3.1 GiB) 很吃磁盘，先记一下余量，便于判断是不是
+          # "no space left on device"（macOS runner 的可用空间并不宽裕）。
+          df -h . | tee out/hummer/logs/actions-disk.log
           ./unixnu ipsw fetch AppleLogo KernelCache OS Cryptex1,SystemOS StaticTrustCache Cryptex1,SystemTrustCache 2>&1 | tee out/hummer/logs/actions-ipsw.log
-          ./unixnu tree
-          python3 scripts/audit-stage7-display.py out/ipsw/21H461/kernelcache.decompressed
+          # 下面每条单独落盘：上几轮全塞在一个步骤里，挂了也不知道是哪一条。
+          ./unixnu tree 2>&1 | tee out/hummer/logs/actions-tree.log
+          df -h . | tee -a out/hummer/logs/actions-disk.log
+          python3 scripts/audit-stage7-display.py out/ipsw/21H461/kernelcache.decompressed 2>&1 | tee out/hummer/logs/actions-audit-display.log
           python3 scripts/prepare-ufs-policies.py --tree out/hummer/tree --inputs out/ipsw/21H461 --openssl-prefix "$(brew --prefix openssl@3)" 2>&1 | tee out/hummer/logs/actions-policies.log
           python3 scripts/prepare-original-trust.py --tree "$UNIXNU_TREE" --inputs out/ipsw/21H461 --output out/hummer/original-static-system.bundle 2>&1 | tee out/hummer/logs/actions-trust.log
 
