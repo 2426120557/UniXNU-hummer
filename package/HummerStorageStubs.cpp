@@ -111,4 +111,27 @@ void boot_progress_poll(void)
 }
 }
 
+
+// v65: owner-root bring-up. bsd_init's auth check (patched by the engine's
+// offline-owner-root-binding-audit) keeps the root only when the storage driver
+// certifies the device it was mounted from. The real implementation lives in
+// kits/VerifiedRoot together with a signed policy bundle, which this board does
+// not build yet, so the answer is a constant here. That is the same bring-up
+// shortcut as the policy bypass in the UFS driver: remove both together.
+//
+// dev_t is 32-bit on arm64, so the int parameter is ABI-compatible with the
+// kernel's "extern int native_verified_block_root_authorized(dev_t)".
+extern "C" int native_verified_block_root_authorized(int device)
+{
+	(void)device;
+	return 1;
+}
+
+// Called from the verified-root probe patch when XNU_VERIFIED_ROOT_PROBE=1.
+extern "C" void native_verified_root_probe(void)
+{
+	kprintf("hummer: verified root probe (bring-up, no policy bundle)
+");
+}
+
 #pragma GCC visibility pop
