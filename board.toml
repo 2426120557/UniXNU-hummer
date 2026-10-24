@@ -239,8 +239,10 @@ trust_cache_sha256 = [
 # panic_screen 需要 scripts/patch-xnu-entry-probe.py，该脚本在 UniXNU 树里不存在
 # （git ls-files 查不到，GitHub main/master 也是 404），所以保持关闭。
 panic_screen = false
-# 首启最小 boot args。注意：绝不能加 native-ufs-root=1 —— payload 会校验
-# _sheng_pmgr_run 符号(需要 sheng PMGR 集成)，最小内核没有，会直接拒绝打包。
+# 首启最小 boot args。（v63 之前这里写着"绝不能加 native-ufs-root=1"：那时内核
+# 没有 _sheng_pmgr_run，payload 的 check_native_root 会拒绝打包。现在
+# CONFIG_XNU_SHENG_PMGR=y 且 libShengPlatformPower.a 提供了该符号，v63 起按
+# sheng 参考的做法带上 native-ufs-root=1 + sheng-pmgr=2，详见下面的参数注释。）
 #
 # serial=0：osfmk/arm/arm_init.c 里 serial=3 等于 SERIALMODE_INPUT|OUTPUT，
 #   紧接着 `if ((serialmode & SERIALMODE_OUTPUT) && serial_exists)
@@ -272,7 +274,6 @@ kernel_args = [
   # ubc_subr.c 在 blob 建立时按 cs_debug>1/>3 打印 cdhash 等信息）。
   "cs_debug=9",
   "cpus=6",
-  "rd=md0",
   # ---- v49：SMP 开关，两项都来自文档与 sheng 参考（不是猜的） ----
   #
   # docs/zh/xnu/boot-arguments.md：
@@ -318,14 +319,17 @@ kernel_args = [
   # NativeUfs 加的分区名开关必须传：native-ufs-partition=unixnu（本仓库
   # scripts/build-arm-driver.py 的 v54 改写，默认仍是 "userdata"）。
   #
-  # native-ufs-probe=12 是驱动自带的媒体发现报告：起 UFS 控制器 → 读 GPT 与
-  # SHNGROOT 清单 → 把 OS/SystemOS 两个窗口包成 NativeUfsBlock → 等原始
-  # IOStorageFamily 发布 IOMedia（最多 20 秒）→ panic 打出 bsd 名/Content/
-  # Size/UUID 列表。这一轮要看的就是这份列表里有没有 9232A33A-… 的卷。
-  # 它故意 panic，所以本轮不会进 bsd_init；rd=md0 留着不影响这个探针，
-  # 下一轮（去掉 rd）才用它做真根。
+  # v63：真根模式。v59~v62 的探针已经把整条链路验完（UFS 起控 → GPT →
+  # SHNGROOT → 两个窗口发布 → IOStorageFamily 接上 driver=1 → APFS 容器读通），
+  # 所以这里去掉 rd=md0，改由驱动自己发布根卷、内核按 root-matching 的 UUID 挂载。
+  #
+  # native-ufs-root=1 会触发 UniXNU 的打包校验（scripts/unixnu/payload.py
+  # check_native_root）：必须同时传 sheng-pmgr=2，且内核里要有 _sheng_pmgr_run
+  # ——否则原始 AMFI 会以 "No PMGR" panic。本仓库 CONFIG_XNU_SHENG_PMGR=y，
+  # libShengPlatformPower.a 提供该符号，两项都满足（sheng 参考 board.toml 同款）。
   "native-ufs-partition=unixnu",
-  "native-ufs-probe=12",
+  "native-ufs-root=1",
+  "sheng-pmgr=2",
 ]
 
 [payload.adt]
@@ -350,11 +354,12 @@ psci_method = "smc"
 packed_data_ramdisk = false
 ipad_identity = false              # 首启不声明 Apple 身份
 unique_chip_id = "required"        # 平台种子不入仓库：--unique-chip-id / UNIXNU_UNIQUE_CHIP_ID
-# v54：根卷匹配（docs/zh/concepts/userdata.md「根卷匹配」、porting/bring-up.md 阶段 6）。
-# 取值是 OS 窗口内 GPT 的分区 GUID —— 分区方案把窗口里的分区发布成 IOMedia 卷，
-# XNU 按这个 UUID 选根设备。来源：outputs/build/userdata-root.img
-#   OS 窗口偏移 0x100000，窗口内 GPT 首项（APFS 类型 7c3457ef-...），5.66 GiB。
-# 交叉记录（排查用，不是这里要填的值）：
-#   APFS 容器 UUID 50f8a67f-afc1-4a1b-bcbb-82162674c67f，块大小 4096，1,483,776 块。
-# 换 IPSW 要重新从新镜像里取；sheng 参考值是 04769D26-2CA0-4825-B443-E2E5F88300F2。
-root_match_volume_uuid = "9232A33A-5F8A-4A09-9A43-E7D8BCFCF4BC"
+# v63：根卷匹配。取值是 OS 窗口内 APFS 卷的 UUID —— 分区方案发布的是 APFS
+# 卷介质，XNU 按这个 UUID 选根设备（docs/zh/concepts/userdata.md「根卷匹配」）。
+# 来源：直接在刷好的镜像里读出来的，不是猜的 ——
+#   OS 窗口 0x100000 → 窗口内 GPT 首项 LBA 34 → APFS 容器 0x104400
+#   → 容器内 oid 0x402 的 APSB 卷超级块 → 0xf0 处的 vol_uuid。
+# 这与 sheng 参考配置里的值完全一致（两边用同一份 21H461 IPSW），互为佐证。
+# 交叉记录（不是这里要填的值）：APFS 容器 UUID 50f8a67f-afc1-4a1b-bcbb-82162674c67f；
+# 窗口内 GPT 分区 GUID 9232A33A-5F8A-4A09-9A43-E7D8BCFCF4BC。
+root_match_volume_uuid = "04769D26-2CA0-4825-B443-E2E5F88300F2"
