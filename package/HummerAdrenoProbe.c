@@ -33,7 +33,7 @@
 #include <kern/debug.h>
 #include <pexpert/pexpert.h>
 #include <IOKit/IOLib.h>
-#include <machine/machine_routines.h>
+#include <arm/machine_routines.h>   /* ml_io_map lives here, not machine/ */
 #include <libkern/OSBase.h>
 #include <libkern/OSTypes.h>
 

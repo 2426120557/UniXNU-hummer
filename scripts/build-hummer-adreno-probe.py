@@ -43,8 +43,18 @@ WANTED = 'native_adreno_firmware_probe'
 
 
 def run(command, **kwargs):
-    return subprocess.check_output([str(v) for v in command],
-                                   stderr=subprocess.STDOUT, **kwargs)
+    try:
+        return subprocess.check_output([str(v) for v in command],
+                                       stderr=subprocess.STDOUT, **kwargs)
+    except subprocess.CalledProcessError as exc:
+        # Never swallow the compiler's diagnostics: v68b lost a whole CI run
+        # to a check_output traceback that hid the actual error.
+        text = exc.output
+        if isinstance(text, bytes):
+            text = text.decode('utf-8', 'replace')
+        (OUT / 'compile-failure.log').write_text(text or '(no output)')
+        print(text or '(no output)')
+        raise
 
 
 def compile_with_record(source, obj):
