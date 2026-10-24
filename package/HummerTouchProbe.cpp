@@ -390,8 +390,12 @@ bool enable(Session &s) {
     s.vals[4] = rd32(s.gccHalt.va, TB_HALT_CORE_2X & 0xfff);
     s.vals[5] = rd32(s.gccS4.va, TB_HALT_S4 & 0xfff);
     if (!ok) {fail(2, TCM_ETIMEDOUT); return false;}   // never touch the engine without running clocks
-    const uint32_t cfg = tb_pin_cfg(TB_FUNC_QUP1_SE4, TB_DRIVE_6MA);
-    for (unsigned i = 0; i < 4; ++i) wr32(s.tlmmSpi.va, i * TB_GPIO_STRIDE, cfg);
+    // One lane function per pin: gpio48=MISO=l0, 49=MOSI=l1, 50=CLK=l2, 51=CS=l3
+    // (see HummerTouchBoard.h - the target DTS names them qup1_se4_l0..l3).
+    static const unsigned lane[4] = {TB_FUNC_QUP1_SE4_L0, TB_FUNC_QUP1_SE4_L1,
+                                     TB_FUNC_QUP1_SE4_L2, TB_FUNC_QUP1_SE4_L3};
+    for (unsigned i = 0; i < 4; ++i)
+        wr32(s.tlmmSpi.va, i * TB_GPIO_STRIDE, tb_pin_cfg(lane[i], TB_DRIVE_6MA));
     for (unsigned i = 0; i < 4; ++i) s.vals[9 + i] = rd32(s.tlmmSpi.va, i * TB_GPIO_STRIDE);
     if (!mapRegion(TB_QUP_WRAPPER_BASE, 0x2000, s.wrapper) || !mapRegion(TB_SE_BASE, TB_SE_SIZE, s.se)) {
         fail(2, TCM_ENOMEM);
@@ -412,7 +416,13 @@ bool enable(Session &s) {
 // hummer's spi4 has no IOMMU), then GENI init and the serial clock.
 bool openBus(Session &s) {
     s.spi.poll_limit = 400000;
-    s.spi.poll_only = 2;             // keep SE_IRQ_EN: the status registers must stay pollable
+    // poll_only=1 makes geni_spi_init() clear SE_IRQ_EN, so the engine never drives
+    // its interrupt line. This board has no handler for the SE's GIC SPI (357 in the
+    // target DTB) and the ADT publishes no interrupt for it: with SE_IRQ_EN left on,
+    // the first transfer raises a level interrupt nobody acknowledges and the system
+    // locks up hard (stage 3 reset with no panic screen). Completion is polled through
+    // the status registers, which do not depend on SE_IRQ_EN at all.
+    s.spi.poll_only = 1;
     if (s.spi.info.fifo_disabled) {
         s.dmaMem = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(kernel_task,
             static_cast<IOOptionBits>(kIODirectionInOut) | static_cast<IOOptionBits>(kIOMemoryPhysicallyContiguous),

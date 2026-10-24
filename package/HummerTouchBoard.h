@@ -65,10 +65,16 @@ static inline uint64_t tb_src_hz(unsigned sel) {return sel==0?19200000ULL:sel==1
 #define TB_GPIO_RESET 161                    // reset-gpios = <&tlmm 161 GPIO_ACTIVE_LOW>
 #define TB_GPIO_IRQ 162                      // interrupts = <162 IRQ_TYPE_LEVEL_LOW>; bring-up polls instead
 // pinctrl-msm.c writes the GROUP-LOCAL function index (position in the PINGROUP funcs
-// array), not the global pinctrl enum value: PINGROUP(48..51, qup1_se4, ...) expands
-// funcs = {gpio, qup1_se4, ...}, so the hardware selector for qup1_se4 is 1 - the same
-// value sheng used on SM8550. (The global enum index 92 is a trap: it never reaches HW.)
-#define TB_FUNC_QUP1_SE4 1
+// array), not the global pinctrl enum value, and pinctrl-msm.h hard-codes msm_mux_gpio
+// at funcs[0]. So a QUP lane's selector is 1 + lane: the target's own DTS names the four
+// pins qup1_se4_l0/l1/l2/l3 (miso/mosi/clk/cs in qupv3_se4_spi_{miso,mosi,clk,cs}_active),
+// i.e. gpio48..51 select 1,2,3,4 - not one value for all four, which is what the
+// SM8550-era "qup1_se4" name suggested. (The global enum index 92 is a trap: it never
+// reaches HW.)
+#define TB_FUNC_QUP1_SE4_L0 1               // gpio48 MISO
+#define TB_FUNC_QUP1_SE4_L1 2               // gpio49 MOSI
+#define TB_FUNC_QUP1_SE4_L2 3               // gpio50 CLK
+#define TB_FUNC_QUP1_SE4_L3 4               // gpio51 CS
 #define TB_DRIVE_6MA 2                       // drive-strength 6: (mA/2)-1 encoded
 #define TB_DRIVE_2MA 0                       // drive-strength 2 (reset pin, bringup dtsi)
 #define TB_OE_BIT 9
