@@ -220,6 +220,17 @@ jobs:
           print("staged", target)
           PY
 
+      - name: Stage the hummer Stage 7 userspace-compat patch
+        run: |
+          # The compat patch lives in this device tree (patches/zzzz-hummer-stage7-compat.patch)
+          # and is copied into the engine's patches dir so baseline applies it (zzzz- sorts last).
+          # It is gated behind the /chosen/ephemeral-storage DT property, so it stays inert until
+          # the bring-up Data volume (Phase B) sets that property. Ported from
+          # IssacL04/UniXNU-Pagani_SM8750 native-stage7-userspace-compat.patch.
+          cp "$GITHUB_WORKSPACE/patches/zzzz-hummer-stage7-compat.patch" \
+             "UniXNU/patches/xnu/zzzz-hummer-stage7-compat.patch"
+          echo "staged compat -> $(ls -l UniXNU/patches/xnu/zzzz-hummer-stage7-compat.patch | awk '{print $5}') bytes"
+
       - name: Build kernel (prelink fails without IPSW, expected)
         continue-on-error: true
         env:
