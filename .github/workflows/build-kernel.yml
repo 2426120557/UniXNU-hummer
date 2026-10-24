@@ -178,34 +178,6 @@ jobs:
       # 几个固定候选路径（不做全树 rglob，否则每轮都要走十万个文件），
       # 一发现新的 lock_rw.c 就替换。无论构建在哪一刻把树展开，都赶在
       # clang 读到 osfmk/kern/lock_rw.c 之前改好。
-      # v64d：根卷未认证这一关，用引擎自己的补丁机制处理。
-      # baseline.sh 按 patches/xnu/*.patch 的字典序 git apply，引擎自己的
-      # zzz-/zzy- 前缀就是靠这个排到最后；我们的 zzzz- 排得更后，改的是
-      # 已经打完 owner-root 补丁的 bsd_init.c，因此不参与 --check。
-      # v64a/b/c 都是在 git apply 之前动文件，把补丁上下文弄坏了，这次不会。
-      - name: Stage the hummer root-auth bring-up patch
-        run: |
-          python3 - <<'PY'
-          import pathlib
-          root = pathlib.Path("UniXNU/out/hummer/tree")
-          target = root / "patches/xnu/zzzz-hummer-rootauth.patch"
-          target.parent.mkdir(parents=True, exist_ok=True)
-          tab = "\t"
-          before = tab * 3 + "if (autherr && !owner_authorized) {"
-          after = tab * 3 + "}"
-          old = tab * 4 + 'panic("rootvp not authenticated after mounting");'
-          new = tab * 4 + 'printf("kboot=rootauth skipped (bring-up: owner root not built)\\n");'
-          target.write_text(
-              "--- a/bsd/kern/bsd_init.c\n"
-              "+++ b/bsd/kern/bsd_init.c\n"
-              "@@ -987,3 +987,3 @@\n"
-              " " + before + "\n"
-              "-" + old + "\n"
-              "+" + new + "\n"
-              " " + after + "\n")
-          print(target, "written")
-          PY
-
       - name: Build kernel (prelink fails without IPSW, expected)
         continue-on-error: true
         env:
@@ -264,11 +236,6 @@ jobs:
               for rel, rules in RULES.items():
                   for base in roots():
                       p = os.path.join(base, rel)
-                          try:
-                              if "owner_authorized" not in pathlib.Path(p).read_text():
-                                  continue
-                          except OSError:
-                              continue
                       if p in seen or not os.path.exists(p):
                           continue
                       try:
