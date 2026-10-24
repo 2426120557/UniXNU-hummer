@@ -115,6 +115,8 @@ packed_data_ramdisk = true
 tool = "scripts/make-hummer-adt.py"
 owned_memory_size = "0x100000000"
 cpu_regs = "0,0x100,0x200,0x300,0x400,0x500"
+# 根卷 UUID（与内核 offline-owner-systemos-mount.patch 里发布 boot manifest 的那个一致）
+root_match_volume_uuid = "04769D26-2CA0-4825-B443-E2E5F88300F2"
 
 # 本机 UEFI 固件（hummerPkg）：保留，不换 13T 的 oneplus13tPkg。
 [firmware]

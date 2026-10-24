@@ -29,6 +29,7 @@ extern void early_boot_progress_vectors_done(void);
 extern volatile int native_owner_cache_stage __attribute__((weak));
 extern volatile uint64_t native_ufs_block_reads __attribute__((weak));
 extern volatile uint64_t native_ufs_block_failures __attribute__((weak));
+extern volatile int native_ufs_root_step __attribute__((weak));
 extern unsigned vm_page_free_count;
 extern uint32_t memorystatus_available_pages;
 
@@ -533,15 +534,12 @@ static void poll(void *unused0, void *unused1)
                  (unsigned long long)poll_count, (unsigned long long)armcpu_timer_interrupts);
         line_raw(timer_status);
         row = 2; column = 0; clear_line(2 * LINE);
-        if (&native_owner_cache_stage && native_owner_cache_stage &&
-            &native_ufs_block_reads && &native_ufs_block_failures) {
-            snprintf(storage_status, sizeof(storage_status), "free=%u avail=%u UFS=%llu err=%llu",
-                     vm_page_free_count, memorystatus_available_pages,
-                     (unsigned long long)native_ufs_block_reads, (unsigned long long)native_ufs_block_failures);
-            line_raw(storage_status);
-        } else {
-            snprintf(storage_status, sizeof(storage_status), "DT/CPU/GIC %u/%u/%u PPI-enable %016llx",
-                     !!armdt_platform_configured, !!armcpu_registered, !!armcpu_gic_ready,
+        {
+            int ustep = (&native_ufs_root_step) ? native_ufs_root_step : -2;
+            unsigned long long urd = (&native_ufs_block_reads) ? (unsigned long long)native_ufs_block_reads : 0;
+            unsigned long long uer = (&native_ufs_block_failures) ? (unsigned long long)native_ufs_block_failures : 0;
+            snprintf(storage_status, sizeof(storage_status), "UFS step=%d rd=%llu er=%llu D/C/G %u/%u/%u ocs=%llx",
+                     ustep, urd, uer, !!armdt_platform_configured, !!armcpu_registered, !!armcpu_gic_ready,
                      (unsigned long long)armcpu_gic_boot[1]);
             line_raw(storage_status);
         }
