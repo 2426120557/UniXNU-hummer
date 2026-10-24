@@ -107,4 +107,8 @@ CONFIG_XNU_ADRENO_FIRMWARE_PROBE=y
 # NativeUfsBlock 引用 prelinked IOStorageFamily 的 vtable/getProperty，以及
 # VerifiedRoot 和可选 boot_progress_poll；probe 阶段不构造块设备，用会 panic 的
 # hidden 桩满足静态链接（见 package/HummerStorageStubs.cpp）。
-CONFIG_XNU_EXTRA_LD_ARCHIVES="-Wl,-force_load,{tree}/build/native-probe-stubs/libNativeProbeStubs.a -Wl,-force_load,{tree}/build/hummer-storage-stubs/libHummerStorageStubs.a"
+# v74: hummer-touch（S3910 触屏探针 + drivers/NativeGeniSpi/GeniSpi.c，由
+# build-hummer-touch.py 归档到 build/hummer-touch/libHummerTouch.a）。
+# 驱动默认关闭（boot arg hummer-touch=<n>），NativeHidInput 的信箱符号是弱引用，
+# 没有 HID 发布器时照常运行、只是不发布。
+CONFIG_XNU_EXTRA_LD_ARCHIVES="-Wl,-force_load,{tree}/build/native-probe-stubs/libNativeProbeStubs.a -Wl,-force_load,{tree}/build/hummer-storage-stubs/libHummerStorageStubs.a -Wl,-force_load,{tree}/build/hummer-touch/libHummerTouch.a"

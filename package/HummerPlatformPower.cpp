@@ -33,6 +33,9 @@ void hummer_pmgr_static_init(void) __asm__("__GLOBAL__sub_I_HummerPlatformPower.
 IOService *hummer_original_pmgr_nub_create(IORegistryEntry *, ApplePMGR *);
 uint32_t hummer_original_pmgr_nub_read(IOService *);
 void hummer_original_pmgr_nub_write(IOService *, uint64_t);
+// hummer: S3910 touch probe entry (weak; resolved only when libHummerTouch.a
+// is linked). Stays a no-op while hummer-touch=0.
+extern "C" void native_touch_probe(void) __attribute__((weak_import));
 }
 
 __attribute__((noreturn)) static void unavailable(unsigned slot)
@@ -335,7 +338,13 @@ extern "C" void sheng_pmgr_run(void)
     if (matching) matching->release();
     if (matched) matched->release();
     kprintf("HUM PMGR 19: ApplePMGRNub published\n");
+    if (&native_touch_probe) native_touch_probe();
     return;
   } while (false);
   kprintf("HUM PMGR 99: not published (see marker above)\n");
+  // Kick the touch probe on both exit paths: it must run once IOKit is alive
+  // even if the nub publication above did not complete. Weak-linked, so when
+  // libHummerTouch.a is not linked (or hummer-touch=0) &native_touch_probe is
+  // NULL and this is skipped.
+  if (&native_touch_probe) native_touch_probe();
 }

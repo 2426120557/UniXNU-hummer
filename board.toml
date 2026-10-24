@@ -124,6 +124,14 @@ archives = [
   # 依赖：workflow 先跑 `./unixnu ipsw KernelCache` 解出 kernelcache
   # （out/ipsw/21H461/kernelcache.decompressed；树内相对路径 ../../ipsw/...）。
   "build-stage7-display.py --kernelcache ../../ipsw/21H461/kernelcache.decompressed",
+  # v74：触屏（Synaptics S3910 @ GENI SPI4，移植自 Linux 驱动；13T 用的是
+  # Novatek，对本机硬件无效，所以这一项只能由 hummer 自己提供）。
+  # 回放两条 XNU 编译记录（iokit C++ 记录编 HummerTouchProbe.cpp、
+  # osfmk startup C 记录编 drivers/NativeGeniSpi/GeniSpi.c），产出
+  # build/hummer-touch/libHummerTouch.a，由 defconfig force_load。
+  # 触发点在 package/HummerPlatformPower.cpp 的 sheng_pmgr_run() 出口（弱引用），
+  # 默认不跑（hummer-touch=0）；分级：=3 识别芯片、=4 上报触摸。
+  "build-hummer-touch.py",
   # 注意：所有构建器都在 macOS 上跑（kernel.py 硬性要求 xcodebuild + iphoneos SDK）。
   #
   # 已下线 build-hummer-video-map.py：它在 PE_create_console() 前面调
@@ -377,6 +385,10 @@ kernel_args = [
   "-no_corpses",
   "sheng-aks=1",
   "offline-key-events=1",
+  # v74 触屏：先关闭，稳住 v73 的启动；下一步改 hummer-touch=3 + panic=3
+  # 用 panic 屏读 S3910 的 IDENTIFY 寄存器，通过后改 =4（上报触摸）。
+  "hummer-touch=0",
+  "hummer-touch-panic=0",
 ]
 
 [payload.adt]
