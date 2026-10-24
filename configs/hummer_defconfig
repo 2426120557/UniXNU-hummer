@@ -1,114 +1,44 @@
-# Kernel configuration of the hummer image. CONFIG_XNU_<NAME> becomes XNU_<NAME>
-# for the kernel build.
+# OnePlus Ace 5 Pro (hummer, SM8750) — 13T (Pagani) full-iPadOS config.
 #
-# 试水阶段：最小可编译集 —— 只编 XNU 4K 内核本体 + 通用平台专家(ArmDTPlatform)
-# + CPU/SMP(ArmCpu)。不含任何 I/O/GPU/显示驱动（那些需要 hummer 的 package/ kit，
-# 尚未适配，且 GPU 是 Adreno 830/a8xx 未成熟）。
+# 直接采用 13T 的 oneplus13t_defconfig（同 SM8750、同 21H461 kernelcache）：
+# UFS 根、AES、verified root、virtio/ram block、legacy display、boot progress。
+# 只多一条：force_load hummer 自己的 S3910 触屏归档（13T 是 Novatek，
+# 对本机面板无效；驱动默认关闭，靠 boot arg hummer-touch=<n> 打开）。
 
+CONFIG_XNU_BUILD_ARCHIVES=y
 CONFIG_XNU_SOURCE_CORECRYPTO14=y
 CONFIG_XNU_SOURCE_PTHREAD=y
 CONFIG_XNU_ARM_DT_PLATFORM=y
 CONFIG_XNU_ARMCPU=y
-
-# AMFI "No PMGR?" fix: 上游 patches/xnu/sheng-platform-power.patch 在
-# bsd/kern/bsd_init.c（bsd_bufferinit 之后）调用 sheng_pmgr_run()，本标志把它
-# 编译进去；符号由 build-hummer-platform-power.py 产出的归档提供（见
-# board.toml [kernel] archives 的 build-hummer-platform-power.py）。它从
-# prelinked 的 com.apple.driver.ApplePMGR 造出真的 ApplePMGRNub 并发布，
-# 让 AMFI 的物理平台分支拿到 PMGR（参考 UniXNU-sheng 已验证的同名机制）。
-# 前置：XNU_SOURCE_CORECRYPTO14=1（build-xnu-4k-baseline.sh 强制，已满足）。
-CONFIG_XNU_SHENG_PMGR=y
-
-CONFIG_XNU_CRYPTO_BOOTSTRAP="prelinked"
-
-# —— v43：信任缓存运行时（反推自 v42 真机 panic）——
-# v42 的 panic 已定位到字节：lock=0xfffffff007aeef58 就是内核符号
-# _trust_cache_rt_lock，caller=0xfffffff007716bc8 = _query_trust_cache+0x78
-# （反汇编 0xfffffff007716ba8：adrp/add 出 0xfffffff007aeef58，紧接着
-#  bl 0xfffffff00728de5c = lck_rw_lock_shared），锁前 24 字节全 0，即 can_sleep=0。
-# 根因：startup.c 里 trust_cache_runtime_init() 整段被 #ifndef BCM2837 挡掉
-# （本机 config 名就是 BCM2837），而 patches/xnu/native-trust-cache-runtime.patch
-# 只在 XNU_NATIVE_TRUST_CACHE=1 时放行。证据（对本轮 kernel.macho 实测）：
-#   - 字符串 "trust_cache_init" 出现 0 次 → 整段没编进去
-#   - _trust_cache_runtime_init 的调用者 0 个 → 扫完整个 8MiB __TEXT_EXEC
-#   - 函数体本身在，结尾是 b _lck_rw_init(&lock, &grp, 0)
-# 于是这把锁永远没人初始化，pmap 的 CS 校验查信任缓存时按“不可睡眠自旋锁”抢，
-# 而抢占是开着的 → panic。参考 UniXNU-sheng 的同名键也是 =y（它那套能进用户态）。
-CONFIG_XNU_TRUST_CACHE_RUNTIME=y
-
-# —— v44：16K 页签名 → 4K 页内核的哈希缓存（反推自 v43 真机 panic）——
-# v43 把信任缓存修好之后，panic 从 "Taking non-sleepable RW lock" 变成了
-#   unexpected SIGKILL of launchd with reason -- namespace 9 code 0x0
-#   @_psignal_internal.cold.7
-# 即 namespace=OS_REASON_EXEC(9)、CS_KILLED 标记为空（unexpected_failure=TRUE），
-# 死点回到 v38 那层：签名不被接受。差异点在这里——
-# iOS 17.7 的 launchd 按 16 KiB 页算 CodeDirectory 哈希（pageSize=14），
-# 而本内核是 4 KiB 页（PAGE_SHIFT=12），ubc_subr.c:378 直接
-#   if (cd->pageSize != 12 && cd->pageSize != PAGE_SHIFT) return EBADEXEC;
-# 于是 cs_blob 根本建不起来，后面信任缓存查什么都白搭。
-# patches/xnu/native-4k-signature-hash-cache.patch 做的事：先用原始 16K 哈希
-# 验完整个限长区间，再派生 4K 摘要并设为只读，供 VM fault 快速校验。
-# 参考 UniXNU-sheng 的同名键也是 =y。
-# 前置：无（只给 ubc_subr.o 加 -DXNU_NATIVE_CS_HASH_CACHE=1）。
-CONFIG_XNU_NATIVE_CS_HASH_CACHE=y
-
-# panic 区域从设备树 /chosen 读（embedded-panic-log-size + 对应 reg），
-# 而不是用 BCM2837 的硬编码地址 —— 那个地址在本机没有映射，panic 时写进去会
-# 二次异常，屏幕永远什么都看不到（参考 13T 的 oneplus13t_defconfig 原话：
-# "The BCM2837 panic buffer address is not mapped on this device."）。
-# 本键没有前置依赖：只给 pe_init.o 加 -DXNU_DT_PANIC_REGION=1。
+CONFIG_XNU_NATIVE_ARCH_TIMER=y
+# SM8750 copyio 访问用户页时要临时清 PAN。
+CONFIG_XNU_NATIVE_PAN=y
+# BCM2837 的 panic buffer 地址在本机没有映射。
 CONFIG_XNU_DT_PANIC_REGION=y
-
-# 暂时不能开 CONFIG_XNU_BOOT_PROGRESS（帧缓冲阶段标记 S1..Sn），两个硬门槛：
-#   1) scripts/build-xnu-4k-baseline.sh 里 XNU_BOOT_PROGRESS=1 要求同时开
-#      XNU_NATIVE_UFS / XNU_OWNER_ROOT_AUDIT / XNU_NATIVE_VIRTIO_BLOCK /
-#      XNU_SOURCE_CORECRYPTO14，缺一个就直接 exit 1（'Boot progress requires
-#      the audited UFS/owner-root, Virtio and source-corecrypto build'）；
-#   2) 本地树里 drivers/BootProgress 与 scripts/build-boot-progress.py 都不存在。
-# 要拿到内核早期可见输出，得先补齐这两样，或改走串口。
-
-# —— v25：存储驱动（Stage 6）——
-# NativeUfs：上游 UniXNU/NativeUfs submodule（sheng=SM8550 高通 UFS 上已验证）。
-# hummer 的 HC 地址与 SM8550 相同（ufshc@1d84000，DTB 已有），ABL 本身从 UFS 读
-# boot.img，控制器已被固件初始化。第一轮只开 native-ufs-probe=2 诊断
-# （panic 打印 GCC/GDSC/HC 寄存器实测值），不碰根发布。
-# 前置：build/storage-abi 头目录由 audit-storage-interface.py 生成（CI 多一步
-# clone refer/IOStorageFamily@e45fbe30）；归档由 build-arm-driver.py NativeUfs
-# 产到 build/native-ufs/libNativeUfs.a，baseline.sh 在 XNU_NATIVE_UFS=1 时
-# force_load。Root personality 匹配 IOPlatformExpertDevice，不依赖 ufshc 兼容串。
+CONFIG_XNU_CRYPTO_BOOTSTRAP="prelinked"
+# CONFIG_XNU_ARMVIRT_PLATFORM is not set
 CONFIG_XNU_NATIVE_UFS=y
-# CONFIG_XNU_NATIVE_AES=y
-# CONFIG_XNU_NATIVE_VIRTIO_BLOCK=y
-# CONFIG_XNU_NATIVE_RAM_BLOCK=y
-# CONFIG_XNU_NATIVE_ARCH_TIMER=y
-# CONFIG_XNU_NATIVE_ADRENO=n        # Adreno 830 (a8xx) 未成熟
-
-# v69：Stage 7 显示路径（移植自 OnePlus 13T / Pagani，同 SM8750、同 kernelcache）。
-# NativeLegacyDisplay 复用原版 IOMobileFramebufferLegacy，CPU 拷贝到固件 GOP
-# framebuffer —— 不需要 GPU 驱动就能看到系统画面。引擎 baseline 在
-# XNU_NATIVE_LEGACY_DISPLAY=1 时 force_load
-# build/native-legacy-display/libNativeLegacyDisplay.late.a（由
-# scripts/build-stage7-display.py 产出，源码在 package/）。
+CONFIG_XNU_NATIVE_AES=y
+CONFIG_XNU_VERIFIED_ROOT_PROBE=y
+CONFIG_XNU_NATIVE_VIRTIO_BLOCK=y
+CONFIG_XNU_OWNER_ROOT_AUDIT=y
+CONFIG_XNU_OWNER_ROOT_TRUST=y
+CONFIG_XNU_TRUST_CACHE_RUNTIME=y
+CONFIG_XNU_NATIVE_CS_HASH_CACHE=y
+CONFIG_XNU_SHENG_PMGR=y
+CONFIG_XNU_OWNER_CACHE_MOUNT=y
+CONFIG_XNU_OWNER_CACHE_STARTUP=y
+CONFIG_XNU_OWNER_BOOT_MANIFEST=y
+CONFIG_XNU_NATIVE_RAM_BLOCK=y
+CONFIG_XNU_OWNER_DATA_MOUNT=y
+# OWNER_DATA_VOLUME_UUID 在构建前由真实 RAM seed 写入。
+CONFIG_XNU_OWNER_UNION_SYSTEMOS=y
+CONFIG_XNU_VERIFIED_ROOT_ARCHIVE="{tree}/build/verified-root-os-xnu-bundle/libVerifiedRootProbe.a"
+# CONFIG_XNU_NATIVE_ADRENO is not set
 CONFIG_XNU_NATIVE_LEGACY_DISPLAY=y
+CONFIG_XNU_BOOT_PROGRESS=y
+CONFIG_XNU_EARLY_BOOT_PROGRESS=y
 
-# v68：Adreno 830 寄存器活性探针（不是驱动）。引擎的
-# offline-component-load-probes.patch 在 bsd_init 的 vfsinit 之后调用
-# native_adreno_firmware_probe()；本选项把它编进去，并由 baseline.sh
-# force_load build/adreno-firmware-probe/libAdrenoFirmwareProbe.a
-# （前置 XNU_SOURCE_CORECRYPTO14=1 已满足）。boot arg
-# hummer-adreno-probe=1 门控；默认不跑，不拦启动。
-CONFIG_XNU_ADRENO_FIRMWARE_PROBE=y
-# CONFIG_XNU_NATIVE_LEGACY_DISPLAY=n
-
-# 试水阶段：无条件引用的 offline-probe 钩子（native_legacy_display_probe /
-# native_mobile_graphics_client_probe）用空 stub 满足链接。真正的显示驱动未移植。
-#
-# native-probe-stubs 之外再加 hummer-storage-stubs（v25）：NativeUfs 的
-# NativeUfsBlock 引用 prelinked IOStorageFamily 的 vtable/getProperty，以及
-# VerifiedRoot 和可选 boot_progress_poll；probe 阶段不构造块设备，用会 panic 的
-# hidden 桩满足静态链接（见 package/HummerStorageStubs.cpp）。
-# v74: hummer-touch（S3910 触屏探针 + drivers/NativeGeniSpi/GeniSpi.c，由
-# build-hummer-touch.py 归档到 build/hummer-touch/libHummerTouch.a）。
-# 驱动默认关闭（boot arg hummer-touch=<n>），NativeHidInput 的信箱符号是弱引用，
-# 没有 HID 发布器时照常运行、只是不发布。
-CONFIG_XNU_EXTRA_LD_ARCHIVES="-Wl,-force_load,{tree}/build/native-probe-stubs/libNativeProbeStubs.a -Wl,-force_load,{tree}/build/hummer-storage-stubs/libHummerStorageStubs.a -Wl,-force_load,{tree}/build/hummer-touch/libHummerTouch.a"
+# hummer 触屏（S3910 + drivers/NativeGeniSpi/GeniSpi.c），由
+# build-hummer-touch.py 归档；默认关闭，NativeHidInput 信箱是弱引用。
+CONFIG_XNU_EXTRA_LD_ARCHIVES="-Wl,-force_load,{tree}/build/hummer-touch/libHummerTouch.a"

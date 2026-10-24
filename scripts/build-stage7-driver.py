@@ -9,14 +9,12 @@ import subprocess
 
 root = Path(__file__).resolve().parents[1]
 parser = argparse.ArgumentParser(description=__doc__)
-parser.add_argument('component', choices=['NativeLegacyDisplay', 'NativeKeyStoreEvents', 'Stage7Probe', 'Stage7Status'])
+parser.add_argument('component', choices=['NativeLegacyDisplay', 'NativeKeyStoreEvents', 'Stage7Probe'])
 component = parser.parse_args().component
 directory = root / 'build' / ('native-keystore-events' if component == 'NativeKeyStoreEvents' else 'native-legacy-display')
 directory.mkdir(parents=True, exist_ok=True)
-# hummer: the device overlay maps package/ to kits/hummer, so all three
-# components are vendored there (upstream NativeMobileDisplay@8666a99 and
-# NativeKeyStoreEvents, plus the board's Stage7Probe).
-source = root / 'kits/hummer' / (component + '.cpp')
+source = (root / 'scripts/stage7/Stage7Probe.cpp' if component == 'Stage7Probe' else
+          root / 'drivers' / ('NativeMobileDisplay' if component == 'NativeLegacyDisplay' else component) / (component + '.cpp'))
 record = json.loads((root / 'build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/iokit/DEVELOPMENT/IOPlatformExpert.cpo.json').read_text().strip().rstrip(','))
 obj = directory / (component + '.o')
 compile_command = runpy.run_path(str(root / 'scripts/build-arm-platform.py'))['compile_command']

@@ -189,7 +189,7 @@ def code(data,info):
     sec=next(s for g in info['segments'] for s in g['sections'] if s['name']=='__text');return data[sec['fileoff']:sec['fileoff']+sec['size']]
 require(code(raw,image)==code(late.read_bytes(),macho(late.read_bytes())),'Only owned initializer section registration changes')
 objects=[late,OUT/'original-bindings.o']
-for component in ('Stage7Probe','NativeKeyStoreEvents','Stage7Status'):
+for component in ('Stage7Probe','NativeKeyStoreEvents'):
     print(run(['python3',ROOT/'scripts/build-stage7-driver.py',component],text=True),end='')
     directory=ROOT/'build'/('native-keystore-events' if component=='NativeKeyStoreEvents' else 'native-legacy-display')
     source_obj=directory/(component+'.o')
@@ -203,13 +203,11 @@ for component in ('Stage7Probe','NativeKeyStoreEvents','Stage7Status'):
     else:objects.append(source_obj)
 archive=OUT/'libNativeLegacyDisplay.late.a';archive.unlink(missing_ok=True)
 run(['xcrun','ar','rcs',archive,*objects])
-# hummer: package/ overlays kits/hummer, so the vendored components live there.
-sources=[ROOT/'kits/hummer/NativeLegacyDisplay.cpp',
-         ROOT/'kits/hummer/NativeLegacyRequest.h',
-         ROOT/'kits/hummer/NativeKeyStoreEvents.cpp',
-         ROOT/'kits/hummer/Stage7Probe.cpp',ROOT/'kits/hummer/Stage7Status.cpp',Path(__file__),
-         ROOT/'scripts/build-stage7-driver.py',ROOT/'scripts/build-arm-platform.py',
-         ROOT/'scripts/original_stage7.py',ROOT/'scripts/audit-stage7-display.py']
+sources=[ROOT/'drivers/NativeMobileDisplay/NativeLegacyDisplay.cpp',
+         ROOT/'drivers/NativeMobileDisplay/NativeLegacyRequest.h',
+         ROOT/'drivers/NativeKeyStoreEvents/NativeKeyStoreEvents.cpp',
+         ROOT/'scripts/stage7/Stage7Probe.cpp',Path(__file__),
+         ROOT/'scripts/build-stage7-driver.py',ROOT/'scripts/original_stage7.py',ROOT/'scripts/audit-stage7-display.py']
 (OUT/'build-report.json').write_text(json.dumps(dict(original_sha256=original.sha256,
     archive_sha256=sha(archive),source_sha256={str(p.relative_to(ROOT)):sha(p) for p in sources},
     virtual_entries=358,owned_entries=owned,bindings={n:hex(v) for n,v in bindings.items()},

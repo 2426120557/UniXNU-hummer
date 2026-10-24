@@ -1,781 +1,109 @@
 name: build-kernel
 
+# OnePlus Ace 5 Pro (hummer, SM8750) — 13T (Pagani) pipeline.
+# 引擎由 ./unixnu 包装器准备：clone upstream.rev (d9460ebb) + 打 patches/ 三份补丁，
+# 缓存后转交引擎自己的 unixnu。保留 hummer 的固件/ADT/触屏。
+
 on:
   workflow_dispatch:
   push:
     branches: [ main, master ]
 
-# 试水目标：验证 macOS CI 能否编出 hummer 的 XNU 4K 内核 + 通用平台专家。
-# 已知：build kernel 会在 prelink 阶段因缺少 kernelcache/IPSW 失败（预期内），
-# 本 workflow 以「内核 Mach-O 是否产出」为通过判据。
+concurrency:
+  group: hummer-xnu-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
-  kernel:
-    runs-on: macos-15          # 与 UniXNU 官方 macOS build workflow 一致
-    timeout-minutes: 300       # 上限 360，留点余量
-    permissions:
-      contents: write          # 只为把产物/日志挂到 ci-latest release
+  build:
+    runs-on: macos-15
+    timeout-minutes: 360
     steps:
-      - name: Checkout device repo
-        uses: actions/checkout@v4
-
-      # 固定在 b6ae99c（2026-10-21 20:44），不跟 main。
-      #
-      # main 的 e95b37d（2026-10-22 08:17，"update NativeAdreno ..."）把
-      # patches/xnu/zzy-native-gpu-addon-mount.patch 里
-      # `#define BINDM_FORCE_ROOT 0x80000000ULL` 那一行弄丢了，但
-      # bind_vfsops.c 里对它的一次使用还在 —— 于是 bsd/miscfs/bindfs 编不过：
-      #
-      #   bind_vfsops.c:237:23: error: use of undeclared identifier 'BINDM_FORCE_ROOT'
-      #
-      # 同一个 commit 还把三条子模块 gitlink 挪到了远端已经不提供的 commit 上。
-      # b6ae99c 两者都正常。上游修好之后把 ref 换回 main 即可。
-      - name: Checkout UniXNU
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
-          repository: UniXNU/UniXNU
-          path: UniXNU
-          ref: b6ae99c17194e6a18fd819d3148e69fe405e91fc
-
-      # 不要用 submodules: recursive —— UniXNU 的 main 里常有 gitlink 指向远端
-      # 已经删掉的 commit（上游 force-push），递归 checkout 撞到第一个就整体失败。
-      #
-      # 但只取三个也不够：`unixnu build` 自己会跑
-      # `git submodule update --init --recursive`（scripts/unixnu/feeds.py），
-      # 失败即中止，于是 build 连第一步都进不去。所以这里先按 .gitmodules 逐个
-      # 更新，失败的把 gitlink 改指远端默认分支 HEAD（那个一定存在），把 checkout
-      # 修好再交给 unixnu。
-      - name: Repair the UniXNU submodule checkout
-        shell: bash
-        working-directory: UniXNU
-        run: bash "$GITHUB_WORKSPACE/ci/fix-unixnu-submodules.sh"
-
-      # 关键：固定 Python 3.12。系统默认的 3.14 会让 XNU 的 LDFILELIST 等脚本静默失败。
-      - name: Set up Python 3.12
-        uses: actions/setup-python@v5
+          persist-credentials: false
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
-      - name: Resolve UniXNU commit (cache key)
-        run: echo "UNIXNU_SHA=$(git -C UniXNU rev-parse HEAD)" >> "$GITHUB_ENV"
-
-      - name: Install build dependencies
+      - name: Prepare the isolated, patched UniXNU source
         run: |
-          brew install cmake ninja unifdef llvm mtools dtc
+          TREE=$(./unixnu --prepare)
+          echo "UNIXNU_TREE=$TREE" >> "$GITHUB_ENV"
+
+      # Stage 7 用户态兼容补丁（按 /chosen/ephemeral-storage 门控），塞进引擎
+      # patches/xnu/ 由 baseline.sh 排序应用（zzzz- 排最后）。
+      - name: Stage the Stage 7 userspace-compat patch
+        run: cp patches/zzzz-hummer-stage7-compat.patch "$UNIXNU_TREE/patches/xnu/"
+
+      - name: Install host tools
+        run: |
+          brew install cmake ninja unifdef llvm mtools openssl@3
           echo "$(brew --prefix llvm)/bin" >> "$GITHUB_PATH"
-
-      - name: Toolchain versions
-        run: |
           xcodebuild -version
-          python3 --version
-          clang --version | head -1
-          cmake --version | head -1
 
-      - name: Cache fetched sources
-        uses: actions/cache@v4
-        with:
-          path: UniXNU/out/feeds
-          key: unixnu-feeds-${{ env.UNIXNU_SHA }}
-
-      - name: Select defconfig
-        run: ./unixnu defconfig hummer_defconfig -D "$GITHUB_WORKSPACE"
-        working-directory: UniXNU
-
-      - name: Show status
-        run: ./unixnu status -D "$GITHUB_WORKSPACE"
-        working-directory: UniXNU
-
-      # v69：Stage 7 显示栈的 ABI 审计输入。build-stage7-display.py 要从原版
-      # kernelcache 逆 IOMobileFramebufferLegacy 的虚表，而 kernelcache 正常
-      # 是 prelink 时才解码的（在归档构建器之后）——这里提前解出来放到
-      # out/ipsw/21H461/kernelcache.decompressed，归档阶段直接用。
-      # 解码用 macOS 的 compression_tool，所以这步必须在 macOS runner 上。
-      - name: Decode the original kernelcache (display ABI audit input)
-        # 引擎 CLI 的签名是 `ipsw <action> [components...]`（action 在前）——
-        # v69 第一次写成 `ipsw KernelCache`，argparse 直接拒了。
-        run: ./unixnu ipsw fetch KernelCache -D "$GITHUB_WORKSPACE" 2>&1 | tee "$GITHUB_WORKSPACE/kernelcache.log"
-        working-directory: UniXNU
-
-      # v72：Data 卷改用打包种子（assets/data-21H461.dbrdisk）。
-      #
-      # 来历：这是 OnePlus 13T（Pagani，同 SM8750、同 21H461）run 39 的产物，从那轮
-      # CI artifact 里原样取出，sha256 4b19724baffb85a2… 与他们的 payload.json 里
-      # data_ramdisk_sha256 逐字节一致。内容是 1 GiB 逻辑的 APFS Data 卷，打包成
-      # DBRDISK1（5 个 extent）后只有 1,020,016 字节：
-      #   - private/var 只有 39 个文件 / 611,715 字节（不是整棵系统树）
-      #   - 8 个 daemon 停用：watchdogd / identityservicesd / locationd / CommCenter /
-      #     bluetoothd / PerfPowerServices / iomfb_fdr_loader / iconservicesagent
-      #   - userspace_compat_original_instructions_verified / mobilegestalt_cache_cleared /
-      #     auto_dim_disabled / ownership_preserved 全部为 true
-      # 这正是 Pagani 从「停在 Logo」（run 37/38）走到「进系统」（run 39）的那份配方；
-      # 我们 v63~v69 的 64 MiB 探针没有 private/var，也没有这些停用和标记。
-      #
-      # 为什么能跨机型用：Data 种子是板级无关的 APFS 卷，内核看到的就是一块 Data 磁盘。
-      # 而我们的 UEFI 里的 DarwinBoot 确认支持 DBRDISK1 —— Build/hummerPkg 下的
-      # DarwinBoot.efi 与 FVMAIN_COMPACT 里都有 DBRDISK1 / PackedRAMDisk 字面量
-      # （主 FV 是压缩的，所以在平铺的 SILICIUM_UEFI.fd 里 grep 不到）。
-      # 代价：种子换成 packed 形式，board.toml 的 packed_data_ramdisk 必须为 true，
-      # ADT 会发 PackedRAMDisk 而不是 RAMDisk —— 这一步在下面的 payload 步里按实际
-      # 选中的种子自动改写。
-      #
-      # 之前 v71 那条「从原版 OS 的 private/var 现造 32 MiB 裸种子」的路径已撤掉：
-      # 它要额外拉 5.66 GiB 的 OS 成员、且没有 8 daemon 停用和 compat 标记，收益不如
-      # 这份已验证的种子。
-
-      # ── v42 诊断补丁 ─────────────────────────────────────────────────────
-      # v39（手搓 ad-hoc 签名的 16 KiB 探针）和 v41（从 21H461 固件里原样抽出来
-      # 的真 launchd 561,856 B + dyld 937,056 B）停在同一行：
-      #
-      #   panic(cpu 0 caller 0xfffffff007985a2c): Taking non-sleepable RW lock
-      #         with preemption enabled @lock_rw.c:1480
-      #
-      # 这一行在 lock_rw.c 的两个 internal_inline 里都有（shared / exclusive），
-      # 判据是 `!lock->lck_rw_can_sleep && get_preemption_level() == 0`：
-      # 有人在一把"不可睡眠"的 rwlock 上抢锁，而当时抢占是开着的。
-      # 但这条 panic 只说"抢错了"，不说"哪把锁、谁抢的"，而 XNU 的 panic
-      # 在这个平台层上不打印栈 —— 于是只能靠改内核把信息塞进消息本身：
-      #
-      #   lock     rwlock 结构地址
-      #   caller   调用 lck_rw_lock_shared() 那条指令的返回地址（可直接对符号）
-      #   w=...    锁结构前 64 字节；**全 0 就说明这把锁从没被 lck_rw_init 初始化过**
-      #            （未初始化的 rwlock 在 XNU 里正好被判成 non-sleepable），
-      #            那么问题就是"某个 init 没跑到"，而不是锁的用法有错。
-      #
-      # 判据检查：替换次数必须 > 0，否则 xnu 源码换版了，直接失败，别白跑一次。
-      #
-      # 注意（run 39838609251 的教训）：UniXNU 会把源码摊到**好几份**副本里，
-      #   out/feeds/xnu-*/osfmk/kern/lock_rw.c        ← feed 的原始解压
-      #   out/hummer/tree/.cache/xnu-work/osfmk/...   ← 真正参与编译的那份（build-xnu-4k-baseline.sh 在里面 make）
-      # 上一轮只打了 feeds 那份，源码确实改了 5 处，但编出来的内核 __TEXT_EXEC
-      # 与上一版**逐字节相同**、连 nonSLRW 字符串都没有 —— 白刷一次。
-      # 所以这里对 out/ 下所有同名文件全打一遍，再在构建后用二进制校验兜底。
-      - name: Patch XNU diagnostics (rwlock panic + trust cache init)
-        run: |
-          python3 - <<'PY'
-          import os, re, sys, pathlib
-
-          RULES = {
-              "osfmk/kern/lock_rw.c": [(
-                  re.compile(r'panic\(\s*"Taking non-sleepable RW lock with preemption enabled[^"]*"'
-                             r'(?:\s*,\s*__FILE__\s*,\s*__LINE__)?\s*\);'),
-                  'panic("nonSLRW lock=%p caller=%p w=%llx,%llx,%llx,%llx,%llx,%llx,%llx,%llx", '
-                  '(void *)lock, __builtin_return_address(0), '
-                  '(unsigned long long)((uint64_t *)lock)[0], '
-                  '(unsigned long long)((uint64_t *)lock)[1], '
-                  '(unsigned long long)((uint64_t *)lock)[2], '
-                  '(unsigned long long)((uint64_t *)lock)[3], '
-                  '(unsigned long long)((uint64_t *)lock)[4], '
-                  '(unsigned long long)((uint64_t *)lock)[5], '
-                  '(unsigned long long)((uint64_t *)lock)[6], '
-                  '(unsigned long long)((uint64_t *)lock)[7]);'),
-              ],
-              # v43：把 trust_cache_runtime_init() 的两条“接口不可用”panic
-              # 改成带实参的版本。开了 XNU_TRUST_CACHE_RUNTIME=1 之后，
-              # 这一行就是下一个墙的准确读数（img4if / amfi 到底是不是 NULL）。
-              "bsd/kern/kern_trustcache.c": [
-                  (re.compile(r'panic\(\s*"image4 interface not available"\s*\);'),
-                   'panic("HTC img4if=%p", (void *)img4if);'),
-                  (re.compile(r'panic\(\s*"amfi interface not available"\s*\);'),
-                   'panic("HTC amfi=%p", (void *)amfi);'),
-              ],
-          }
-
-          root = pathlib.Path("UniXNU/out")
-          total = 0
-          hits = 0
-          for src_rel, rules in RULES.items():
-              base = pathlib.Path(src_rel).name
-              targets = [p for p in root.rglob(base) if p.parts[-2:] == pathlib.Path(src_rel).parts[-2:]]
-              print("%s: %d candidate(s)" % (src_rel, len(targets)))
-              for target in targets:
-                  hits += 1
-                  text = target.read_text()
-                  n_all = 0
-                  for pat, new in rules:
-                      text, n = pat.subn(new, text)
-                      n_all += n
-                  if n_all:
-                      target.write_text(text)
-                      total += n_all
-                      print("  patched %s : %d site(s)" % (target, n_all))
-          print("total patched sites:", total)
-          if hits == 0:
-              print("::error::no xnu source under UniXNU/out -- cannot patch")
-              sys.exit(1)
-          if total == 0:
-              print("::error::no diagnostic patch applied -- xnu source layout changed")
-              sys.exit(1)
-          PY
-
-      # run 39840423573 的结论：补丁打在了 out/feeds/xnu-0b4b910d/osfmk/kern/lock_rw.c
-      # （5 处，日志可见），但执行补丁时 out/ 下**只有这一份** lock_rw.c ——
-      # 真正参与编译的 out/hummer/tree/.cache/xnu-work/ 是构建过程中才展开的，
-      # 展开自带的原始内容，把我们的改动覆盖掉。校验步骤当场拦下（nonSLRW x0）。
-      #
-      # 所以改成「构建期间持续补丁」：起一个 1 秒轮询的后台进程，只 stat/读
-      # 几个固定候选路径（不做全树 rglob，否则每轮都要走十万个文件），
-      # 一发现新的 lock_rw.c 就替换。无论构建在哪一刻把树展开，都赶在
-      # clang 读到 osfmk/kern/lock_rw.c 之前改好。
-      # v66：根卷已挂上但"未认证"（v63 真机 bsd_init.c:1103 → panic）。
-      # 不要把补丁写进 tree/patches/xnu（那是引擎自己的模块，assemble 会冲突），
-      # 而是写进引擎仓库的 patches/xnu —— tree 里那个目录就是指向它的链接，
-      # baseline 按字典序应用，zzzz- 排最后，且第二遍构建的反向检查也能通过。
-      # 改的是 require_rootauth = TRUE 这一行（第 939 行），离引擎 owner-root 补丁
-      # 的 hunk（987 行）很远，两边互不影响；整段检查本身在
-      # if (!bsd_rooted_ramdisk()) 里，关掉它就等价于内存盘启动时的行为。
-      - name: Stage the hummer root-auth bring-up patch
-        run: |
-          python3 - <<'PY'
-          import pathlib
-          tab = "\t"
-          body = [
-              "--- a/bsd/kern/bsd_init.c",
-              "+++ b/bsd/kern/bsd_init.c",
-              "@@ -936,7 +936,7 @@",
-              " #endif // CONFIG_IMAGEBOOT",
-              " #elif !XNU_TARGET_OS_OSX",
-              " " + tab * 2 + "/* Non MacOS */",
-              "-" + tab * 2 + "require_rootauth = TRUE;",
-              "+" + tab * 2 + "require_rootauth = FALSE;   /* hummer bring-up: no owner-root closure */",
-              " #endif // XNU_TARGET_OS_OSX && defined(__arm64__)",
-              " ",
-              " " + tab * 2 + "if (require_rootauth) {",
-          ]
-          target = pathlib.Path("UniXNU/patches/xnu/zzzz-hummer-rootauth.patch")
-          target.parent.mkdir(parents=True, exist_ok=True)
-          target.write_text(chr(10).join(body) + chr(10))
-          print("staged", target)
-          PY
-
-      - name: Stage the hummer Stage 7 userspace-compat patch
-        run: |
-          # The compat patch lives in this device tree (patches/zzzz-hummer-stage7-compat.patch)
-          # and is copied into the engine's patches dir so baseline applies it (zzzz- sorts last).
-          # It is gated behind the /chosen/ephemeral-storage DT property, so it stays inert until
-          # the bring-up Data volume (Phase B) sets that property. Ported from
-          # IssacL04/UniXNU-Pagani_SM8750 native-stage7-userspace-compat.patch.
-          cp "$GITHUB_WORKSPACE/patches/zzzz-hummer-stage7-compat.patch" \
-             "UniXNU/patches/xnu/zzzz-hummer-stage7-compat.patch"
-          echo "staged compat -> $(ls -l UniXNU/patches/xnu/zzzz-hummer-stage7-compat.patch | awk '{print $5}') bytes"
-
-      - name: Build kernel (prelink fails without IPSW, expected)
-        continue-on-error: true
+      - name: Fetch the kernel sources
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
-          cat > /tmp/patcher.py <<'PY'
-          import glob, os, re, sys, time, pathlib
+          mkdir -p out/hummer/logs
+          ./unixnu defconfig hummer_defconfig
+          ./unixnu fetch xnu libplatform libdispatch AvailabilityVersions libpthread corecrypto-2023 IOStorageFamily 2>&1 | tee out/hummer/logs/actions-fetch.log
+          cp unixnu.lock out/hummer/unixnu.lock
 
-          ROOT = os.path.join(os.environ["GITHUB_WORKSPACE"], "UniXNU", "out")
-
-          RULES = {
-              "osfmk/kern/lock_rw.c": [(
-                  re.compile(r'panic\(\s*"Taking non-sleepable RW lock with preemption enabled[^"]*"'
-                             r'(?:\s*,\s*__FILE__\s*,\s*__LINE__)?\s*\);'),
-                  'panic("nonSLRW lock=%p caller=%p w=%llx,%llx,%llx,%llx,%llx,%llx,%llx,%llx", '
-                  '(void *)lock, __builtin_return_address(0), '
-                  '(unsigned long long)((uint64_t *)lock)[0], '
-                  '(unsigned long long)((uint64_t *)lock)[1], '
-                  '(unsigned long long)((uint64_t *)lock)[2], '
-                  '(unsigned long long)((uint64_t *)lock)[3], '
-                  '(unsigned long long)((uint64_t *)lock)[4], '
-                  '(unsigned long long)((uint64_t *)lock)[5], '
-                  '(unsigned long long)((uint64_t *)lock)[6], '
-                  '(unsigned long long)((uint64_t *)lock)[7]);'),
-              ],
-              "bsd/kern/kern_trustcache.c": [
-                  (re.compile(r'panic\(\s*"image4 interface not available"\s*\);'),
-                   'panic("HTC img4if=%p", (void *)img4if);'),
-                  (re.compile(r'panic\(\s*"amfi interface not available"\s*\);'),
-                   'panic("HTC amfi=%p", (void *)amfi);'),
-              ],
-          }
-
-          def roots():
-              out = []
-              cache = os.path.join(ROOT, "hummer", "tree", ".cache")
-              try:
-                  for d in os.listdir(cache):
-                      out.append(os.path.join(cache, d))
-              except OSError:
-                  pass
-              out.append(os.path.join(ROOT, "hummer", "tree"))
-              try:
-                  for d in os.listdir(os.path.join(ROOT, "feeds")):
-                      out.append(os.path.join(ROOT, "feeds", d))
-              except OSError:
-                  pass
-              out += glob.glob(os.path.join(ROOT, "*", "*", "*"))
-              out += glob.glob(os.path.join(ROOT, "*", "*", "*", "*"))
-              return out
-
-          deadline = time.time() + 3000
-          seen = set()
-          total = 0
-          while time.time() < deadline:
-              for rel, rules in RULES.items():
-                  for base in roots():
-                      p = os.path.join(base, rel)
-                      if p in seen or not os.path.exists(p):
-                          continue
-                      try:
-                          src = pathlib.Path(p).read_text()
-                      except OSError:
-                          continue
-                      new = src
-                      n_all = 0
-                      for pat, repl in rules:
-                          new, n = pat.subn(repl, new)
-                          n_all += n
-                      if n_all:
-                          pathlib.Path(p).write_text(new)
-                          seen.add(p)
-                          total += n_all
-                          print("[%6.1fs] patched %s : %d site(s)" % (time.time() % 10000, p, n_all), flush=True)
-              time.sleep(1)
-          print("patcher finished, total sites:", total, flush=True)
-          PY
-          python3 /tmp/patcher.py > "$GITHUB_WORKSPACE/patcher.log" 2>&1 &
-          PATCHER=$!
-          ./unixnu build kernel -D "$GITHUB_WORKSPACE" 2>&1 | tee "$GITHUB_WORKSPACE/kernel.log" || true
-          kill "$PATCHER" 2>/dev/null || true
-          wait "$PATCHER" 2>/dev/null || true
-          echo "--- patcher.log ---"
-          cat "$GITHUB_WORKSPACE/patcher.log" || true
-        working-directory: UniXNU
-
-      # 判据 = prelink 的最终产物（prelink 成功后才算内核完整产出）。
-      # 注意路径：产物在 UniXNU/out/hummer/ 下，不是 UniXNU/build/。
-      - name: Check kernel artifact
-        id: check
-        run: |
-          K="UniXNU/out/hummer/kernel/kernel.macho"
-          if [ -f "$K" ]; then
-            echo "KERNEL_BUILT=yes" >> "$GITHUB_ENV"
-            ls -la "$K"
-          else
-            echo "KERNEL_BUILT=no" >> "$GITHUB_ENV"
-            echo "kernel.macho not produced; see logs"
-          fi
-
-      # 兜底：诊断补丁必须真的出现在最终二进制里。
-      # run 39838609251 就是栽在这里 —— 源码现场改了 5 处、日志也印了
-      # "patched sites: 5"，但打的是 out/feeds/ 那份，编译用的是
-      # out/hummer/tree/.cache/xnu-work/，于是 kernel.macho 的 __TEXT_EXEC
-      # 与上一版逐字节相同。没有这道校验，就会拿一个毫无变化的镜像去刷机。
-      - name: Verify the diagnostic patch reached the kernel
-        if: env.KERNEL_BUILT == 'yes'
-        run: |
-          python3 - <<'PY'
-          import sys
-          p = "UniXNU/out/hummer/kernel/kernel.macho"
-          d = open(p, "rb").read()
-          n = d.count(b"nonSLRW lock=%p caller=%p w=")
-          old = d.count(b"Taking non-sleepable RW lock with preemption enabled")
-          tc = d.count(b"HTC img4if=%p")
-          tca = d.count(b"HTC amfi=%p")
-          # v43 的开关本身也要落到二进制里：trust_cache_runtime_init() 一旦被
-          # 编进去，它的 log 串 "trust_cache_init" 就会出现；没出现说明
-          # CONFIG_XNU_TRUST_CACHE_RUNTIME 没生效（那就是又一次白刷）。
-          tci = d.count(b"trust_cache_init")
-          print("kernel.macho %d bytes" % len(d))
-          print("  nonSLRW     x%d   (must be >= 1)" % n)
-          print("  old text    x%d" % old)
-          print("  HTC img4if  x%d   (must be >= 1)" % tc)
-          print("  HTC amfi    x%d" % tca)
-          print("  trust_cache_init x%d (must be >= 1 when v43 knob is on)" % tci)
-          # v44 的开关：16K→4K 哈希缓存只在 ubc_subr.o 里编进去。
-          # cs_native4k_hash_cache_version 是补丁里唯一新增的 __attribute__((used))
-          # 常量，它的名字会进符号表 —— 比日志串更直接，也不会被优化掉。
-          hc = d.count(b"cs_native4k_hash_cache_version")
-          # 反面证据：开关没开时这行 printf 仍在源码里，但会被编进 ubc_subr.o
-          # 的 cold 路径；开了之后 pageSize==14 不再走 echo，所以这里只做读数。
-          ph = d.count(b"disallowing unsupported code signature page shift")
-          print("  native4k    x%d   (must be >= 1 when v44 knob is on)" % hc)
-          print("  pageshift   x%d   (still present; it is the != 12 && != PAGE_SHIFT path)" % ph)
-          if n < 1:
-              print("::error::the lock diagnostic patch did not reach the kernel binary")
-              sys.exit(1)
-          if tc < 1:
-              print("::error::the trust-cache diagnostic patch did not reach the kernel binary")
-              sys.exit(1)
-          if tci < 1:
-              print("::error::CONFIG_XNU_TRUST_CACHE_RUNTIME did not take effect -- "
-                    "startup.c still compiles the trust_cache block out")
-              sys.exit(1)
-          if hc < 1:
-              print("::error::CONFIG_XNU_NATIVE_CS_HASH_CACHE did not take effect -- "
-                    "ubc_subr.c still rejects 16K-page code directories")
-              sys.exit(1)
-          PY
-
-      # v33：运存根探针镜像。做一个 64 MiB 的 APFS 卷，从 /dev/rdiskN 原样读出来，
-      # 去掉 DMG 外壳，得到一个"设备内容"字节流，正好能当 ramdisk 用。
-      # 为什么不是 zeros 而是真 APFS：zeros 只能证明 md0 被注册；真 APFS 还能顺带
-      # 验证 APFS kext 会不会认它当根，一次刷机能多拿一层信息。
-      - name: Build the RAM root image (APFS, raw)
-        if: env.KERNEL_BUILT == 'yes'
-        run: |
-          # 做一个 64 MiB 的 APFS 卷，从 /dev/rdiskN 原样读出来：得到的字节流就是
-          # "设备内容"（没有 DMG 外壳），可以直接当 ramdisk 交给 --data-ramdisk。
-          #
-          # 两个 hdiutil 的坑：
-          #   1) -format 只能配 -srcfolder / -srcdevice；空白镜像（-size N）本身就是
-          #      可写 UDIF，多写一个 -format UDRW 会直接报
-          #      "-format requires -srcfolder or -srcdevice"（v33 第一次就栽在这）。
-          #   2) APFS 不一定能在很小的卷上建出来；建不出来就退回全零镜像 ——
-          #      这一步要拿的那一比特是 "md0 有没有被认成根设备"，与卷里装什么无关。
-          set -ux
-          OUT="$GITHUB_WORKSPACE/ram-root.img"
-          IMG="$RUNNER_TEMP/ram-root.dmg"
-          rm -f "$OUT" "$IMG"
-
-          mkfs=no
-          if hdiutil create -size 64m -fs APFS -volname System -ov "$IMG" > "$RUNNER_TEMP/hdiutil.log" 2>&1; then
-            mkfs=yes
-          else
-            echo "::warning::APFS image creation failed, falling back to zeros"
-            cat "$RUNNER_TEMP/hdiutil.log"
-          fi
-
-          if [ "$mkfs" = yes ]; then
-            # v41：卷里放的是从 21H461 固件里抽出来的真 launchd 和真 dyld
-            # （assets/launchd、assets/dyld），不再是手搓的 stub。
-            #
-            # 为什么换：v39 给 stub 补了 ad-hoc 签名，于是不再被 exec 直接拒绝，
-            # 而是死在 lck_rw_lock_shared_b 的"可抢占上下文拿自旋锁"断言上。
-            # 唯一变量就是那份签名，而死点落在签名之后的路径，所以真签名值得
-            # 一试 —— 真 launchd 带的是 Apple 自己的签名，走的是另一条路。
-            #
-            # 预期：exec 过（CS_SIGNED 由真签名置位），dyld 起来，找不到
-            # /usr/lib/libSystem.B.dylib（它在 3.09 GiB 的 shared cache 里，
-            # 256 MiB 的内存根放不下），然后退出。pid 1 退出必然 panic
-            # （kern_exit.c: p == initproc 无条件 panic），所以只要出现
-            #   initproc failed to start ... exit status N   (N != 42)
-            # 就说明真 iOS 用户态代码在这台手机上执行过了。
-            #
-            # 两个文件缺一个就退回 stub（stub 自己 exit(42)，一眼可分）。
-            ASSETS="$GITHUB_WORKSPACE/assets"
-            use_real=no
-            if [ -s "$ASSETS/launchd" ] && [ -s "$ASSETS/dyld" ]; then
-              use_real=yes
-              echo "assets: launchd $(stat -f%z "$ASSETS/launchd") bytes, dyld $(stat -f%z "$ASSETS/dyld") bytes"
-              for f in launchd dyld; do
-                magic=$(xxd -p -l4 "$ASSETS/$f")
-                echo "  $f magic = $magic"
-                if [ "$magic" != "cffaedfe" ]; then
-                  echo "::error::$f is not a little-endian 64-bit Mach-O"
-                  exit 1
-                fi
-              done
-            else
-              echo "::warning::assets/launchd or assets/dyld missing, falling back to the stub"
-              python3 "$GITHUB_WORKSPACE/scripts/make-launchd-stub.py" "$RUNNER_TEMP/launchd-stub"
-            fi
-
-            MP="$RUNNER_TEMP/ram-root"
-            rm -rf "$MP"; mkdir -p "$MP"
-            DEV=$(hdiutil attach -nobrowse -mountpoint "$MP" "$IMG" | awk 'NR==1{print $1}')
-            echo "attached $DEV at $MP"
-            ls -la "$MP"
-            if [ "$use_real" = yes ]; then
-              # launchd 的 LC_LOAD_DYLINKER 写死 /usr/lib/dyld。内核 exec 时只是
-              # 把这个路径记进 dlp，真正去 open 它的是 dyld 自己 —— 所以这个文件
-              # 必须真的在卷里，否则连 dyld 都起不来，只会退回 v35 那种 errno 2。
-              sudo mkdir -p "$MP/sbin" "$MP/usr/lib"
-              sudo cp "$ASSETS/launchd" "$MP/sbin/launchd"
-              sudo cp "$ASSETS/dyld" "$MP/usr/lib/dyld"
-              sudo chmod 755 "$MP/sbin/launchd" "$MP/usr/lib/dyld"
-              sudo chown -R 0:0 "$MP/sbin" "$MP/usr/lib"
-              sudo ls -la "$MP/sbin" "$MP/usr/lib"
-            else
-              sudo mkdir -p "$MP/sbin"
-              sudo cp "$RUNNER_TEMP/launchd-stub" "$MP/sbin/launchd"
-              sudo chmod 755 "$MP/sbin/launchd"
-              sudo chown 0:0 "$MP/sbin/launchd"
-              sudo ls -la "$MP/sbin"
-            fi
-            sync
-            hdiutil detach "$MP" || hdiutil detach "$DEV"
-
-            DEV=$(hdiutil attach -nomount -readonly "$IMG" | awk 'NR==1{print $1}')
-            echo "attached $DEV (no mount)"
-            dd if="${DEV/disk/rdisk}" of="$OUT" bs=1m || rm -f "$OUT"
-            hdiutil detach "$DEV" || true
-          fi
-
-          if [ ! -s "$OUT" ]; then
-            echo "fallback: 64 MiB of zeros"
-            dd if=/dev/zero of="$OUT" bs=1m count=64
-          fi
-
-          ls -la "$OUT"
-
-          # hdiutil 会给这个镜像套一层 GPT（"EFI PART" 在 0x200），APFS 容器在它的
-          # 分区里。而 md0 是裸整盘设备：mdevadd() 只建一个 IOMedia，没有分区方案去
-          # 遍历，所以文件系统必须落在偏移 0。做法是把那个 APFS 分区整块切出来 ——
-          # APFS 容器的块 0 就是分区起点，切出来仍然是一个合法的独立容器。
-          python3 - "$OUT" <<'PY'
-          import struct, sys
-          path = sys.argv[1]
-          data = open(path, "rb").read()
-          if data[512:520] != b"EFI PART":
-              print("no GPT header at 0x200: image stays as is (%d bytes)" % len(data))
-              sys.exit(0)
-          entries_lba, count, esize = struct.unpack_from("<QII", data, 512 + 72)
-          base = entries_lba * 512
-          print("GPT: %d entries of %d bytes at lba %d" % (count, esize, entries_lba))
-          for i in range(count):
-              e = data[base + i * esize: base + (i + 1) * esize]
-              if e[0:16] == bytes(16):
-                  continue
-              first, last = struct.unpack_from("<QQ", e, 32)
-              apfs = e[0:16] == bytes.fromhex("ef57347c0000aa11aa1100306543ecac")
-              print("partition %d: %s lba %d..%d (%d bytes, %d MiB)"
-                    % (i, "APFS" if apfs else e[0:16].hex(), first, last,
-                       (last - first + 1) * 512, (last - first + 1) // 2048))
-              if not apfs:
-                  continue
-              out = data[first * 512:(last + 1) * 512]
-              open(path, "wb").write(out)
-              print("stripped the partition map: %d -> %d bytes" % (len(data), len(out)))
-              break
-          else:
-              sys.exit("no APFS partition found in the GPT")
-          PY
-
-          ls -la "$OUT"
-          echo "--- first 96 bytes ---"
-          hexdump -C -n 96 "$OUT" || true
-
-          # APFS 容器超级块：块内偏移 32 处是 'NXSB'（4e 58 53 42）。
-          magic=$(dd if="$OUT" bs=1 skip=32 count=4 2>/dev/null | xxd -p)
-          echo "bytes[32..36] = ${magic:-?}"
-          if [ "$mkfs" = yes ]; then
-            if [ "$magic" != "4e585342" ]; then
-              echo "::error::no NXSB at offset 32 -- the root image is not an APFS container"
-              exit 1
-            fi
-            echo "RESULT: APFS container at offset 0, $(stat -f%z "$OUT") bytes"
-          else
-            echo "RESULT: zeros fallback -- md0 will register, but there is nothing to mount"
-          fi
-
-          # 直接证据：真 launchd / dyld 里的字符串应该能在镜像里搜到
-          # （APFS 默认不压缩普通文件）。
-          hit_launchd=$(LC_ALL=C grep -abo "com.apple.xpc.launchd" "$OUT" | head -1 | cut -d: -f1)
-          hit_dyld=$(LC_ALL=C grep -abo "libSystem.B.dylib" "$OUT" | head -1 | cut -d: -f1)
-          echo "RESULT: launchd marker at ${hit_launchd:-none}, dyld marker at ${hit_dyld:-none}"
-          if [ -z "$hit_launchd" ] || [ -z "$hit_dyld" ]; then
-            echo "::error::the real launchd/dyld did not make it into the root image"
-            exit 1
-          fi
-
-          test -s "$OUT"
-
-      # —— v46：把原版 trust cache 打进 payload（这是文档规定的必需输入）——
-      # docs/zh/guide/boot.md：DarwinBoot 读 kernel.macho / kernel.macho.adt /
-      #   kernel.macho.trustcache，并把 "ADT 和 trust cache 地址写入
-      #   /chosen/memory-map 占位符"。
-      # docs/zh/guide/requirements.md：trust cache 包是负载的输入（--trust-cache FILE）。
-      # docs/zh/devices/sheng.md：sheng 的命令行就是
-      #   ./unixnu build payload --unique-chip-id <hex> --trust-cache <bundle> --data-ramdisk <seed>
-      # 我们前面 40 多个版本从来没给过它，所以 XNU 的 load_static_trust_cache()
-      # 每次都走 "no external trust caches found (segment length is zero)"，
-      # 信任缓存是空的 —— iOS 17 的系统二进制本来就是 ad-hoc 签名 + 靠 trust
-      # cache 授权（CMS 为空是正常的），空缓存下 AMFI 必然拒绝 launchd。
-      #
-      # bundle 格式（UniXNU/scripts/build-original-system-trust.py）：
-      #   <3I: num_caches=2, off0=12, off1=12+len(static)> + static_module + system_module
-      # 两个 module 都是 version-2：头部 24 字节，之后 count × 24 字节。
-      # 数据来自 IPSW 的两个成员：StaticTrustCache / Cryptex1,SystemTrustCache。
-      # hummer 的 board.toml [ipsw] 与 UniXNU-sheng 完全相同（iPad7,1 / 21H461 /
-      # j120ap / 0x8011 / board 12），所以产物应当恰好等于 sheng 已验证的
-      # 7416ca4f… 那个 bundle —— 下面直接断言，不一致就判失败，不让镜像白刷。
-      - name: Build the original trust cache bundle
-        if: env.KERNEL_BUILT == 'yes'
-        working-directory: UniXNU
-        run: |
-          ./unixnu ipsw fetch -D "$GITHUB_WORKSPACE" StaticTrustCache Cryptex1,SystemTrustCache 2>&1 | tail -20
-          python3 - <<'PY'
-          import hashlib, json, os, struct, sys
-          from pathlib import Path
-
-          workspace = Path(os.environ["GITHUB_WORKSPACE"])
-          cache = workspace / "UniXNU/out/ipsw/21H461"
-          comps = {}
-          for rec in sorted(cache.glob("*.json")):
-              d = json.loads(rec.read_text())
-              comps[d.get("component")] = rec.with_suffix("")
-          print("cached components:", sorted(k for k in comps if k))
-          for need in ("StaticTrustCache", "Cryptex1,SystemTrustCache"):
-              if need not in comps:
-                  print("::error::%s was not fetched" % need)
-                  sys.exit(1)
-
-          def der(data, at):
-              tag, size = data[at], data[at + 1]
-              at += 2
-              if size & 128:
-                  count = size & 127
-                  size = int.from_bytes(data[at:at + count], "big")
-                  at += count
-              return tag, data[at:at + size], at + size
-
-          def im4p_payload(blob):
-              tag, seq, end = der(blob, 0)
-              fields, cur = [], 0
-              while cur < len(seq):
-                  kind, body, cur = der(seq, cur)
-                  fields.append((kind, body))
-              if tag != 0x30 or [k for k, _ in fields][:1] != [0x16] or fields[0][1] != b"IM4P":
-                  raise SystemExit("not an IM4P")
-              return fields[3][1]
-
-          def module(component):
-              raw = comps[component].read_bytes()
-              # 直接就是 version-2 module 时不拆 IM4P
-              if len(raw) >= 24 and struct.unpack_from("<I", raw, 0)[0] == 2:
-                  body = raw
-              else:
-                  body = im4p_payload(raw)
-              ver = struct.unpack_from("<I", body, 0)[0]
-              cnt = struct.unpack_from("<I", body, 20)[0]
-              ok = ver == 2 and len(body) == 24 + cnt * 24
-              print("  %-26s raw=%d body=%d version=%d entries=%d %s"
-                    % (component, len(raw), len(body), ver, cnt, "OK" if ok else "BAD"))
-              print("  %-26s sha256 %s" % ("", hashlib.sha256(body).hexdigest()))
-              if not ok:
-                  raise SystemExit("%s is not a complete version-2 trust module" % component)
-              return body
-
-          static = module("StaticTrustCache")
-          system = module("Cryptex1,SystemTrustCache")
-          bundle = struct.pack("<3I", 2, 12, 12 + len(static)) + static + system
-          out = workspace / "trustcache.bundle"
-          out.write_bytes(bundle)
-          digest = hashlib.sha256(bundle).hexdigest()
-          print("bundle %d bytes, sha256 %s" % (len(bundle), digest))
-
-          # sheng board.toml [payload] trust_cache_sha256 的两个值：
-          # 7416ca4f… 是 build-original-system-trust.py 的原始 bundle，
-          # 8900d6a9… 是 owner-signed 变体。我们做的是前者，必须命中。
-          want = "7416ca4f8377146626bb284e2133c76bee6cb4e3ee0af5d648b186235a7323a7"
-          if digest != want:
-              print("::error::bundle sha256 does not match the verified original-static-system bundle")
-              print("::error::expected %s" % want)
-              sys.exit(1)
-          print("bundle matches the bundle UniXNU-sheng ships -- safe to boot")
-          PY
-
-      # payload：把 kernel.macho + ADT 打成 FAT 卷（boot 镜像的 ramdisk）。
-      # 平台种子走 secret，未配则用下面的默认（软件身份种子，非真实机密）。
-      # --data-ramdisk 让它进 Payloads/scratch-data.img，并在 ADT 里生成
-      # /chosen/memory-map/RAMDisk 占位符；DarwinBoot 启动时把文件拷进内核窗口
-      # 并回填 {phys,size}，内核再 mdevadd 成 /dev/md0。
-      # v46：--trust-cache 让 bundle 进 Payloads/kernel.macho.trustcache，并在
-      # ADT 里生成 /chosen/memory-map/TrustCache 占位符，由 DarwinBoot 回填。
-      # v72：Data 卷优先用 assets/data-21H461.dbrdisk（Pagani run 39 的打包种子，
-      # 1 GiB 逻辑 / 1 MB 打包 / 8 daemon 停用）；没有它才退回 ram-root.img 探针。
-      # packed 与 raw 在 ADT 里的占位符不同（PackedRAMDisk vs RAMDisk），所以这里
-      # 按实际选中的种子改写 board.toml 的 packed_data_ramdisk，避免两者错配。
-      # 注意 runner 是 macOS：sed 必须带 '' 空后缀，哈希用 shasum 而不是 sha256sum。
-      - name: Build payload
-        if: env.KERNEL_BUILT == 'yes'
+      - name: Fetch the IPSW and prepare policies
         env:
-          UNIXNU_UNIQUE_CHIP_ID: ${{ secrets.UNIXNU_UNIQUE_CHIP_ID || '0x38d960c942ad2137' }}
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
-          PACKED="$GITHUB_WORKSPACE/assets/data-21H461.dbrdisk"
-          if [ -s "$PACKED" ]; then
-            SEED="$PACKED"; FLAG=true
-          else
-            SEED="$GITHUB_WORKSPACE/ram-root.img"; FLAG=false
-            echo "::warning::assets/data-21H461.dbrdisk missing; falling back to the probe ram-root.img"
+          ./unixnu ipsw fetch AppleLogo KernelCache OS Cryptex1,SystemOS StaticTrustCache Cryptex1,SystemTrustCache 2>&1 | tee out/hummer/logs/actions-ipsw.log
+          ./unixnu tree
+          python3 scripts/audit-stage7-display.py out/ipsw/21H461/kernelcache.decompressed
+          python3 scripts/prepare-ufs-policies.py --tree out/hummer/tree --inputs out/ipsw/21H461 --openssl-prefix "$(brew --prefix openssl@3)" 2>&1 | tee out/hummer/logs/actions-policies.log
+          python3 scripts/prepare-original-trust.py --tree "$UNIXNU_TREE" --inputs out/ipsw/21H461 --output out/hummer/original-static-system.bundle 2>&1 | tee out/hummer/logs/actions-trust.log
+
+      - name: Prepare volatile Data
+        run: |
+          sudo "$(command -v python3)" scripts/prepare-ram-data.py --tree "$UNIXNU_TREE" --source out/ipsw/21H461/044-76040-038.dmg --systemos out/ipsw/21H461/044-76034-038.dmg --output out/hummer/ram-data --config out/hummer/.config 2>&1 | tee out/hummer/logs/actions-ram-data.log
+
+      - name: Build XNU and the FAT payload
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          UNIXNU_UNIQUE_CHIP_ID: ${{ secrets.UNIXNU_UNIQUE_CHIP_ID }}
+        run: |
+          if [ -z "$UNIXNU_UNIQUE_CHIP_ID" ]; then
+            export UNIXNU_UNIQUE_CHIP_ID="$(python3 -c 'import secrets; print(secrets.token_hex(8))')"
           fi
-          sed -i '' "s/^packed_data_ramdisk = .*/packed_data_ramdisk = $FLAG/" "$GITHUB_WORKSPACE/board.toml"
-          echo "== packed_data_ramdisk = $FLAG"; grep -n '^packed_data_ramdisk' "$GITHUB_WORKSPACE/board.toml"
-          echo "== Data seed: $SEED"; ls -la "$SEED"; shasum -a 256 "$SEED" | cut -c1-24
-          ./unixnu build payload -D "$GITHUB_WORKSPACE" --trust-cache "$GITHUB_WORKSPACE/trustcache.bundle" --data-ramdisk "$SEED" 2>&1 | tee "$GITHUB_WORKSPACE/payload.log"
-        working-directory: UniXNU
+          ./unixnu build kernel payload -j 3 --trust-cache out/hummer/original-static-system.bundle --data-ramdisk out/hummer/ram-data/data.dbrdisk 2>&1 | tee out/hummer/logs/actions-build.log
 
       - name: Show build log tail
         if: always()
         run: |
-          LOG="UniXNU/out/hummer/logs/kernel-bootstrap.log"
-          if [ -f "$LOG" ]; then
-            echo "===== 报错上下文（grep error） ====="
-            grep -n -iE "error:|error |Error [0-9]|undefined|No such file|ld: |command not found" "$LOG" | head -40 || true
-            echo ""
-            echo "===== 日志最后 40 行 ====="
-            tail -40 "$LOG"
-          else
-            echo "(no kernel-bootstrap.log)"
-            ls -la UniXNU/out/hummer/logs/ 2>/dev/null || true
-          fi
-
-      # 失败时把日志尾巴写进 job summary：summary 会直接渲染在 run 页面上，
-      # 不用登录、不用下 artifact 就能看到失败原因。
-      - name: Build summary
-        if: always()
-        run: |
-          {
-            echo "## build-kernel: KERNEL_BUILT=${KERNEL_BUILT:-unknown}"
-            echo
-            for f in kernel.log payload.log \
-                     UniXNU/out/hummer/logs/kernel-bootstrap.log \
-                     UniXNU/out/hummer/logs/kernel.log \
-                     UniXNU/out/hummer/logs/prelink.log; do
-              [ -f "$f" ] || { echo "- \`$f\`: 不存在"; continue; }
-              echo "### $f"
-              echo '```'
-              grep -n -iE "error:|error |Error [0-9]|undefined|No such file|ld: |command not found|Traceback|raise |fatal:" "$f" | tail -40 || true
-              echo '--- last 60 lines ---'
-              tail -60 "$f"
-              echo '```'
-            done
-            echo
-            echo "### logs 目录"
-            ls -la UniXNU/out/hummer/logs/ 2>/dev/null || echo "(none)"
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      # 把产物和日志挂到一个滚动 release（tag ci-latest）上：release 资产不需要
-      # token 就能下载，日志和 kernel.macho 都能直接从命令行取。
-      - name: Publish build outputs
-        if: always()
-        continue-on-error: true
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          tar czf ci-logs.tar.gz kernel.log payload.log patcher.log UniXNU/out/hummer/logs 2>/dev/null || true
-          gh release view ci-latest >/dev/null 2>&1 \
-            || gh release create ci-latest --title "ci latest" \
-                 --notes "Rolling build outputs of build-kernel. Overwritten on every run." 
-          FILES=()
-          for f in ci-logs.tar.gz UniXNU/out/hummer/kernel/kernel.macho; do
-            [ -f "$f" ] && FILES+=("$f")
+          for f in out/hummer/logs/*.log; do
+            [ -f "$f" ] || continue
+            echo "===== $f ====="
+            grep -n -iE "error:|error |Traceback|raise |fatal:|undefined|No such file|ld: " "$f" | tail -25 || true
           done
-          if [ -f UniXNU/out/hummer/payload/payload.img ]; then
-            FILES+=("UniXNU/out/hummer/payload/payload.img")
-          fi
-          echo "uploading: ${FILES[*]:-<nothing>}"
-          [ ${#FILES[@]} -gt 0 ] && gh release upload ci-latest "${FILES[@]}" --clobber
+          tail -60 out/hummer/logs/actions-build.log 2>/dev/null || true
 
-      - name: Upload kernel and logs
-        uses: actions/upload-artifact@v4
+      - name: Check artifacts
+        id: check
+        run: |
+          K=out/hummer/kernel/kernel.macho
+          if [ -f "$K" ]; then echo "KERNEL_BUILT=yes" >> "$GITHUB_ENV"; ls -la "$K"; else echo "KERNEL_BUILT=no" >> "$GITHUB_ENV"; fi
+          [ -f out/hummer/payload/payload.img ] && ls -la out/hummer/payload/payload.img || echo "payload.img not produced"
+
+      - name: Upload
         if: always()
+        uses: actions/upload-artifact@v4
         with:
-          name: kernel-logs
+          name: hummer-xnu-${{ github.run_number }}
           path: |
-            kernel.log
-            payload.log
-            UniXNU/out/hummer/kernel/
-            UniXNU/out/hummer/payload/
-            UniXNU/out/hummer/logs/
+            out/hummer/kernel/**
+            out/hummer/payload/**
+            out/hummer/logs/**
+            out/hummer/unixnu.lock
+          if-no-files-found: warn
+          retention-days: 7
 
       - name: Result
         run: |
-          if [ "$KERNEL_BUILT" = "yes" ]; then
-            echo "✅ kernel.macho built and prelinked — download it from the kernel-logs artifact"
-          else
-            echo "❌ kernel did not build — check the uploaded logs"
-            exit 1
-          fi
+          if [ "$KERNEL_BUILT" = "yes" ]; then echo "kernel + payload built"; else echo "kernel did not build"; exit 1; fi

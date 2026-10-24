@@ -1,25 +1,20 @@
-# OnePlus Ace 5 Pro (hummer, SM8750) — UniXNU device repository.
+# OnePlus Ace 5 Pro (hummer, SM8750) — 整仓换成 OnePlus 13T (Pagani) 的移植。
 #
-# 当前状态（2026-10-22）：
-#   [firmware]  真机验证通过 —— UEFI 含 UniXNU 菜单，fastboot boot 成功。
-#   [kernel]    真机验证到 DarwinBoot 交接：内核 Mach-O 被正确装载、boot_args
-#               校验通过、ExitBootServices 成功、跳进内核（顶部绿条）。
-#               已定位屏幕无声的原因：boot_args.Video 给的是帧缓冲物理地址
-#               0xFC000000，而内核从来没映射过它，图形控制台第一次写像素就
-#               data abort。修法见 [kernel] archives 的最后一项。
-#   [ipsw]/[userdata] 的几何已从真机读回（见下面 [userdata] 的注释），
-#               镜像本身还没构建（需要 hdiutil，走 macOS CI）；
-#               [payload]/[payload.adt] 已能产出可启动的 FAT 卷。
+# 同 SM8750、同一份目标 IPSW（iPad7,1 17.7.11 21H461），所以引擎、补丁、构建
+# 流水线全部采用 13T 的（upstream.rev = d9460ebb + patches/ + 13T 构建脚本）。
+# 只保留 hummer 自己的设备相关部分：
+#   - [firmware] hummerPkg：本机 UEFI 已真机验证，13T 的固件在 Ace 5 Pro 上起不来
+#   - [userdata] 本机 GPT 几何
+#   - ADT：make-hummer-adt.py（由 13T 的生成器改出，单 cpu0 + GICv3，cpus=1）
+#   - 触屏：hummer 的 Synaptics S3910（13T 是 Novatek，对本机面板无效）
+# 首轮触屏默认关闭（hummer-touch=0），先验证 13T 流水线能编出并启动到 Hello。
 
 [board]
 name = "hummer"
 soc = "SM8750"
-description = "OnePlus Ace 5 Pro"
-kit = "hummer"                     # package/ 出现在构建树的 kits/hummer
+description = "OnePlus Ace 5 Pro (SM8750) - full port from OnePlus 13T"
+kit = "hummer"
 
-# 目标 OS 镜像：与 UniXNU-sheng 相同的原版 iPadOS 恢复镜像（未改动的 iPad7,1 17.7.11）。
-# 只用 range request 取需要的成员（KernelCache/DeviceTree/TrustCache），不整体下载。
-# 用同一份 IPSW，所以 sheng 那套已验证的 prelink 参数（sha256/slide/地址）对本机有效。
 [ipsw]
 url = "https://updates.cdn-apple.com/2025SpringFCS/fullrestores/122-77166/DCA6CFE8-90E9-4B92-880D-3DE171798E40/iPad_Pro_HFR_17.7.11_21H461_Restore.ipsw"
 product = "iPad7,1"
@@ -28,156 +23,42 @@ build = "21H461"
 device_class = "j120ap"
 chip_id = 0x8011
 board_id = 12
-fetch = ["KernelCache", "DeviceTree", "StaticTrustCache", "Cryptex1,SystemTrustCache"]
+fetch = ["AppleLogo", "KernelCache", "DeviceTree", "StaticTrustCache", "Cryptex1,SystemTrustCache"]
 
 [ipsw.sha256]
 "044-76040-038.dmg" = "3f99b859c9728379110b66657c7b15285bcb1925ad8b5726542e2cdcf8b1028d"
 "044-76034-038.dmg" = "b4908cde41d23e6bc05e6af51a2c9eeb00cf0f863a6a18b1600c96a3fd70414f"
 
-# userdata 分区的原始镜像（OS + SystemOS 盘映像）。
-#
-# 下面三个数字是 2026-10-22 从真机读回来的，来源是 native-ufs-probe=10 的
-# findRootLayout()：它把 LBA 1 的 GPT 头读出来、校验了头 CRC 和条目数组 CRC，
-# 再按名字精确匹配 "userdata"。所以这不是猜的，是设备自己的 GPT 说的：
-#
-#   userdata first=3a1421 last=3ad07fa      (4096 字节扇区)
-#
-# v54（双系统）：userdata 段改为双系统切出来的 unixnu 分区，不再指向 ColorOS 的
-# userdata。按 docs/zh/porting/dual-system-partition 用 scripts/dual_sys/partition.py
-# 从 userdata 尾部切出 32 GiB：
-#   起始 0x32d8f00 * 4096 = 55,997,235,200 字节
-#   容量 (0x3ad8eff - 0x32d8f00 + 1) * 4096 = 34,359,738,368 字节 = 32.00 GiB
-# 设备节点 /dev/block/by-name/unixnu；ColorOS 的 userdata（0x3a1421..0x3ad07fa）
-# 保留原名、原大小（188.87 GiB），两边互不覆盖。
-#
-# 镜像大小上限 32.00 GiB，OS + SystemOS 两个窗口按 1 MiB 对齐后必须塞得进去
-# （当前 IPSW 产出 9,382,658,048 字节 ≈ 8.74 GiB，余量充足）。
 [userdata]
-first_lba = 0x32d8f00
-last_lba = 0x3ad8eff
+first_lba = 0x3a1421
+last_lba = 0x3ad07fa
 lba_bytes = 4096
 windows = [
   { name = "OS", component = "OS" },
   { name = "SystemOS", component = "Cryptex1,SystemOS" },
 ]
 
+# 13T 的归档构建器（引擎脚本 + 13T 的设备脚本），末尾加 hummer 触屏。
 [kernel]
 defconfig = "hummer_defconfig"
-# 内核步骤的归档构建器，按序执行。试水阶段用最小可编译集：
-# corecrypto + pthread + ArmDTPlatform(读 ADT，通用平台专家) + ArmCpu(SMP)。
-# 不含 I/O/GPU/显示驱动（那些需要 hummer 的 package/ kit，尚未适配）。
-# 注意：所有构建器都在 macOS 上跑（kernel.py 硬性要求 xcodebuild + iphoneos SDK）。
-# build-arm-driver.py 从 UniXNU-sheng 原样拷贝（其 sheng 硬编码只在 NativeAdreno/GPU
-# 分支，对 ArmDTPlatform/ArmCpu 通用）。
 archives = [
   "build-corecrypto-14.py",
   "build-corecrypto-14.py --namespace",
-  "build-arm-driver.py ArmDTPlatform",
-  # v49：必须在 build-arm-driver.py ArmCpu 之前跑 —— 它补丁 drivers/ArmCpu/ArmCpu.cpp
-  # （子模块工作树文件，可写），而 build-arm-driver.py 每次无条件重编 ArmCpu。
-  # 内容：拒绝 Aff2 prime 核的 boot 伪装（ml_get_cpu_number 掩码 bug）+ SMP 探针标记。
-  "build-hummer-armcpu-probe.py",
-  "build-arm-driver.py ArmCpu",
   "build-libpthread-kernel.py",
-  "build-native-probe-stubs.py",
-  # AMFI "No PMGR?" 修复：从 prelinked 的 com.apple.driver.ApplePMGR 造出真的
-  # ApplePMGRNub 并在 bsd_init 后段发布（上游 sheng-platform-power.patch 的
-  # 钩子，CONFIG_XNU_SHENG_PMGR=y 激活）。归档产到 baseline.sh 约定的
-  # build/sheng-platform-power/libShengPlatformPower.a，由它 force_load 进内核。
-  # 放在源码修改器之前：它不改源码，只编译 package/HummerPlatformPower.cpp。
-  "build-hummer-platform-power.py",
-  # v25：Stage 6 存储路径。audit-storage-interface.py 生成 build/storage-abi
-  # 头目录（IOKit/storage 的 IOMedia/IOBlockStorageDevice ABI 头，从
-  # refer/IOStorageFamily@e45fbe30 拷贝；refer/ 由 CI workflow 预先 clone）。
-  # NativeUfs 编出 build/native-ufs/libNativeUfs.a，baseline.sh 在
-  # XNU_NATIVE_UFS=1 时 force_load 进内核（KernelConfigTables 的
-  # NativeUfsRoot personality 也随之编入）。
-  # build-storage-abi-hummer.py 是我们的包装器： nothing upstream clones
-  # refer/IOStorageFamily, and the board tree only exists while `unixnu build
-  # kernel` runs (not after `defconfig`), so the ABI headers are staged from
-  # inside an archive builder; it then runs上游 audit-storage-interface.py。
-  "build-storage-abi-hummer.py",
-  "build-arm-driver.py NativeUfs",
-  # v25：probe 阶段的链接桩。NativeUfs.cpp 是单文件，里面还带
-  # NativeUfsBlock : IOBlockStorageDevice —— 该类只存在于 prelinked 的
-  # com.apple.iokit.IOStorageFamily kext 里（XNU 10063 根本没有 iokit/storage
-  # 目录），另有 VerifiedRoot 与可选 boot_progress_poll 的引用。probe=2 从不
-  # 构造块设备，引用是死代码，但 `vtable for NativeUfsBlock` 会把基类的每一个
-  # 未覆盖虚函数都拉进来，静态链接必须全部有定义。
-  # 必须排在 NativeUfs 之后：它读 build/native-ufs/NativeUfs.o 的真实未定义
-  # 符号表，据此自动生成 thunk（不在脚本里硬编码签名，也就不会随 storage-abi
-  # 头漂移）。归档由 defconfig 的 XNU_EXTRA_LD_ARCHIVES force_load。
-  "build-hummer-storage-stubs.py",
-  # v68：Adreno 830 (a8xx) 寄存器活性探针。复用引擎现成的钩子：
-  # offline-component-load-probes.patch 在 bsd_init 的 vfsinit 之后调
-  # native_adreno_firmware_probe()（CONFIG_XNU_ADRENO_FIRMWARE_PROBE=y 激活，
-  # CFLAGS -DXNU_ADRENO_FIRMWARE_PROBE=1），baseline.sh 在非 bootstrap pass
-  # force_load build/adreno-firmware-probe/libAdrenoFirmwareProbe.a ——
-  # 本脚本只负责按引擎约定的路径产出该归档，内核源码零改动。
-  # boot arg hummer-adreno-probe=1 才真正跑（跑完必然 panic 留值）。
-  "build-hummer-adreno-probe.py",
-  # v69：Stage 7 显示栈（移植自 OnePlus 13T / Pagani，同 SM8750、同 21H461
-  # kernelcache）。从 kernelcache 逆 IOMobileFramebufferLegacy 的 358 槽虚表
-  # ABI，编译 NativeLegacyDisplay + Stage7Probe + NativeKeyStoreEvents，产出
-  # 引擎约定的 build/native-legacy-display/libNativeLegacyDisplay.late.a
-  # （CONFIG_XNU_NATIVE_LEGACY_DISPLAY=y 时由 baseline force_load）。
-  # 依赖：workflow 先跑 `./unixnu ipsw KernelCache` 解出 kernelcache
-  # （out/ipsw/21H461/kernelcache.decompressed；树内相对路径 ../../ipsw/...）。
+  "build-arm-platform.py",
+  "build-native-aes.py",
+  "build-native-ufs.py --root-windows",
+  "build-ufs-storage-bindings.py --kernelcache ../../ipsw/21H461/kernelcache.decompressed",
+  "build-native-ufs.py --component NativeVirtioBlock --root-windows",
+  "build-native-ufs.py --component NativeRamBlock --root-windows",
+  "build-sheng-platform-power.py --kernelcache ../../ipsw/21H461/kernelcache.decompressed",
+  "build-verified-root-probe.py --component os --include-systemos",
   "build-stage7-display.py --kernelcache ../../ipsw/21H461/kernelcache.decompressed",
-  # v74：触屏（Synaptics S3910 @ GENI SPI4，移植自 Linux 驱动；13T 用的是
-  # Novatek，对本机硬件无效，所以这一项只能由 hummer 自己提供）。
-  # 回放两条 XNU 编译记录（iokit C++ 记录编 HummerTouchProbe.cpp、
-  # osfmk startup C 记录编 drivers/NativeGeniSpi/GeniSpi.c），产出
-  # build/hummer-touch/libHummerTouch.a，由 defconfig force_load。
-  # 触发点在 package/HummerPlatformPower.cpp 的 sheng_pmgr_run() 出口（弱引用），
-  # 默认不跑（hummer-touch=0）；分级：=3 识别芯片、=4 上报触摸。
+  # hummer 触屏（S3910 @ GENI SPI4）；触发点在 scripts/pmgr/ShengPlatformPower.cpp
+  # 的 sheng_pmgr_run() 末尾（弱引用）。默认不跑（hummer-touch=0）。
   "build-hummer-touch.py",
-  # 注意：所有构建器都在 macOS 上跑（kernel.py 硬性要求 xcodebuild + iphoneos SDK）。
-  #
-  # 已下线 build-hummer-video-map.py：它在 PE_create_console() 前面调
-  # pmap_map_bd_with_options 把帧缓冲映射到高窗再写像素。v13~v16 真机全无反应，
-  # 后来证明那段代码根本没被执行到（内核死得更早），而它一旦被执行到就是往
-  # 帧缓冲物理地址直接写、随时可能 data abort —— 留着是个地雷。
-  # 帧缓冲改由下面的 build-hummer-console-probe.py 用块映射接管。
-  #
-  # 不能把改源码的构建器放前面：它们删掉的 .o 还在 link.filelist 里，后面的
-  # archive 步骤会用 `xcrun nm` 扫整份 osfmk 目标文件列表，碰到不存在的文件
-  # 直接报 “No such file or directory” 并中断整个构建。
-  # MMU 打开之前的两段路用像素当信号（那时 MMU 关着，直接写帧缓冲物理地址）：
-  #   洋红横带 y=64..96      start_first_cpu 入口
-  #   青色横带 y=1200..1232  common_start 开头（bootstrap 页表已建完）
-  # 真机上这两条带出现过，证明入口和 common_start 都没问题。
-  "build-hummer-entry-probe.py",
-  # 最后一项：给内核装一个真正的屏幕控制台（参考 xyyyds0106/ios-vermeer-lab
-  # 的 0010 / 0012 / 0003 三个补丁）。v18 已经证明 arm_vm_init 返回、v19 证明
-  # 死点在它返回之后、PE_create_console 之前，用「时间」当信号一次只能问一个
-  # 比特；这个构建器改成把面板映射进 arm_vm_init 换表后仍然有效的内核页表，
-  # 然后直接从 C 里往面板画字，于是：
-  #   1. arm_vm_init 里 10（换表完成、面板已映射）、11/12（pmap_bootstrap 前后）
-  #      各打一行；
-  #   2. arm_init 里 13..19 各打一行（含 PE_consistent_debug_inherit、
-  #      serial_init、kprintf、PE_create_console、PE_init_printf 前后）；
-  #   3. pe_serial.c 把同一套渲染器注册成串口设备，kprintf 的输出也落到屏幕上。
-  # 真机上只要看到 "HUM 10: kernel tables live, panel mapped" 就说明控制台活了；
-  # 哪一行是最后一行，死点就在那一行和下一行之间。
-  "build-hummer-console-probe.py",
-  # v51：把内核自己的 bootstrap 检查点打到面板（kboot）。zzz-boot-progress.patch
-  # 在 startup.c/bsd_init.c/kern_exec.c 里插的 boot_progress_stage 调用在
-  # XNU_BOOT_PROGRESS=0 时是空宏（boot_progress.h），所以 step7 之后面板静默。
-  # 完整诊断页需要 baseline 的 OWNER_ROOT_AUDIT/NATIVE_VIRTIO_BLOCK 前置和
-  # 上游未公开的 build-boot-progress.py 实现——暂不引入。本脚本照 zzz 补丁的
-  # 锚点给每个检查点配一行 hummer_early_prints("kboot", ...)，零新 CONFIG。
-  "build-hummer-kboot-probe.py",
-  # v68：GENI 调试串口（DTB serial0 = qup_uart@a9c000，115200n8）。
-  # pe_serial.c 的 gPESF 多路复用会把 kprintf 同时写给面板和 UART，
-  # 不需要动 PE_init_kprintf。boot arg hummer-uart=1 才注册。
-  "build-hummer-serial-uart.py",
 ]
 
-# prelink：把 4K 页 XNU 内核 prelink 进原版 kernelcache。
-# 下面这组值是 sheng 针对「iPad7,1 17.7.11 21H461」这份 kernelcache 实测钉死的；
-# 因为本机用同一份 IPSW，它们对 hummer 同样有效（early_security_init 的地址是
-# 原版 kernelcache 里 AppleMobileFileIntegrity 的位置，换 kernelcache 必须重测）。
 [kernel.prelink]
 tool = "kits/NativePrelink/emit_prelink.py"
 kernel = "build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/mach.development.bcm2837.unstripped.noctf"
@@ -185,240 +66,61 @@ kernelcache_sha256 = "f18b4df865405f2a287b84977d7aca745e056d656d9fc9df1662970ce2
 slide = "-0x1000000"
 early_security_init = "com.apple.driver.AppleMobileFileIntegrity=0xfffffff005ab4ae0"
 roots = [
+  "com.apple.iokit.IOStorageFamily", "com.apple.filesystems.apfs",
+  "com.apple.driver.AppleMobileFileIntegrity", "com.apple.kext.CoreTrust",
+  "com.apple.security.sandbox", "com.apple.driver.ApplePMGR",
   "com.apple.AppleFSCompression.AppleFSCompressionTypeZlib",
-  "com.apple.driver.AppleARMPlatform",
-  "com.apple.driver.AppleARMWatchdogTimer",
-  "com.apple.driver.AppleAudioClockLibs",
-  "com.apple.driver.AppleEffaceableStorage",
-  "com.apple.driver.AppleIISController",
-  "com.apple.driver.AppleM2ScalerCSCDriver",
-  "com.apple.driver.AppleMobileFileIntegrity",
-  "com.apple.driver.ApplePMGR",
-  "com.apple.driver.IODARTFamily",
-  "com.apple.filesystems.apfs",
-  "com.apple.iokit.CoreAnalyticsFamily",
-  "com.apple.iokit.IOAVFamily",
-  "com.apple.iokit.IOAudio2Family",
-  "com.apple.iokit.IOCECFamily",
-  "com.apple.iokit.IOCryptoAcceleratorFamily",
-  "com.apple.iokit.IOGPUFamily",
-  "com.apple.iokit.IOHDCPFamily",
-  "com.apple.iokit.IOMobileGraphicsFamily",
-  "com.apple.iokit.IOReportFamily",
-  "com.apple.iokit.IOSlowAdaptiveClockingFamily",
-  "com.apple.iokit.IOStorageFamily",
-  "com.apple.iokit.IOSurface",
-  "com.apple.kec.Libm",
-  "com.apple.kec.corecrypto",
-  "com.apple.kext.AppleMatch",
-  "com.apple.kext.CoreTrust",
-  "com.apple.security.AppleImage4",
-  "com.apple.security.sandbox",
-  "com.apple.iokit.IOHIDFamily",
-  "com.apple.iokit.IOHIDEventDriver",
+  "com.apple.iokit.IOSurface", "com.apple.iokit.IOMobileGraphicsFamily",
+  "com.apple.iokit.IOHIDFamily", "com.apple.iokit.IOHIDEventDriver",
 ]
 
+[payload]
+volume = "UNIXNUHUMMER"
+size_mib = 160
+loader = "firmware"
+title = "OnePlus Ace 5 Pro Stage 7"
+dram_size = "0x100000000"
+timeout = 10
+kernel_args = [
+  "-v", "serial=0", "debug=0x14e", "cpus=1", "kt_fixed_zones=240",
+  "native-ufs-root=1", "native-ufs-diagnostics=1", "sheng-pmgr=2",
+  "offline-apfs-load=1", "startup_debug=0", "-no_corpses",
+  "sheng-vsync=60", "sheng-vsync-fixed=1", "offline-mobile-graphics-load=1",
+  "offline-legacy-register=1", "offline-legacy-phase=4", "offline-legacy-gop=1",
+  "offline-legacy-pm=1", "offline-legacy-validate=1", "offline-legacy-transfer=1",
+  "offline-legacy-cpu-present=1", "offline-key-events=1", "sheng-aks=1",
+  # hummer 触屏：先关闭，过了 Hello 再改 =3（识别芯片）→ =4（上报触摸）
+  "hummer-touch=0", "hummer-touch-panic=0",
+]
+trust_cache_sha256 = ["7416ca4f8377146626bb284e2133c76bee6cb4e3ee0af5d648b186235a7323a7"]
+
+[payload.adt]
+ipad_identity = true
+unique_chip_id = "required"
+chip_id = "0x8011"
+packed_data_ramdisk = true
+tool = "scripts/make-hummer-adt.py"
+owned_memory_size = "0x100000000"
+cpu_regs = "0"
+
+# 本机 UEFI 固件（hummerPkg）：保留，不换 13T 的 oneplus13tPkg。
 [firmware]
-config = "hummer"                 # Resources/Configs/hummer.toml in the Mu-Silicium checkout (--uefi)
+config = "hummer"
 dsc = "Platforms/OnePlus/hummerPkg/hummer.dsc"
 fd = "Build/hummerPkg/{target}_CLANGPDB/FV/SILICIUM_UEFI.fd"
-# hummer 的依赖源码树是普通目录（非 git 子模块），无需 submodules 初始化。
-# GIC 处理：hummer 构建用 UniXNU 的 mu_basecore feed（原版），需要 fix_gic_feed.sh
-# 给 feed 打 spurious-mask 补丁（AnyLaySys 的 hummer 补丁语义）。
 packages = [
-  "{uefi}",
-  "{uefi}/Platforms/OnePlus",
-  "{tree}/package",
-  "{tree}/drivers/DarwinBoot",
-  "{edk2}",
-  "{uefi}/Common/Mu",
-  "{uefi}/Common/Mu_OEM_Sample",
-  "{uefi}/Silicon/Qualcomm",
-  "{uefi}/Silicon/Silicium",
-  "{uefi}/Silicium-ACPI",
-  "{uefi}/Silicium-ACPI/Platforms/OnePlus",
-  "{uefi}/Silicium-ACPI/Silicon/Qualcomm",
+  "{uefi}", "{uefi}/Platforms/OnePlus", "{tree}/package",
+  "{tree}/drivers/DarwinBoot", "{edk2}", "{uefi}/Common/Mu",
+  "{uefi}/Common/Mu_OEM_Sample", "{uefi}/Silicon/Qualcomm",
+  "{uefi}/Silicon/Silicium", "{uefi}/Silicium-ACPI",
+  "{uefi}/Silicium-ACPI/Platforms/OnePlus", "{uefi}/Silicium-ACPI/Silicon/Qualcomm",
 ]
 
 [firmware.defines]
 ENABLE_SECUREBOOT = "0"
 MEMORY_PROTECTION = "TRUE"
 SHIP_MODE = "FALSE"
-BUILDID_STRING = "hummer-research"
+BUILDID_STRING = "hummer-13t-port"
 
-# boot 镜像的 ramdisk：FAT 卷，含 UniXNU 配置、内核、ADT 设备树，
-# 以及（v46 起）原版 trust cache 包。
-# loader(DarwinBoot) 已在固件卷内，所以 loader = "firmware"。
-[payload]
-volume = "HUMMERESP"
-size_mib = 192
-loader = "firmware"
-title = "hummer first boot: source 4K XNU to console"
-dram_size = "0x400000000"          # 16 GiB
-timeout = 3
-# v46：接受的 trust cache 包（docs/zh/guide/requirements.md: 负载的输入）。
-# 本机 [ipsw] 与 UniXNU-sheng 完全相同（iPad7,1 / 17.7.11 / 21H461 / j120ap /
-# chip 0x8011 / board 12），所以由那两个原版组件拼出的 bundle 与 sheng 已验证的
-# 原始 bundle 逐字节一致；这里钉死它的 sha256，打包时校验（其它包请走
-# --owner-trust-cache）。
-trust_cache_sha256 = [
-  "7416ca4f8377146626bb284e2133c76bee6cb4e3ee0af5d648b186235a7323a7",
-]
-# panic_screen 需要 scripts/patch-xnu-entry-probe.py，该脚本在 UniXNU 树里不存在
-# （git ls-files 查不到，GitHub main/master 也是 404），所以保持关闭。
-panic_screen = false
-# 首启最小 boot args。（v63 之前这里写着"绝不能加 native-ufs-root=1"：那时内核
-# 没有 _sheng_pmgr_run，payload 的 check_native_root 会拒绝打包。现在
-# CONFIG_XNU_SHENG_PMGR=y 且 libShengPlatformPower.a 提供了该符号，v63 起按
-# sheng 参考的做法带上 native-ufs-root=1 + sheng-pmgr=2，详见下面的参数注释。）
-#
-# serial=0：osfmk/arm/arm_init.c 里 serial=3 等于 SERIALMODE_INPUT|OUTPUT，
-#   紧接着 `if ((serialmode & SERIALMODE_OUTPUT) && serial_exists)
-#   switch_to_serial_console();` —— 只要 serial_init() 摸到一个 UART，
-#   内核就从视频控制台切走，屏幕上彻底没有输出。首启必须 0。
-# cpus=1：只拉起 MPIDR 0 的启动核，避免 GIC/定时器没配好时次要核把启动线程搅死
-#   （ADT 里 cpu0 是 running、cpu1.. 是 waiting，两者要一致）。
-#
-# —— v33：把根放进运存（rd=md0）——
-# 用户不能动 userdata（ColorOS 的数据要留着），所以根不能再指望磁盘。XNU 自带的
-# 内存盘路径正好够用，三段都是现成的：
-#   1. payload 的 initrd 文件（DarwinBoot 拷进内核窗口）；
-#   2. ADT 的 /chosen/memory-map/RAMDisk 占位符（DarwinBoot 填 {phys,size}）；
-#   3. IOKitBSDInit.cpp 看到 RAMDisk 就 mdevadd() 出 /dev/md0，然后 rd=md0 就选它当根。
-# 全链路只读，不写任何分区。
-#
-# 容量上限（决定了"全量根进不来"）：
-#   - DarwinBoot 的连续窗口由 [payload.adt] owned_memory_size = 0x40000000（1 GiB）钉住；
-#     再大要改用 ARM_LARGE_MEMORY 编译（bootstrap 页表现在只有 8 页，见下面的注释）；
-#   - payload 卷 192 MiB，ramdisk 得先装进这个 FAT 卷；
-#   - ABL 要整块把 boot.img 装进 RAM，现在是 12 MB 量级。
-# 所以运存里能放的是"小根"（这里先放 64 MiB 的 APFS 卷），不是 7.88 GiB 的 iPadOS 全量根。
-kernel_args = [
-  "-v",
-  "serial=0",
-  "debug=0x14e",
-  # v53：代码签名调试输出（docs/zh/xnu/boot-arguments.md「代码签名细节」；
-  # kern_cs.c:182 PE_parse_boot_argn("cs_debug")，mach_loader.c 2207/2215 与
-  # ubc_subr.c 在 blob 建立时按 cs_debug>1/>3 打印 cdhash 等信息）。
-  "cs_debug=9",
-  "cpus=6",
-  # ---- v49：SMP 开关，两项都来自文档与 sheng 参考（不是猜的） ----
-  #
-  # docs/zh/xnu/boot-arguments.md：
-  #   sheng-smp=1       启动 secondary CPU
-  #   armcpu-spi-ipi=1  使用 SPI 路径发送核间中断
-  # sheng 的 board.toml 里两项都有；hummer 此前一项都没有，于是
-  # ArmCpu::probe() 把所有 secondary nub 拒掉（"Secondary startup is
-  # opt-in (sheng-smp=1)"，ArmCpu.cpp:184-192）。armcpu-spi-ipi=1 是因为
-  # ArmCpu.cpp:35 的注释明说 ICC_SGI1R_EL1 在 Qualcomm 板上"generates
-  # nothing"（sheng=SM8550 实测），hummer 同为 Qualcomm（SM8750）。
-  "sheng-smp=1",
-  "armcpu-spi-ipi=1",
-  # ---- 签名这一关：什么都不加，靠 trust cache 正经过 ----
-  #
-  # v46 起 payload 里终于带了原版 trust cache（StaticTrustCache +
-  # Cryptex1,SystemTrustCache，sha256 7416ca4f…，见上面的
-  # trust_cache_sha256）。iOS 17 的系统二进制本来就是 ad-hoc 签名 + 空 CMS，
-  # 由 trust cache 授权，所以不需要再关任何检查。
-  #
-  # 绝对不要加 amfi_get_out_of_my_way=1（v46c1 实测）：
-  #   原版 AMFI kext 的 _initializeAppleMobileFileIntegrity() 会因此走到
-  #       panic("can't has cs_enforcement_disable" @AppleMobileFileIntegrity.cpp:5261)
-  #   证据：只把它去掉（其余参数不动），同内核同 payload 立刻不再 panic，转而
-  #   死在 ArmCpu.cpp:405 的 CPU 注册上 —— 说明 panic 确实由这个开关触发。
-  #
-  # 绝对不要加 cs_enforcement_disable（v37 就是被它炸的）：同一个 panic，
-  # 那条路的判据是 PE_i_can_has_debugger()，而本机它恒为假
-  # （参考实现的日志里同样写着 "debug boot arg not present"）。
-  #
-  # v50: cpus=6 —— 与 ADT 的 6 个 cpu 节点一致（照 sheng 参考：SM8550 8 核
-  # 但 ADT 只列 6 个能启动的核，多余核留 off；且 sheng 根本不传 cpus=，
-  # 核数全由 ADT 决定）。v49 实测：ADT 8 核 + ArmCpu 拒掉 2 个 Aff2 prime
-  # nub 后，AppleS8000CPU panic "CPU configuration in device tree is
-  # invalid"（DT 8 核 vs 实际 6 核不匹配）。
-  # cpus 不能改成 1（v21/v46c1a 实测）：
-  #   ml_processor_register() 的配额等于 num_cpus，启动核会被注册两次，所以
-  #   cpus=1 时第二次必然返回 KERN_FAILURE(5)，然后
-  #       panic: ArmCpu: CPU 0 registration failed: 5 @ArmCpu.cpp:405
-  #
-  # ---- v54：Stage 6 存储栈（docs/zh/porting/bring-up.md「阶段 6：存储与根卷」）----
-  #
-  # 双系统布局下根镜像在 unixnu 分区（不是 ColorOS 的 userdata），所以给
-  # NativeUfs 加的分区名开关必须传：native-ufs-partition=unixnu（本仓库
-  # scripts/build-arm-driver.py 的 v54 改写，默认仍是 "userdata"）。
-  #
-  # v63：真根模式。v59~v62 的探针已经把整条链路验完（UFS 起控 → GPT →
-  # SHNGROOT → 两个窗口发布 → IOStorageFamily 接上 driver=1 → APFS 容器读通），
-  # 所以这里去掉 rd=md0，改由驱动自己发布根卷、内核按 root-matching 的 UUID 挂载。
-  #
-  # native-ufs-root=1 会触发 UniXNU 的打包校验（scripts/unixnu/payload.py
-  # check_native_root）：必须同时传 sheng-pmgr=2，且内核里要有 _sheng_pmgr_run
-  # ——否则原始 AMFI 会以 "No PMGR" panic。本仓库 CONFIG_XNU_SHENG_PMGR=y，
-  # libShengPlatformPower.a 提供该符号，两项都满足（sheng 参考 board.toml 同款）。
-  "native-ufs-partition=unixnu",
-  "native-ufs-root=1",
-  "sheng-pmgr=2",
-  # ---- v69：Stage 7 显示与用户态（Pagani run 39 同款；CPU 呈现不过 GPU）----
-  # offline-mobile-graphics-load=1：bsd_init 的 vfsinit 后加载
-  #   IOMobileGraphicsFamily（offline-component-load-probes.patch 的钩子）。
-  # offline-legacy-register=1 + phase/gop/pm/validate/transfer/cpu-present：
-  #   NativeLegacyDisplay 的各阶段开关（默认 register 才建显示实例）。
-  # sheng-vsync=60：GOP scanout 没有 vblank 中断，用 work-loop 定时器以真实
-  #   时钟驱动 60Hz 软件刷新通知（原版 setDisplayRefreshProperties 发布）。
-  "offline-apfs-load=1",
-  "offline-mobile-graphics-load=1",
-  "offline-legacy-register=1",
-  "offline-legacy-phase=4",
-  "offline-legacy-gop=1",
-  "offline-legacy-pm=1",
-  "offline-legacy-validate=1",
-  "offline-legacy-transfer=1",
-  "offline-legacy-cpu-present=1",
-  "sheng-vsync=60",
-  "sheng-vsync-fixed=1",
-  # kt_fixed_zones=240 / startup_debug=0 / -no_corpses：Pagani run 39 记录里
-  #   进入系统界面的组合（zalloc 槽位预算、崩溃时不收集 corpse 占资源）。
-  # sheng-aks=1 + offline-key-events=1：临时 AppleKeyStore 状态服务
-  #   （package/NativeKeyStoreEvents.cpp），不提供真实密钥。
-  "kt_fixed_zones=240",
-  "startup_debug=0",
-  "-no_corpses",
-  "sheng-aks=1",
-  "offline-key-events=1",
-  # v74 触屏：先关闭，稳住 v73 的启动；下一步改 hummer-touch=3 + panic=3
-  # 用 panic 屏读 S3910 的 IDENTIFY 寄存器，通过后改 =4（上报触摸）。
-  "hummer-touch=0",
-  "hummer-touch-panic=0",
-]
-
-[payload.adt]
-tool = "scripts/make-hummer-adt.py"
-chip_id = "207"                    # 软件身份种子（非 Apple silicon ID），沿用 sheng 约定
-owned_memory_size = "0x40000000"   # DarwinBoot 连续窗口 256MiB..8GiB，2MiB 对齐。
-# 上限由 XNU 的 bootstrap 页表决定，不是由 DTB 或面板决定：
-# BOOTSTRAP_TABLE_SIZE 在 iOS 构建下是 8 页（makedefs/MakeInc.def 对非 MacOSX
-# 平台传 -UARM_LARGE_MEMORY），而 create_bootstrap_mapping 每 1 GiB 就要一页 L2，
-# V=P 和 KVA 各一套，再加两个 L1。原来的 0x130000000 (4.75GiB) 需要 12 页，
-# 写穿 8 页数组，溢出落在 bootstrap_pagetables 之后的数据上，内核在
-# start.s 里就死了 —— 表现就是入口探针画出来、arm_init 的标记一个没有。
-# 1 GiB 只需 6 页，留 2 页余量。要更大窗口必须改用 ARM_LARGE_MEMORY 构建。
-# v50: 只列 6 个 AFF1|AFF0 值域内的核（照 sheng 参考 board.toml:223 同款做法：
-# 多余核留 off；sheng 生成器拒绝 reg>0xffff，本生成器同样收回 0xffff 上限）。
-# 两个 Oryon prime 在 Affinity2（0x10000/0x10100），上游 ml_get_cpu_number()
-# 掩码 AFF1|AFF0 会把它们塌到 logical 0；v49 实测 ADT 8 核 + probe 拒掉 2 个后
-# AppleS8000CPU panic "CPU configuration in device tree is invalid"（DT 8 vs 6）。
-# 注意 [payload.adt] 的 cpu_regs 会显式传 --cpu-regs 覆盖生成器默认值（v50 教训）。
-cpu_regs = "0,0x100,0x200,0x300,0x400,0x500"   # 6 性能核；2 Oryon 大核留 off
-psci_method = "smc"
-packed_data_ramdisk = false
-ipad_identity = false              # 首启不声明 Apple 身份
-unique_chip_id = "required"        # 平台种子不入仓库：--unique-chip-id / UNIXNU_UNIQUE_CHIP_ID
-# v63：根卷匹配。取值是 OS 窗口内 APFS 卷的 UUID —— 分区方案发布的是 APFS
-# 卷介质，XNU 按这个 UUID 选根设备（docs/zh/concepts/userdata.md「根卷匹配」）。
-# 来源：直接在刷好的镜像里读出来的，不是猜的 ——
-#   OS 窗口 0x100000 → 窗口内 GPT 首项 LBA 34 → APFS 容器 0x104400
-#   → 容器内 oid 0x402 的 APSB 卷超级块 → 0xf0 处的 vol_uuid。
-# 这与 sheng 参考配置里的值完全一致（两边用同一份 21H461 IPSW），互为佐证。
-# 交叉记录（不是这里要填的值）：APFS 容器 UUID 50f8a67f-afc1-4a1b-bcbb-82162674c67f；
-# 窗口内 GPT 分区 GUID 9232A33A-5F8A-4A09-9A43-E7D8BCFCF4BC。
-root_match_volume_uuid = "04769D26-2CA0-4825-B443-E2E5F88300F2"
+[bootimg]
+embed_payload = true
