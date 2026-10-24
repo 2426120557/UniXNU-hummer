@@ -91,7 +91,7 @@ dram_size = "0x100000000"
 timeout = 10
 kernel_args = [
   "-v", "serial=0", "debug=0x14e", "cpus=1", "kt_fixed_zones=240",
-  "native-ufs-root=1", "native-ufs-diagnostics=1", "sheng-pmgr=2",
+  "native-ufs-root=1", "native-ufs-partition=unixnu", "native-ufs-diagnostics=1", "sheng-pmgr=2",
   "offline-apfs-load=1", "startup_debug=0", "-no_corpses",
   "sheng-vsync=60", "sheng-vsync-fixed=1", "offline-mobile-graphics-load=1",
   "offline-legacy-register=1", "offline-legacy-phase=4", "offline-legacy-gop=1",
