@@ -6,7 +6,7 @@
 #   - [firmware] hummerPkg：本机 UEFI 已真机验证，13T 的固件在 Ace 5 Pro 上起不来
 #   - [userdata] 本机 GPT 几何
 #   - ADT：make-hummer-adt.py（由 13T 的生成器改出，6 核 cpu%d + GICv3 + /psci，
-#     cpus=6，配合 sheng-smp=1 + armcpu-spi-ipi=1 拉起多核）
+#     cpus=6，走 XNU 标准 PSCI 起从核）
 #   - 触屏：hummer 的 Synaptics S3910（13T 是 Novatek，对本机面板无效）
 # 首轮触屏默认关闭（hummer-touch=0），先验证 13T 流水线能编出并启动到 Hello。
 
@@ -100,10 +100,8 @@ kernel_args = [
   "offline-legacy-register=1", "offline-legacy-phase=4", "offline-legacy-gop=1",
   "offline-legacy-pm=1", "offline-legacy-validate=1", "offline-legacy-transfer=1",
   "offline-legacy-cpu-present=1", "offline-key-events=1", "sheng-aks=1",
-  # 多核启动（SM8750 / Qualcomm 板）：sheng-smp=1 拉起 secondary CPU，
-  # armcpu-spi-ipi=1 走 SPI 发核间中断（ArmCpu.cpp 注释：ICC_SGI1R_EL1 在
-  # Qualcomm 板上 "generates nothing"，必须用 SPI 路径）。
-  "sheng-smp=1", "armcpu-spi-ipi=1",
+  # 多核：保留 6 核 ADT + /psci，走 XNU 标准 PSCI 起从核。
+  # （不再用 sheng-smp/armcpu-spi-ipi：那条路径在异常向量就绪前就触发早期 fatal。）
   # hummer 触屏：先关闭，过了 Hello 再改 =3（识别芯片）→ =4（上报触摸）
   "hummer-touch=0", "hummer-touch-panic=0",
 ]
