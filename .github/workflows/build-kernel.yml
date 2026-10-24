@@ -27,8 +27,13 @@ jobs:
 
       - name: Prepare the isolated, patched UniXNU source
         run: |
+          # 先建日志目录并把 prepare 的输出落盘：这一步若失败（补丁打不上、
+          # 子模块 gitlink 失效等），后面就没有日志可看，等于瞎修。
+          mkdir -p out/hummer/logs
+          ./unixnu --prepare 2>&1 | tee out/hummer/logs/actions-prepare.log
           TREE=$(./unixnu --prepare)
           echo "UNIXNU_TREE=$TREE" >> "$GITHUB_ENV"
+          echo "engine tree: $TREE"
 
       # Stage 7 用户态兼容补丁（按 /chosen/ephemeral-storage 门控），塞进引擎
       # patches/xnu/ 由 baseline.sh 排序应用（zzzz- 排最后）。
@@ -112,9 +117,13 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          tar czf ci-logs.tar.gz UniXNU/out/hummer/logs \
-            out/hummer/logs out/hummer/kernel/kernel.macho out/hummer/payload/payload.img 2>/dev/null || \
+          # 无论多早失败都要产出一个可上传的包，否则这一轮的报错永远看不到。
           tar czf ci-logs.tar.gz out/hummer/logs 2>/dev/null || true
+          if [ ! -s ci-logs.tar.gz ]; then
+            { echo "no hummer logs were produced (failure before the log dir)"; \
+              echo "run: $GITHUB_RUN_ID"; } > ci-logs.txt
+            tar czf ci-logs.tar.gz ci-logs.txt
+          fi
           gh release view ci-latest >/dev/null 2>&1 || \
             gh release create ci-latest --title "ci latest" --notes "Rolling build outputs."
           for f in ci-logs.tar.gz out/hummer/kernel/kernel.macho out/hummer/payload/payload.img; do
