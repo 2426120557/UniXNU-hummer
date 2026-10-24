@@ -412,18 +412,24 @@ bool enable(Session &s) {
     return true;
 }
 
-// Stage 3 bus setup: DMA when the engine says FIFO is disabled (physical buffers -
-// hummer's spi4 has no IOMMU), then GENI init and the serial clock.
+// Stage 3 bus setup: FIFO mode, GENI init, then the serial clock.
+//
+// The engine reports FIFO_IF_DISABLE (if_disable=1 on this DTS), which nominally means
+// "use GPI DMA": a GSI channel, its iommu context and the qup-core/qup-config/qup-memory
+// interconnect votes. None of that is implemented here, so the code below kept the SE's
+// own DMA master instead - and that hard-resets the machine the moment a transfer starts
+// (stage 3, no panic screen, even with SE_IRQ_EN cleared). GeniSpi.h exposes the Linux
+// fallback for exactly this case: allow_fifo_disabled keeps the FIFO path alive although
+// the engine advertises FIFO_IF_DISABLE. The DMA setup is kept but never taken, so
+// switching back is one condition.
 bool openBus(Session &s) {
     s.spi.poll_limit = 400000;
     // poll_only=1 makes geni_spi_init() clear SE_IRQ_EN, so the engine never drives
     // its interrupt line. This board has no handler for the SE's GIC SPI (357 in the
-    // target DTB) and the ADT publishes no interrupt for it: with SE_IRQ_EN left on,
-    // the first transfer raises a level interrupt nobody acknowledges and the system
-    // locks up hard (stage 3 reset with no panic screen). Completion is polled through
-    // the status registers, which do not depend on SE_IRQ_EN at all.
+    // target DTB) and the ADT publishes no interrupt for it.
     s.spi.poll_only = 1;
-    if (s.spi.info.fifo_disabled) {
+    s.spi.allow_fifo_disabled = 1;   // FIFO even though FIFO_IF_DISABLE is set
+    if (s.spi.info.fifo_disabled && !s.spi.allow_fifo_disabled) {
         s.dmaMem = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(kernel_task,
             static_cast<IOOptionBits>(kIODirectionInOut) | static_cast<IOOptionBits>(kIOMemoryPhysicallyContiguous),
             2 * kDmaBytes, 0xfffffff000ULL);
