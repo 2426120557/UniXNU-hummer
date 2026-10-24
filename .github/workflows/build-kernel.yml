@@ -30,6 +30,21 @@ jobs:
         with:
           python-version: "3.12"
 
+      # 缓存这两块（第二轮起省掉 21 个子模块的 clone 和 7 个源码仓库的 fetch）：
+      #   .cache      ./unixnu --prepare 产出的引擎树（按 upstream.rev + 补丁指纹命名，
+      #               prepare() 发现有就直接返回，天然命中）
+      #   out/feeds   ./unixnu fetch 的源码
+      # 不缓存 out/ipsw：OS+SystemOS 解压后约 8 GiB，会顶爆单仓库 10 GB 的缓存上限。
+      - name: Cache the prepared engine and fetched feeds
+        uses: actions/cache@v4
+        with:
+          path: |
+            .cache
+            out/feeds
+          key: hummer-13t-${{ hashFiles('upstream.rev', 'patches/unixnu-source-kernel.patch', 'patches/native-ufs-sm8750.patch', 'patches/native-mobile-display-stage7.patch') }}
+          restore-keys: |
+            hummer-13t-
+
       - name: Prepare the isolated, patched UniXNU source
         run: |
           # 先建日志目录并把 prepare 的输出落盘：这一步若失败（补丁打不上、
