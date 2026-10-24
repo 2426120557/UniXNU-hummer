@@ -140,6 +140,17 @@ jobs:
                   (re.compile(r'panic\(\s*"amfi interface not available"\s*\);'),
                    'panic("HTC amfi=%p", (void *)amfi);'),
               ],
+              # v64：真根已经挂上了（v63 真机：vfs_mountroot mounted，紧接着
+              # "rootvp not authenticated after mounting" @bsd_init.c:1103）。
+              # 这条检查等的是 owner root 的密码学验证（APFS 用启动清单/策略校验
+              # 根卷），本板还没构建那套闭包（kits/VerifiedRoot 的策略包 +
+              # OWNER_ROOT_* 补丁），所以它必然 pending。
+              # bring-up 阶段改为只打印一行标记、不 panic，让启动继续进入用户态；
+              # 交付前必须换回真正的 owner root 验证 —— 这一行就是届时要去掉的开关。
+              "bsd/kern/bsd_init.c": [(
+                  re.compile(r'panic\(\s*"rootvp not authenticated after mounting"\s*\);'),
+                  'printf("kboot=rootauth skipped (bring-up: owner root not built)\\n");'),
+              ],
           }
 
           root = pathlib.Path("UniXNU/out")
@@ -208,6 +219,17 @@ jobs:
                    'panic("HTC img4if=%p", (void *)img4if);'),
                   (re.compile(r'panic\(\s*"amfi interface not available"\s*\);'),
                    'panic("HTC amfi=%p", (void *)amfi);'),
+              ],
+              # v64：真根已经挂上了（v63 真机：vfs_mountroot mounted，紧接着
+              # "rootvp not authenticated after mounting" @bsd_init.c:1103）。
+              # 这条检查等的是 owner root 的密码学验证（APFS 用启动清单/策略校验
+              # 根卷），本板还没构建那套闭包（kits/VerifiedRoot 的策略包 +
+              # OWNER_ROOT_* 补丁），所以它必然 pending。
+              # bring-up 阶段改为只打印一行标记、不 panic，让启动继续进入用户态；
+              # 交付前必须换回真正的 owner root 验证 —— 这一行就是届时要去掉的开关。
+              "bsd/kern/bsd_init.c": [(
+                  re.compile(r'panic\(\s*"rootvp not authenticated after mounting"\s*\);'),
+                  'printf("kboot=rootauth skipped (bring-up: owner root not built)\\n");'),
               ],
           }
 
