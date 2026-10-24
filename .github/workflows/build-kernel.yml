@@ -42,10 +42,11 @@ jobs:
           echo "UNIXNU_TREE=$TREE" >> "$GITHUB_ENV"
           echo "engine tree: $TREE"
 
-      # Stage 7 用户态兼容补丁（按 /chosen/ephemeral-storage 门控），塞进引擎
-      # patches/xnu/ 由 baseline.sh 排序应用（zzzz- 排最后）。
-      - name: Stage the Stage 7 userspace-compat patch
-        run: cp patches/zzzz-hummer-stage7-compat.patch "$UNIXNU_TREE/patches/xnu/"
+      # 注意：不要再把 hummer 老引擎时代的 patches/zzzz-hummer-stage7-compat.patch
+      # 塞进引擎的 patches/xnu/。那份是从 Pagani 的 native-stage7-userspace-compat
+      # 移植来的，现在整仓回到 Pagani 引擎 + 13T 三份补丁后，13T 的内核补丁已经改过
+      # bsd/kern/ubc_subr.c、osfmk/vm/vm_fault.c、osfmk/vm/vm_protos.h，那份副本的
+      # 上下文对不上 -> "patch does not apply"，而且它本身已成冗余（源头已生效）。
 
       - name: Install host tools
         run: |
