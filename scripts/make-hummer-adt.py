@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
-"""Apple DT for hummer early XNU bring-up, from the exported live.dtb.
+"""Apple DT for hummer early XNU bring-up.
 
-Only the boot CPU and GIC are published. DarwinBoot supplies boot_args video
-from the live GOP and limits usable RAM to its actual contiguous allocation.
+Mirrors UniXNU-sheng/scripts/make-sheng-adt.py (the canonical 13T ADT generator):
+the node() format carries a 'name' property, and the CPU topology is emitted as
+a list of cpu%d nodes (boot core running, the rest waiting) plus a /psci node
+when more than one core is present. DarwinBoot supplies boot_args video from the
+live GOP and limits usable RAM to its actual contiguous allocation.
 """
 import argparse
 import os
@@ -11,14 +14,19 @@ import uuid
 import zlib
 from pathlib import Path
 
-# sysinfo/live.dtb: /cpus/cpu@0, /soc/interrupt-controller@16000000,
-# /soc/timer. Other CPUs and PSCI are deferred until single-core entry works.
+# hummer.dts /cpus reg values: 6 perf cores at MPIDR Affinity1 0x000..0x500.
+# The boot CPU is cpu@0 (Affinity1 = 0).  Only the six cores whose MPIDR fits
+# the upstream AFF1|AFF0 mask are listed (mirroring UniXNU-sheng: SM8550 has 8
+# cores but lists 6, two little cores left off); the two Oryon prime cores live
+# in Affinity2 (0x10000/0x10100) and collapse onto logical 0, which previously
+# panicked AppleS8000CPU ("CPU configuration in device tree is invalid").
 GIC_BASE = 0x16000000
 GIC_SIZE = 0x10000
 GICR_BASE = 0x16080000
 GICR_SIZE = 0x200000
 GICR_STRIDE = 0x40000
 TIMEBASE = 19200000
+DEFAULT_CPU_REGS = "0,0x100,0x200,0x300,0x400,0x500"
 
 
 def node(name, properties=(), children=()):
@@ -51,9 +59,16 @@ def empty_nvram_proxy():
             ('nvram-current-bank', bytes(4)), ('nvram-proxy-data', bank)]
 
 
-def make_tree(memory_size, random_seed, root_match_volume_uuid=None, trust_cache=False, packed_data_ramdisk=False, ipad_identity=False, unique_chip_id=None, chip_id=0x8011):
+def make_tree(memory_size, random_seed, root_match_volume_uuid=None, trust_cache=False, packed_data_ramdisk=False, ipad_identity=False, unique_chip_id=None, chip_id=0x8011, cpu_regs=DEFAULT_CPU_REGS):
     if memory_size not in (0x10000000, 0x20000000, 0x40000000, 0x100000000) or len(random_seed) != 64:
         raise ValueError('hummer requires 256/512/1024/4096 MiB and a 64-byte random seed')
+    cpu_regs_list = [int(value, 0) for value in cpu_regs.split(',')]
+    cpus = [node('cpu%d' % index, [('state', b'running\0' if index == 0 else b'waiting\0'),
+                                   ('reg', struct.pack('<I', reg)),
+                                   ('device_type', b'cpu\0'),
+                                   ('compatible', b'arm,armv8\0'),
+                                   ('timebase-frequency', struct.pack('<I', TIMEBASE))])
+             for index, reg in enumerate(cpu_regs_list)]
     if unique_chip_id is not None and not 0 < unique_chip_id < 1 << 64:
         raise ValueError('Platform seed must be a nonzero 64-bit value')
     if ipad_identity and unique_chip_id is None:
@@ -87,10 +102,8 @@ def make_tree(memory_size, random_seed, root_match_volume_uuid=None, trust_cache
              [node('memory-map', ([('TrustCache', bytes(16))] if trust_cache else []) +
                    ([('PackedRAMDisk', bytes(16))] if packed_data_ramdisk else [])),
               node('manifest-properties')]),
-        node('cpus', children=[node('cpu0', [
-            ('state', b'running\0'), ('reg', bytes(4)),
-            ('device_type', b'cpu\0'), ('compatible', b'arm,armv8\0'),
-            ('timebase-frequency', struct.pack('<I', TIMEBASE))])]),
+        *([node('psci', [('compatible', b'arm,psci-1.0\0'), ('method', b'smc\0')])] if len(cpus) > 1 else []),
+        node('cpus', children=cpus),
         node('arm-io', [('device_type', b'arm-io\0'),
                         ('#address-cells', struct.pack('<I', 2)),
                         ('#size-cells', struct.pack('<I', 2)),
@@ -120,7 +133,8 @@ def main():
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--dram-size', type=lambda s: int(s, 0), default=0x10000000)
     parser.add_argument('--owned-memory-size', type=lambda s: int(s, 0), default=0x10000000)
-    parser.add_argument('--cpu-regs', default='0')
+    parser.add_argument('--cpu-regs', default=DEFAULT_CPU_REGS,
+                        help='Comma-separated CPU MPIDR affinity values; the first is the running boot CPU')
     parser.add_argument('--root-match-volume-uuid')
     parser.add_argument('--trust-cache', action='store_true')
     parser.add_argument('--packed-data-ramdisk', action='store_true')
@@ -128,16 +142,22 @@ def main():
     parser.add_argument('--unique-chip-id', type=lambda s: int(s, 16))
     parser.add_argument('--chip-id', type=lambda s: int(s, 0), default=0x8011)
     args = parser.parse_args()
-    if args.cpu_regs != '0' or args.dram_size != args.owned_memory_size:
-        parser.error('Initial profile uses cpu0 and only the DarwinBoot-owned RAM window')
+    try:
+        cpu_regs_list = [int(value, 0) for value in args.cpu_regs.split(',')]
+    except ValueError:
+        parser.error('--cpu-regs must be integers')
+    if (not cpu_regs_list or cpu_regs_list[0] != 0 or len(set(cpu_regs_list)) != len(cpu_regs_list) or len(cpu_regs_list) > 8
+            or any(reg < 0 or reg > 0xffff or reg & 0xff for reg in cpu_regs_list)):
+        parser.error('--cpu-regs: up to eight distinct cores, boot CPU 0 first, Affinity0 must be 0')
     try:
         data = make_tree(args.owned_memory_size, os.urandom(64), args.root_match_volume_uuid,
-                         args.trust_cache, args.packed_data_ramdisk, args.ipad_identity, args.unique_chip_id, args.chip_id)
+                         args.trust_cache, args.packed_data_ramdisk, args.ipad_identity, args.unique_chip_id, args.chip_id,
+                         cpu_regs=args.cpu_regs)
     except ValueError as error:
         parser.error(str(error))
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_bytes(data)
-    print(f'ACE5PRO ADT: {len(data)} bytes, cpu0, GICv3, {TIMEBASE} Hz; hardware untested')
+    print(f'hummer ADT: {len(data)} bytes, {len(cpu_regs_list)} CPUs (boot {cpu_regs_list[0]:#x}), GICv3, {TIMEBASE} Hz')
 
 
 if __name__ == '__main__':

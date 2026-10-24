@@ -5,7 +5,8 @@
 # 只保留 hummer 自己的设备相关部分：
 #   - [firmware] hummerPkg：本机 UEFI 已真机验证，13T 的固件在 Ace 5 Pro 上起不来
 #   - [userdata] 本机 GPT 几何
-#   - ADT：make-hummer-adt.py（由 13T 的生成器改出，单 cpu0 + GICv3，cpus=1）
+#   - ADT：make-hummer-adt.py（由 13T 的生成器改出，6 核 cpu%d + GICv3 + /psci，
+#     cpus=6，配合 sheng-smp=1 + armcpu-spi-ipi=1 拉起多核）
 #   - 触屏：hummer 的 Synaptics S3910（13T 是 Novatek，对本机面板无效）
 # 首轮触屏默认关闭（hummer-touch=0），先验证 13T 流水线能编出并启动到 Hello。
 
@@ -90,13 +91,17 @@ title = "OnePlus Ace 5 Pro Stage 7"
 dram_size = "0x100000000"
 timeout = 10
 kernel_args = [
-  "-v", "serial=0", "debug=0x14e", "cpus=1", "kt_fixed_zones=240",
+  "-v", "serial=0", "debug=0x14e", "cpus=6", "kt_fixed_zones=240",
   "native-ufs-root=1", "native-ufs-partition=unixnu", "native-ufs-diagnostics=1", "sheng-pmgr=2",
   "offline-apfs-load=1", "startup_debug=0", "-no_corpses",
   "sheng-vsync=60", "sheng-vsync-fixed=1", "offline-mobile-graphics-load=1",
   "offline-legacy-register=1", "offline-legacy-phase=4", "offline-legacy-gop=1",
   "offline-legacy-pm=1", "offline-legacy-validate=1", "offline-legacy-transfer=1",
   "offline-legacy-cpu-present=1", "offline-key-events=1", "sheng-aks=1",
+  # 多核启动（SM8750 / Qualcomm 板）：sheng-smp=1 拉起 secondary CPU，
+  # armcpu-spi-ipi=1 走 SPI 发核间中断（ArmCpu.cpp 注释：ICC_SGI1R_EL1 在
+  # Qualcomm 板上 "generates nothing"，必须用 SPI 路径）。
+  "sheng-smp=1", "armcpu-spi-ipi=1",
   # hummer 触屏：先关闭，过了 Hello 再改 =3（识别芯片）→ =4（上报触摸）
   "hummer-touch=0", "hummer-touch-panic=0",
 ]
@@ -109,7 +114,7 @@ chip_id = "0x8011"
 packed_data_ramdisk = true
 tool = "scripts/make-hummer-adt.py"
 owned_memory_size = "0x100000000"
-cpu_regs = "0"
+cpu_regs = "0,0x100,0x200,0x300,0x400,0x500"
 
 # 本机 UEFI 固件（hummerPkg）：保留，不换 13T 的 oneplus13tPkg。
 [firmware]
