@@ -95,6 +95,57 @@ jobs:
         run: ./unixnu ipsw fetch KernelCache -D "$GITHUB_WORKSPACE" 2>&1 | tee "$GITHUB_WORKSPACE/kernelcache.log"
         working-directory: UniXNU
 
+      # v71：正规 Data 种子。v63~v69 的 Data 卷一直是本文件后段现做的 64 MiB 探针
+      # （真 launchd + dyld，但没有 private/var），所以即便根卷挂上了，launchd 起来
+      # 也读不到用户数据。这里从原版 OS 盘映像（044-76040-038.dmg，sha256 已在
+      # [ipsw.sha256] 钉死为 3f99b859…，与 sheng/Pagani 同一份 21H461）的
+      # /private/var 复制一棵初始树，用引擎自带的 prepare-owner-data-fixture.py 做成
+      # 32 MiB 裸 APFS 种子。--data-ramdisk 收的是裸镜像，所以 board.toml 的
+      # packed_data_ramdisk 保持 false。
+      #
+      # 为什么放在构建早期而不是 payload 之前：OS 成员解出来有 5.66 GiB，macOS runner
+      # 的 SSD 只有 ~14 GiB，和 XNU 中间产物叠在一起会撑爆。所以先取、先抽、立刻删。
+      #
+      # 任何一步失败都不让构建变红：没有 data.img 时 payload 自动退回 ram-root.img，
+      # 至少还能测"根卷有没有挂上"。
+      - name: Build the Data seed (private/var from the original OS)
+        run: |
+          set -u
+          WS="$GITHUB_WORKSPACE"
+          DMG="$WS/UniXNU/out/ipsw/21H461/044-76040-038.dmg"
+          FW="$WS/UniXNU/.cache/firmware/target-volumes"
+          MNT="$FW/os-mount"
+          SEED="$WS/data.img"
+          rm -f "$SEED"
+          fail() { echo "::warning::$1; payload will fall back to ram-root.img"; exit 0; }
+          ./unixnu ipsw fetch -D "$WS" OS > "$WS/os-fetch.log" 2>&1 || fail "could not fetch the OS member (see os-fetch.log)"
+          [ -s "$DMG" ] || fail "the OS member is not at $DMG"
+          echo "== disk before the seed"; df -h / | tail -1
+          PLIST="$(mktemp)"
+          if ! hdiutil attach -readonly -nobrowse -plist "$DMG" > "$PLIST" 2> "$WS/os-attach.log"; then
+            fail "hdiutil attach failed (see os-attach.log)"
+          fi
+          VOL="$(python3 -c 'import plistlib,sys; d=plistlib.load(open(sys.argv[1],"rb")); print(next((e["mount-point"] for e in d.get("system-entities",[]) if e.get("mount-point")),""))' "$PLIST")"
+          if [ -z "$VOL" ]; then
+            hdiutil detach "$DMG" >/dev/null 2>&1 || true
+            fail "the OS image mounted no volume"
+          fi
+          echo "== mounted $DMG at $VOL"
+          mkdir -p "$FW"
+          rm -rf "$MNT"
+          ln -sfn "$VOL" "$MNT"
+          if python3 scripts/prepare-owner-data-fixture.py --output "$WS/data-fixture"; then
+            cp "$WS/data-fixture/owner-data-32.cdr" "$SEED"
+            cat "$WS/data-fixture/seed.json" || true
+            ls -la "$SEED"
+          else
+            echo "::warning::prepare-owner-data-fixture.py failed; payload will fall back to ram-root.img"
+          fi
+          hdiutil detach "$VOL" >/dev/null 2>&1 || true
+          rm -f "$DMG"
+          echo "== disk after removing the OS member"; df -h / | tail -1
+        working-directory: UniXNU
+
       # ── v42 诊断补丁 ─────────────────────────────────────────────────────
       # v39（手搓 ad-hoc 签名的 16 KiB 探针）和 v41（从 21H461 固件里原样抽出来
       # 的真 launchd 561,856 B + dyld 937,056 B）停在同一行：
@@ -648,11 +699,20 @@ jobs:
       # 并回填 {phys,size}，内核再 mdevadd 成 /dev/md0。
       # v46：--trust-cache 让 bundle 进 Payloads/kernel.macho.trustcache，并在
       # ADT 里生成 /chosen/memory-map/TrustCache 占位符，由 DarwinBoot 回填。
+      # v71：Data 卷优先用上面从原版 OS 抽出的 32 MiB 正规种子（含 private/var）；
+      # 那一步失败时退回 ram-root.img 的 64 MiB 探针，构建仍然出镜像。
       - name: Build payload
         if: env.KERNEL_BUILT == 'yes'
         env:
           UNIXNU_UNIQUE_CHIP_ID: ${{ secrets.UNIXNU_UNIQUE_CHIP_ID || '0x38d960c942ad2137' }}
-        run: ./unixnu build payload -D "$GITHUB_WORKSPACE" --trust-cache "$GITHUB_WORKSPACE/trustcache.bundle" --data-ramdisk "$GITHUB_WORKSPACE/ram-root.img" 2>&1 | tee "$GITHUB_WORKSPACE/payload.log"
+        run: |
+          SEED="$GITHUB_WORKSPACE/data.img"
+          if [ ! -s "$SEED" ]; then
+            SEED="$GITHUB_WORKSPACE/ram-root.img"
+            echo "::warning::no Data seed from the original OS; using the probe ram-root.img"
+          fi
+          echo "== Data seed: $SEED"; ls -la "$SEED"
+          ./unixnu build payload -D "$GITHUB_WORKSPACE" --trust-cache "$GITHUB_WORKSPACE/trustcache.bundle" --data-ramdisk "$SEED" 2>&1 | tee "$GITHUB_WORKSPACE/payload.log"
         working-directory: UniXNU
 
       - name: Show build log tail
