@@ -2,67 +2,111 @@
 
 OnePlus Ace 5 Pro（`hummer` / PKR110 / SM8750 骁龙 8 Elite）的 UniXNU 设备仓库。
 
-## 状态
+> **v75 起整仓换成 OnePlus 13T（Pagani）的移植**（同 SM8750、同 21H461 IPSW）。引擎 / 补丁 / 流水线全部用 13T 的
+> （`upstream.rev = d9460ebb` + `patches/`），只保留 hummer 自己的设备相关部分：本机 UEFI 固件（hummerPkg）、
+> GPT 几何、ADT（6 核 + `/psci` + 根卷 UUID）、Synaptics S3910 触屏。
 
-- ✅ **UEFI 层已完成**：固件含 UniXNU 菜单，真机 `fastboot boot` 成功（GOP 显示 + 按键输入均工作）。
-- ✅ **双系统分区 + 根卷（2026-10-24）**：从 userdata 切出 32 GiB `unixnu` 分区，SHNGROOT 根卷镜像已刷入并经哈希校验；UFS bring-up → 窗口发布 → APFS 容器 → **真根卷挂载** 全部打通。
-- ✅ **launchd 启动（v67，2026-10-24 真机验证）**：`vfs_mountroot mounted` → `load_init_program` → `exec init` → 签名/4K 全 rc=0 → `kboot exit rv=0`。XNU 已从真根卷把控制权交给用户态（bring-up 阶段 7）。用户态默认不往内核控制台输出，面板静默属预期。
-- ✅ **面板检查点（kboot）+ GENI 调试串口（v68）**：kboot 系列探针覆盖 exec 尾段；`hummer-uart=1` 把内核日志多路复用输出到 DTB `serial0`（qup_uart@a9c000，115200n8）。
-- 🧪 **Stage 7 显示栈（v69，移植自 OnePlus 13T/Pagani，同 SM8750 + 同 21H461 kernelcache）**：NativeLegacyDisplay 复用原版 IOMobileFramebufferLegacy，CPU 拷贝呈现到固件 GOP framebuffer（不过 GPU）；从 kernelcache 逆 358 槽虚表 ABI 生成绑定（`scripts/build-stage7-display.py`）；`sheng-vsync=60` 用 work-loop 定时器顶替 vblank 做 60Hz 软件刷新；Stage7Status 把进度打到面板。启动参数带 Pagani run 39 同款的用户态组合（`kt_fixed_zones=240` / `-no_corpses` / `offline-legacy-*` 等）。
-- 🧪 **Adreno 830 (a8xx)**：v68 起编入寄存器活性探针（`hummer-adreno-probe=1` 门控，复用引擎 bsd_init 钩子，零源码改动）；真显示驱动未开始。
-- ⬜ 持久 Data 卷（launchd 挂载路径已有探针覆盖）、GPU 加速、触摸（HID 框架已加载，控制器驱动未适配）—— 进行中。
+## 状态（v75，2026-10-25）
+
+| 项 | 状态 |
+|---|---|
+| UEFI 固件（hummerPkg） | ✅ 真机 `fastboot boot` 成功（GOP 显示 + 按键输入） |
+| 13T 全量流水线 | ✅ 编过：OS + SystemOS 提取 / ufs policies / ram-data / hummer-touch；产 `payload.img`（160 MiB） |
+| 6 核 bring-up | ✅ 走标准 PSCI 起 6 核，早期异常消失 |
+| 面板改名 | ✅ `OnePlus Ace 5 Pro`（不再是 `OnePlus 13T`） |
+| root 挂载 | 🧪 已跑到 `root device wait`；补 `root_match_volume_uuid` 后验证中 |
+| 持久 Data / GPU / 触摸控制器 | ⬜ |
+
+## v75 踩到的三个坑（都已修，别再踩）
+
+### 1. 6 核不要用 `sheng-smp`
+
+`sheng-smp=1` 会在异常向量就绪（stage 6）**之前**拉起 secondary CPU / 触发中断，任何早期异常都会落进
+`Entry.S` 的 `Lfatal`，面板显示 `OnePlus Ace 5 Pro / EARLY EXCEPTION`、`last checkpoint 0x1`、`ESR_EL1=0`。
+
+改用标准 PSCI：ADT 带 `/psci`、`cpus=6`，**去掉** `sheng-smp` / `armcpu-spi-ipi`。从核由 XNU 在 `arm_init`
+阶段经 PSCI 拉起，早期异常消失，内核一路跑到 root 挂载。
+
+### 2. 根卷必须按 UUID 匹配
+
+`board.toml` → `[payload.adt]` 必须有：
+
+```toml
+root_match_volume_uuid = "04769D26-2CA0-4825-B443-E2E5F88300F2"
+```
+
+这个 UUID 与内核 `patches/xnu/offline-owner-systemos-mount.patch` 里
+`native_owner_publish_boot_manifest(root_device, "04769D26-…")` 用的完全一致。
+
+缺了它 → ADT 的 `/chosen/root-matching` 为空 → XNU 回退到 `IOMedia Content=Apple_HFS` → 60 秒等不到 →
+面板 `root value 0x3c`（0x3c = 60 秒超时）。
+
+### 3. ADT 的 6 核本身是对的
+
+真机 `hummer.dtb` 的 `/cpus` 就是 `cpu@0/100/200/300/400/500`（Aff1 `0x000..0x500`）+ `cpu@10000/10100`
+（Aff2 两个 Oryon prime，按 sheng 惯例不列）。`/psci` = `arm,psci-1.0` / `smc`。
+所以 6 核问题不在 MPIDR，而在**起核路径**。
 
 ## 目录
 
-- `board.toml` — 板级描述。`[firmware]` 已真机验证；`[kernel]/[ipsw]/[payload]` 为脚手架（TODO）。
-- `configs/hummer_defconfig` — 内核配置（试水阶段最小集：XNU 4K 本体 + ArmDTPlatform + ArmCpu）。
-- `scripts/make-hummer-adt.py` — Apple 格式设备树（ADT）生成器，本地可跑（纯 Python）。
-- `scripts/build-arm-driver.py` — 从 UniXNU-sheng 拷贝的通用驱动构建器（ArmDTPlatform/ArmCpu 通用）。
-- `.github/workflows/build-kernel.yml` — macOS CI 内核编译试水。
+- `board.toml` — 板级描述。`[payload.adt]` 的 `cpu_regs` / `root_match_volume_uuid` / `packed_data_ramdisk` 是关键。
+- `configs/hummer_defconfig` — 内核配置。
+- `scripts/make-hummer-adt.py` — Apple 设备树生成器（6 核 `cpu%d` + `/psci` + root-matching）。
+- `scripts/build-native-ufs.py` — NativeUfs 构建（root windows / 分区选择）。
+- `scripts/build-stage7-display.py` — Stage 7 软件显示栈。
+- `scripts/build-hummer-touch.py` — Synaptics S3910 触屏。
+- `drivers/BootProgress/` — 启动检查点 / panic 面板 / 早期异常输出（`BootProgress.c`、`Entry.S`）。
+- `patches/` — 13T 引擎补丁（内核 + NativeUfs + 显示）。
+- `.github/workflows/build-kernel.yml` — CI（push `main` 自动编）。
 
-## 关键硬件参数（来自真机实测）
+## payload 结构（FAT32，160 MiB）
 
-| 项 | 值 | 来源 |
-|---|---|---|
-| GICD / GICR | 0x16000000 / 0x16080000 | 真机 `/proc/iomem` |
-| UFS hc / phy | 0x1d84000 / 0x1d80000 | 真机 `/proc/iomem` |
-| DRAM base / size | 0x80000000 / 0x400000000 (16 GiB) | — |
-| CPU | 6 性能核 + 2 Oryon 大核 | hummer.dts |
-| GPU | Adreno 830 (a8xx)，KGSL 0x3d00000/0x40000，gpucc 0x3d90000/0x9800 | hummer.dts |
-| 调试串口 | qup_uart@0xa9c000（GENI SE9），115200n8，DTB `serial0` | hummer.dts |
-
-## CI 试水：怎么跑
-
-1. **建 GitHub 仓库**（建议 **public** —— 公开仓库 macOS runner 免费不限时；私有仓库每月仅 200 macOS 分钟）：
-
-   ```bash
-   cd UniXNU-hummer
-   git init
-   git add .
-   git commit -m "hummer device repo: UEFI verified + XNU kernel CI smoke"
-   git branch -M main
-   git remote add origin https://github.com/<你的用户名>/UniXNU-hummer.git
-   git push -u origin main
-   ```
-
-2. **触发**：仓库 → Actions → `build-kernel` → Run workflow（或 push 自动触发）。
-
-3. **预期**：第一次会花 ~20 分钟 `fetch`（浅克隆 xnu 等 Apple 源码）+ XNU 编译 30–90 分钟。
-   - 内核 Mach-O 产出 → `✅ XNU kernel compiled`（prelink 因缺 IPSW kernelcache 失败是**预期内**）。
-   - 失败 → 下载 `kernel-log` artifact，把关键报错发我，逐个补 hummer 的 `package/` kit。
-
-## 本地构建 UEFI 固件（WSL，已跑通）
-
-见 `apply_to_wsl.sh` + `fix_gic_feed.sh`（workspace 根目录）。核心命令：
-
-```bash
-cd ~/UniXNU
-./unixnu defconfig hummer_defconfig -D <本仓库路径>
-./unixnu build package firmware --uefi ~/uefi_oneplus_ace5_pro   # 跳过 macOS-only 的 kernel 步骤
-bash ~/fix_gic_feed.sh                                            # 给 feed 版 mu_basecore 打 GIC spurious 补丁
-bash ~/pack_v4.sh                                                 # v4 打包（Ace 5 Pro ABL 必须要 v4）
+```
+/EFI/UNIXNU/UNIXNU.TOM                 # 启动项：title / path / initrd / args
+/EFI/UNIXNU/Payloads/kernel.macho      # 预链接 XNU 内核（~127 MB）
+/EFI/UNIXNU/Payloads/kernel.macho.adt  # ADT：6 核 + GICv3 + /psci + root-matching
+/EFI/UNIXNU/Payloads/scratch-data.img  # 1 GiB Data ramdisk（压缩后 ~1 MB）
+/EFI/UNIXNU/Payloads/*TRUST*           # trust cache
 ```
 
-## 后续（另案）
+> boot 参数在 `UNIXNU.TOM` 的 `args` 字段里（不是编译进内核），判断改动是否生效直接 grep payload 里的 `args` 最快。
 
-SM8750 的 `package/` kit（平台专属驱动）、完整 I/O 驱动、持久数据卷、Adreno 830 GPU 驱动 —— 均在 CI 内核编译跑通之后。
+## 打包 boot 镜像（WSL）
+
+CI 只产 `payload.img`；boot 镜像在 WSL 里打（Ace 5 Pro 的 ABL **只收 v4 header**）：
+
+```bash
+bash pack_v4.sh <uefi_repo> <out.img> <payload.img>
+```
+
+`pack_v4.sh` 做三件事：clang 编 BootShim（`FD_BASE=0xA7100000`、`FD_SIZE=0x300000`）→
+`gzip(shim + SILICIUM_UEFI.fd) + DTB` 当 kernel → `payload.img` 当 ramdisk，`mkbootimg --header_version 4`。
+成品放桌面，`fastboot boot` 验证。
+
+> WSL 的 `/tmp` 是 tmpfs，跨 `wsl.exe` 调用不保留 —— 输出直接写 `/mnt/c/Users/<你>/Desktop/`。
+
+## CI 与产物
+
+- push `main` 自动触发 `build-kernel`（macOS runner）。
+- 产物发布到 `ci-latest` rolling release，公开可直接下：
+  - `payload.img`（~160 MiB）
+  - `kernel.macho`（带符号，可 `llvm-nm` 反查地址）
+  - `ci-logs.tar.gz`（构建日志）
+- 缓存：`out/ipsw`（~8 GiB，IPSW 只拉一次）、`.cache`（引擎树 + `xnu-work` 增量）、`out/feeds`。
+  ⚠️ 引擎缓存 key 只含 `upstream.rev` + `patches/*`，**不含 `board.toml`** —— 并发 run 时可能读到旧 config
+  （踩过一次：payload 里的 `args` 还是旧的）。改 `board.toml` 后最好确认 payload 里的 `args` 真的变了。
+
+## 关键硬件参数（真机实测）
+
+| 项 | 值 |
+|---|---|
+| GICD / GICR | 0x16000000 / 0x16080000 |
+| UFS hc / phy | 0x1d84000 / 0x1d80000 |
+| DRAM base / size | 0x80000000 / 0x400000000 (16 GiB) |
+| CPU | 6 性能核（Aff1 0x000..0x500）+ 2 Oryon prime（Aff2 0x10000/0x10100） |
+| GPU | Adreno 830 (a8xx)，KGSL 0x3d00000/0x40000，gpucc 0x3d90000/0x9800 |
+| 调试串口 | qup_uart@0xa9c000（GENI SE9），115200n8，DTB `serial0` |
+
+## 后续
+
+root 挂载打通后进入 Stage 7 用户态；之后是持久 Data 卷、Adreno 830 GPU、Synaptics S3910 触摸控制器。
