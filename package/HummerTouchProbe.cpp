@@ -523,8 +523,8 @@ static void touchThread(void *, wait_result_t) {
             if (code == S3910_REPORT_TOUCH) {
                 const uint8_t *d = s->rx + 2;
                 const unsigned count = d[0];
-                if (!s->lastLength || count > s->objects || s->lastLength != 1 + count * 6) {++native_htouch_bad; continue;}
-                ++native_htouch_frames;
+                if (!s->lastLength || count > s->objects || s->lastLength != 1 + count * 6) {native_htouch_bad = native_htouch_bad + 1; continue;}
+                native_htouch_frames = native_htouch_frames + 1;
                 const unsigned maxX = swapXY ? s->max_y : s->max_x, maxY = swapXY ? s->max_x : s->max_y;
                 int ids[12], xs[12], ys[12];
                 unsigned n = 0;
@@ -554,11 +554,11 @@ static void touchThread(void *, wait_result_t) {
                 const int rc = tcmConfigure(*s);
                 if (rc) {fail(8, rc); checkpointFail(*s); break;}
             } else if (code == TCM_EAGAIN || code == S3910_STATUS_OK) {
-                ++native_htouch_again;   // idle: nothing pending
+                native_htouch_again = native_htouch_again + 1;   // idle: nothing pending
             } else if (code >= S3910_REPORT_IDENTIFY) {
-                ++native_htouch_other;   // an unexpected report type; consume and continue
+                native_htouch_other = native_htouch_other + 1;   // an unexpected report type; consume and continue
             } else {
-                ++native_htouch_bad;
+                native_htouch_bad = native_htouch_bad + 1;
                 IOSleep(20);
             }
             IOSleep(pollMs);
