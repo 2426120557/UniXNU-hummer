@@ -139,6 +139,18 @@ NATIVE_UFS_EDITS = [
 """,
     ),
     (
+        # v58：validate() 的第二道门。Identity 相位对每个窗口调
+        # signedVolumeUuid()，那条路同样要 owner 策略包；本板策略数为 0，
+        # v57 真机就停在 stage="signed window identities"、result=0xe00002c1
+        # （kIOReturnNotPrivileged），prepared 已经有 2 个窗口、published 还是 0。
+        # 没有策略可比对时跳过该窗口的身份取用与查重，发布继续；
+        # 交付前必须恢复（连同 configureVerification 的绕过一起）。
+        'root: skip signed window identities without an owner policy',
+        '        if (!gPendingDevice[i]->signedVolumeUuid (gPendingUuid[i])) return false;',
+        """        if (!verified_root_policy_count) continue;   // v58 bring-up: nothing to compare
+        if (!gPendingDevice[i]->signedVolumeUuid (gPendingUuid[i])) return false;""",
+    ),
+    (
         # v56：configureVerification() 的第一道门就是"策略包数量"。本板没有
         # VerifiedRoot 策略包（桩里 verified_root_policy_count=0），于是每个窗口在
         # configure 阶段就被拒，prepared 永远是 0。这里把 policy==0 解释成
