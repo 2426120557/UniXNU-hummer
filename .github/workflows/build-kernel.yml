@@ -30,6 +30,8 @@ jobs:
           # 先建日志目录并把 prepare 的输出落盘：这一步若失败（补丁打不上、
           # 子模块 gitlink 失效等），后面就没有日志可看，等于瞎修。
           mkdir -p out/hummer/logs
+          # git 索引里若丢了可执行位，./unixnu 会 Permission denied；补一道。
+          chmod +x ./unixnu 2>/dev/null || true
           ./unixnu --prepare 2>&1 | tee out/hummer/logs/actions-prepare.log
           TREE=$(./unixnu --prepare)
           echo "UNIXNU_TREE=$TREE" >> "$GITHUB_ENV"
