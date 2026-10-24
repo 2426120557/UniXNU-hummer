@@ -178,6 +178,37 @@ jobs:
       # 几个固定候选路径（不做全树 rglob，否则每轮都要走十万个文件），
       # 一发现新的 lock_rw.c 就替换。无论构建在哪一刻把树展开，都赶在
       # clang 读到 osfmk/kern/lock_rw.c 之前改好。
+      # v66：根卷已挂上但"未认证"（v63 真机 bsd_init.c:1103 → panic）。
+      # 不要把补丁写进 tree/patches/xnu（那是引擎自己的模块，assemble 会冲突），
+      # 而是写进引擎仓库的 patches/xnu —— tree 里那个目录就是指向它的链接，
+      # baseline 按字典序应用，zzzz- 排最后，且第二遍构建的反向检查也能通过。
+      # 改的是 require_rootauth = TRUE 这一行（第 939 行），离引擎 owner-root 补丁
+      # 的 hunk（987 行）很远，两边互不影响；整段检查本身在
+      # if (!bsd_rooted_ramdisk()) 里，关掉它就等价于内存盘启动时的行为。
+      - name: Stage the hummer root-auth bring-up patch
+        run: |
+          python3 - <<'PY'
+          import pathlib
+          tab = "\t"
+          body = [
+              "--- a/bsd/kern/bsd_init.c",
+              "+++ b/bsd/kern/bsd_init.c",
+              "@@ -936,7 +936,7 @@",
+              " #endif // CONFIG_IMAGEBOOT",
+              " #elif !XNU_TARGET_OS_OSX",
+              " " + tab * 2 + "/* Non MacOS */",
+              "-" + tab * 2 + "require_rootauth = TRUE;",
+              "+" + tab * 2 + "require_rootauth = FALSE;   /* hummer bring-up: no owner-root closure */",
+              " #endif // XNU_TARGET_OS_OSX && defined(__arm64__)",
+              " ",
+              " " + tab * 2 + "if (require_rootauth) {",
+          ]
+          target = pathlib.Path("UniXNU/patches/xnu/zzzz-hummer-rootauth.patch")
+          target.parent.mkdir(parents=True, exist_ok=True)
+          target.write_text(chr(10).join(body) + chr(10))
+          print("staged", target)
+          PY
+
       - name: Build kernel (prelink fails without IPSW, expected)
         continue-on-error: true
         env:

@@ -77,12 +77,6 @@ CONFIG_XNU_DT_PANIC_REGION=y
 # 产到 build/native-ufs/libNativeUfs.a，baseline.sh 在 XNU_NATIVE_UFS=1 时
 # force_load。Root personality 匹配 IOPlatformExpertDevice，不依赖 ufshc 兼容串。
 CONFIG_XNU_NATIVE_UFS=y
-# v65：真根已经挂上（v63 真机 vfs_mountroot mounted），剩下的是"根卷未认证"。
-# 启用引擎自带的 owner-root 机制，让 bsd_init 接受由存储驱动认证的根设备；
-# 认证函数目前由 package/HummerStorageStubs.cpp 提供 bring-up 版本。
-CONFIG_XNU_VERIFIED_ROOT_PROBE=y
-CONFIG_XNU_OWNER_ROOT_AUDIT=y
-CONFIG_XNU_OWNER_ROOT_TRUST=y
 # CONFIG_XNU_NATIVE_AES=y
 # CONFIG_XNU_NATIVE_VIRTIO_BLOCK=y
 # CONFIG_XNU_NATIVE_RAM_BLOCK=y
@@ -98,6 +92,3 @@ CONFIG_XNU_OWNER_ROOT_TRUST=y
 # VerifiedRoot 和可选 boot_progress_poll；probe 阶段不构造块设备，用会 panic 的
 # hidden 桩满足静态链接（见 package/HummerStorageStubs.cpp）。
 CONFIG_XNU_EXTRA_LD_ARCHIVES="-Wl,-force_load,{tree}/build/native-probe-stubs/libNativeProbeStubs.a -Wl,-force_load,{tree}/build/hummer-storage-stubs/libHummerStorageStubs.a"
-
-# verified-root 归档：用桩包占位（baseline 只做 test -f，符号在上面那个文件里）
-CONFIG_XNU_VERIFIED_ROOT_ARCHIVE="{tree}/build/hummer-storage-stubs/libHummerStorageStubs.a"
