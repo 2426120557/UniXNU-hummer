@@ -6,6 +6,8 @@ OnePlus Ace 5 Pro（`hummer` / PKR110 / SM8750 骁龙 8 Elite）的 UniXNU 设�
 > （`upstream.rev = d9460ebb` + `patches/`），只保留 hummer 自己的设备相关部分：本机 UEFI 固件（hummerPkg）、
 > GPT 几何、ADT（6 核 + `/psci` + 根卷 UUID）、Synaptics S3910 触屏。
 
+**2026-10-25：v75 真机跑通 UEFI → XNU → 6 核 → 真根卷 → 用户态（Hello）。**
+
 ## 状态（v75，2026-10-25）
 
 | 项 | 状态 |
@@ -14,7 +16,8 @@ OnePlus Ace 5 Pro（`hummer` / PKR110 / SM8750 骁龙 8 Elite）的 UniXNU 设�
 | 13T 全量流水线 | ✅ 编过：OS + SystemOS 提取 / ufs policies / ram-data / hummer-touch；产 `payload.img`（160 MiB） |
 | 6 核 bring-up | ✅ 走标准 PSCI 起 6 核，早期异常消失 |
 | 面板改名 | ✅ `OnePlus Ace 5 Pro`（不再是 `OnePlus 13T`） |
-| root 挂载 | 🧪 已跑到 `root device wait`；补 `root_match_volume_uuid` 后验证中 |
+| root 挂载 | ✅ `root_match_volume_uuid` 生效，真根卷挂载成功 |
+| 用户态（Hello） | ✅ 首进程已起 —— **v75 首次打通 UEFI → XNU → 6 核 → 根卷 → 用户态** |
 | 持久 Data / GPU / 触摸控制器 | ⬜ |
 
 ## v75 踩到的三个坑（都已修，别再踩）
@@ -109,4 +112,5 @@ bash pack_v4.sh <uefi_repo> <out.img> <payload.img>
 
 ## 后续
 
-root 挂载打通后进入 Stage 7 用户态；之后是持久 Data 卷、Adreno 830 GPU、Synaptics S3910 触摸控制器。
+v75 已打通整条链路（UEFI → XNU → 6 核标准 PSCI → 真根卷 → 用户态 Hello）。
+后续：Stage 7 显示栈 / 输入调优、持久 Data 卷、Adreno 830 GPU、Synaptics S3910 触摸控制器，以及从 `fastboot boot` 转为常驻刷入。
