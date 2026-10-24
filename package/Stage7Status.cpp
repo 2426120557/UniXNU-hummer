@@ -28,10 +28,14 @@
 //                system frame simply paints over the old text.
 //   failed    -> nothing to resume (same reason); kept as a no-op so the
 //                driver's failure path stays intact.
-#include <arm64/hummer_early.h>
-#include <pexpert/pexpert.h>
-
+// The panel renderer's prototypes, spelled out here instead of including
+// <arm64/hummer_early.h>: that header is written by build-hummer-console-probe.py,
+// which runs later in the board's archive list than this builder, so on a fresh
+// tree the include would not resolve yet (v69b lost a run to exactly that).
+// The two signatures are the header's own; they have been stable since v18.
 extern "C" {
+void hummer_early_prints(const char *label, const char *value);
+void hummer_early_u32x(const char *label, unsigned int value);
 
 void
 boot_progress_display_status(const char *detail, uint64_t value)
