@@ -196,15 +196,29 @@ NATIVE_UFS_EDITS = [
         'probe 12: report whether IOStorageFamily matched the block device',
         """  panic ("%s", gMediaReport);""",
         """  {
-    OSDictionary *drivers = IOService::serviceMatching ("IOBlockStorageDriver");
-    OSIterator *iterator = drivers ? IOService::getMatchingServices (drivers) : nullptr;
-    unsigned inside = 0;
-    while (iterator && iterator->getNextObject ()) inside++;
-    OSSafeReleaseNULL (iterator);
-    OSSafeReleaseNULL (drivers);
+    // v60: media=0 with drivers=0 means nobody matched the device, so report the
+    // two facts that decide it: is the device a service, and does its metaclass
+    // chain actually reach IOBlockStorageDevice (the class the kext's
+    // IOBlockStorageDriver personality matches on)?
+    static const char *const probeClasses[] = { "IOBlockStorageDriver", "IOBlockStorageDevice", "NativeUfsBlock" };
+    unsigned counts[3] = {};
+    for (unsigned c = 0; c < 3; ++c) {
+      OSDictionary *matching = IOService::serviceMatching (probeClasses[c]);
+      OSIterator *iterator = matching ? IOService::getMatchingServices (matching) : nullptr;
+      while (iterator && iterator->getNextObject ()) counts[c]++;
+      OSSafeReleaseNULL (iterator);
+      OSSafeReleaseNULL (matching);
+    }
     int used = static_cast<int> (strlen (gMediaReport));
-    snprintf (gMediaReport + used, sizeof (gMediaReport) - used,
-              "storage drivers matched=%u ", inside);
+    used += snprintf (gMediaReport + used, sizeof (gMediaReport) - used,
+                      "services driver=%u blockdev=%u native=%u chain=",
+                      counts[0], counts[1], counts[2]);
+    const OSMetaClass *meta = gPendingDevice[0] ? gPendingDevice[0]->getMetaClass () : nullptr;
+    for (unsigned depth = 0; depth < 6 && meta && used < int (sizeof (gMediaReport)) - 40; ++depth) {
+      used += snprintf (gMediaReport + used, sizeof (gMediaReport) - used, "%s/",
+                        meta->getClassName ());
+      meta = meta->getSuperClass ();
+    }
   }
   panic ("%s", gMediaReport);""",
     ),
