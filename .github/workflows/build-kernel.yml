@@ -209,10 +209,10 @@ jobs:
                   (re.compile(r'panic\(\s*"amfi interface not available"\s*\);'),
                    'panic("HTC amfi=%p", (void *)amfi);'),
               ],
-              # v64g：根卷已挂上但"未认证"（v63 真机 bsd_init.c:1103）。这条检查等的是
-              # owner root 的密码学验证，本板没构建那套闭包，必然 pending。
-              # bsd_init.c 也是引擎自己补丁的落点，所以监视器对它的处理是：只改
-              # .cache/xnu-work、等 owner_authorized 出现、原子写入（避免编译读到半截文件）。
+              # v64h：根卷已挂上但"未认证"（v63 真机 bsd_init.c:1103）。这条检查等的是 owner root
+              # 的密码学验证，本板没构建那套闭包，必然 pending；改成打印标记、不 panic。
+              # 注意 bsd_init.c 也是引擎自己补丁的落点：下面 guard 只改编译副本、等补丁标记出现、
+              # 原子写入，否则会破坏 git apply --check 或让 clang 读到半截文件（v64a~g 的教训）。
               "bsd/kern/bsd_init.c": [(
                   re.compile(re.escape('panic("rootvp not authenticated after mounting");')),
                   'printf("kboot=rootauth skipped (bring-up)");'),
@@ -244,15 +244,15 @@ jobs:
               for rel, rules in RULES.items():
                   for base in roots():
                       p = os.path.join(base, rel)
-                    if rel == "bsd/kern/bsd_init.c":
-                        norm = p.replace(os.sep, "/")
-                        if "/feeds/" in norm or "/refer/" in norm:
-                            continue
-                        try:
-                            if "owner_authorized" not in pathlib.Path(p).read_text():
-                                continue
-                        except OSError:
-                            continue
+                      if rel == "bsd/kern/bsd_init.c":
+                          norm = p.replace(os.sep, "/")
+                          if "/feeds/" in norm or "/refer/" in norm:
+                              continue
+                          try:
+                              if "owner_authorized" not in pathlib.Path(p).read_text():
+                                  continue
+                          except OSError:
+                              continue
                       if p in seen or not os.path.exists(p):
                           continue
                       try:
