@@ -139,6 +139,76 @@ NATIVE_UFS_EDITS = [
 """,
     ),
     (
+        # v59：没有 owner 策略时 signedVolumeUuid() 应当仍然给出窗口的身份。
+        # 文档（concepts/userdata.md「根卷匹配」）说得很清楚：UUID 是 OS 窗口的
+        # 卷 UUID，分区方案发布的正是窗口内 GPT 的分区 GUID。所以没策略时直接
+        # 从窗口自己的 GPT 读那个 GUID —— 这与签名策略里的值本应一致，只是少了
+        # 密码学校验。v58 那种"跳过"会让 wait() 去等一个空字符串，永远等不到。
+        'root: volume identity from the window GPT when no policy exists',
+        """bool NativeUfsBlock::signedVolumeUuid (char out[37]) const
+{
+  if (!verifiedStorage || !verified.hashes) {
+    return false;
+  }""",
+        """bool NativeUfsBlock::signedVolumeUuid (char out[37]) const
+{
+  if (!verifiedStorage || !verified.hashes) {
+    // v59 bring-up: without an owner policy the signed view is empty, so take the
+    // identity from the window's own GPT image. The partition scheme publishes
+    // exactly this GUID as the volume UUID, which is what the publish wait and the
+    // kernel's root match compare against.
+    static const char hex[] = "0123456789ABCDEF";
+    if (!out || hostRead4k (0, absolute / 4096, 1, gScratch) != kIOReturnSuccess) return false;
+    const uint8_t *header = gScratch + 512;
+    if (le32 (header) != 0x20494645U || le32 (header + 4) != 0x54524150U) return false;
+    const uint64_t entries = le64 (header + 72);
+    const uint32_t count = le32 (header + 80);
+    const uint64_t entryBytes = entries * 512ULL;
+    const uint64_t block = (absolute + entryBytes) / 4096;
+    const unsigned offIn = static_cast<unsigned> ((absolute + entryBytes) % 4096);
+    if (!count || count > 128 || offIn >= 4096 ||
+        hostRead4k (0, block, 1, gScratch) != kIOReturnSuccess) return false;
+    const unsigned usable = (4096 - offIn) / 128;
+    for (unsigned i = 0; i < count && i < usable; ++i) {
+      const uint8_t *entry = gScratch + offIn + i * 128;
+      if (!rootEntryUsed (entry)) continue;
+      const uint8_t *g = entry + 16;               // unique partition GUID, mixed endian
+      unsigned at = 0;
+      for (unsigned c = 0; c < 4; ++c) { out[at++] = hex[g[3 - c] >> 4]; out[at++] = hex[g[3 - c] & 15]; }
+      out[at++] = '-';
+      for (unsigned c = 0; c < 2; ++c) { out[at++] = hex[g[5 - c] >> 4]; out[at++] = hex[g[5 - c] & 15]; }
+      out[at++] = '-';
+      for (unsigned c = 0; c < 2; ++c) { out[at++] = hex[g[7 - c] >> 4]; out[at++] = hex[g[7 - c] & 15]; }
+      out[at++] = '-';
+      for (unsigned c = 8; c < 10; ++c) { out[at++] = hex[g[c] >> 4]; out[at++] = hex[g[c] & 15]; }
+      out[at++] = '-';
+      for (unsigned c = 10; c < 16; ++c) { out[at++] = hex[g[c] >> 4]; out[at++] = hex[g[c] & 15]; }
+      out[at] = 0;
+      return true;
+    }
+    return false;
+  }""",
+    ),
+    (
+        # v59：media report 还看不到 IOStorageFamily 是否匹配上了我们的块设备。
+        # 把 IOBlockStorageDriver 的服务数量一并打出来：0 表示 kext 根本没接，
+        # 非 0 表示接了但没发布卷，两者的下一步完全不同。
+        'probe 12: report whether IOStorageFamily matched the block device',
+        """  panic ("%s", gMediaReport);""",
+        """  {
+    OSDictionary *drivers = IOService::serviceMatching ("IOBlockStorageDriver");
+    OSIterator *iterator = drivers ? IOService::getMatchingServices (drivers) : nullptr;
+    unsigned inside = 0;
+    while (iterator && iterator->getNextObject ()) inside++;
+    OSSafeReleaseNULL (iterator);
+    OSSafeReleaseNULL (drivers);
+    int used = static_cast<int> (strlen (gMediaReport));
+    snprintf (gMediaReport + used, sizeof (gMediaReport) - used,
+              "storage drivers matched=%u ", inside);
+  }
+  panic ("%s", gMediaReport);""",
+    ),
+    (
         # v58：validate() 的第二道门。Identity 相位对每个窗口调
         # signedVolumeUuid()，那条路同样要 owner 策略包；本板策略数为 0，
         # v57 真机就停在 stage="signed window identities"、result=0xe00002c1
