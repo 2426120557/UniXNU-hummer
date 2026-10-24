@@ -17,6 +17,11 @@ jobs:
   build:
     runs-on: macos-15
     timeout-minutes: 360
+    # 必须显式给写权限：没有它 GITHUB_TOKEN 是只读的，gh release upload 会 403。
+    # 而那一步带 continue-on-error，失败会被吞掉 —— 于是日志永远发不出来，
+    # v75 连续几轮"看不见报错"就是这么来的。
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
         with:
