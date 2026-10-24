@@ -83,6 +83,14 @@ CONFIG_XNU_NATIVE_UFS=y
 # CONFIG_XNU_NATIVE_ARCH_TIMER=y
 # CONFIG_XNU_NATIVE_ADRENO=n        # Adreno 830 (a8xx) 未成熟
 
+# v69：Stage 7 显示路径（移植自 OnePlus 13T / Pagani，同 SM8750、同 kernelcache）。
+# NativeLegacyDisplay 复用原版 IOMobileFramebufferLegacy，CPU 拷贝到固件 GOP
+# framebuffer —— 不需要 GPU 驱动就能看到系统画面。引擎 baseline 在
+# XNU_NATIVE_LEGACY_DISPLAY=1 时 force_load
+# build/native-legacy-display/libNativeLegacyDisplay.late.a（由
+# scripts/build-stage7-display.py 产出，源码在 package/）。
+CONFIG_XNU_NATIVE_LEGACY_DISPLAY=y
+
 # v68：Adreno 830 寄存器活性探针（不是驱动）。引擎的
 # offline-component-load-probes.patch 在 bsd_init 的 vfsinit 之后调用
 # native_adreno_firmware_probe()；本选项把它编进去，并由 baseline.sh

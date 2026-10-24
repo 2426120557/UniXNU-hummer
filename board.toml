@@ -116,6 +116,14 @@ archives = [
   # 本脚本只负责按引擎约定的路径产出该归档，内核源码零改动。
   # boot arg hummer-adreno-probe=1 才真正跑（跑完必然 panic 留值）。
   "build-hummer-adreno-probe.py",
+  # v69：Stage 7 显示栈（移植自 OnePlus 13T / Pagani，同 SM8750、同 21H461
+  # kernelcache）。从 kernelcache 逆 IOMobileFramebufferLegacy 的 358 槽虚表
+  # ABI，编译 NativeLegacyDisplay + Stage7Probe + NativeKeyStoreEvents，产出
+  # 引擎约定的 build/native-legacy-display/libNativeLegacyDisplay.late.a
+  # （CONFIG_XNU_NATIVE_LEGACY_DISPLAY=y 时由 baseline force_load）。
+  # 依赖：workflow 先跑 `./unixnu ipsw KernelCache` 解出 kernelcache
+  # （out/ipsw/21H461/kernelcache.decompressed；树内相对路径 ../../ipsw/...）。
+  "build-stage7-display.py --kernelcache ../../ipsw/21H461/kernelcache.decompressed",
   # 注意：所有构建器都在 macOS 上跑（kernel.py 硬性要求 xcodebuild + iphoneos SDK）。
   #
   # 已下线 build-hummer-video-map.py：它在 PE_create_console() 前面调
@@ -342,6 +350,33 @@ kernel_args = [
   "native-ufs-partition=unixnu",
   "native-ufs-root=1",
   "sheng-pmgr=2",
+  # ---- v69：Stage 7 显示与用户态（Pagani run 39 同款；CPU 呈现不过 GPU）----
+  # offline-mobile-graphics-load=1：bsd_init 的 vfsinit 后加载
+  #   IOMobileGraphicsFamily（offline-component-load-probes.patch 的钩子）。
+  # offline-legacy-register=1 + phase/gop/pm/validate/transfer/cpu-present：
+  #   NativeLegacyDisplay 的各阶段开关（默认 register 才建显示实例）。
+  # sheng-vsync=60：GOP scanout 没有 vblank 中断，用 work-loop 定时器以真实
+  #   时钟驱动 60Hz 软件刷新通知（原版 setDisplayRefreshProperties 发布）。
+  "offline-apfs-load=1",
+  "offline-mobile-graphics-load=1",
+  "offline-legacy-register=1",
+  "offline-legacy-phase=4",
+  "offline-legacy-gop=1",
+  "offline-legacy-pm=1",
+  "offline-legacy-validate=1",
+  "offline-legacy-transfer=1",
+  "offline-legacy-cpu-present=1",
+  "sheng-vsync=60",
+  "sheng-vsync-fixed=1",
+  # kt_fixed_zones=240 / startup_debug=0 / -no_corpses：Pagani run 39 记录里
+  #   进入系统界面的组合（zalloc 槽位预算、崩溃时不收集 corpse 占资源）。
+  # sheng-aks=1 + offline-key-events=1：临时 AppleKeyStore 状态服务
+  #   （package/NativeKeyStoreEvents.cpp），不提供真实密钥。
+  "kt_fixed_zones=240",
+  "startup_debug=0",
+  "-no_corpses",
+  "sheng-aks=1",
+  "offline-key-events=1",
 ]
 
 [payload.adt]

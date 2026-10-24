@@ -84,6 +84,15 @@ jobs:
         run: ./unixnu status -D "$GITHUB_WORKSPACE"
         working-directory: UniXNU
 
+      # v69：Stage 7 显示栈的 ABI 审计输入。build-stage7-display.py 要从原版
+      # kernelcache 逆 IOMobileFramebufferLegacy 的虚表，而 kernelcache 正常
+      # 是 prelink 时才解码的（在归档构建器之后）——这里提前解出来放到
+      # out/ipsw/21H461/kernelcache.decompressed，归档阶段直接用。
+      # 解码用 macOS 的 compression_tool，所以这步必须在 macOS runner 上。
+      - name: Decode the original kernelcache (display ABI audit input)
+        run: ./unixnu ipsw KernelCache -D "$GITHUB_WORKSPACE" 2>&1 | tee "$GITHUB_WORKSPACE/kernelcache.log"
+        working-directory: UniXNU
+
       # ── v42 诊断补丁 ─────────────────────────────────────────────────────
       # v39（手搓 ad-hoc 签名的 16 KiB 探针）和 v41（从 21H461 固件里原样抽出来
       # 的真 launchd 561,856 B + dyld 937,056 B）停在同一行：

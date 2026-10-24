@@ -8,8 +8,9 @@ OnePlus Ace 5 Pro（`hummer` / PKR110 / SM8750 骁龙 8 Elite）的 UniXNU 设�
 - ✅ **双系统分区 + 根卷（2026-10-24）**：从 userdata 切出 32 GiB `unixnu` 分区，SHNGROOT 根卷镜像已刷入并经哈希校验；UFS bring-up → 窗口发布 → APFS 容器 → **真根卷挂载** 全部打通。
 - ✅ **launchd 启动（v67，2026-10-24 真机验证）**：`vfs_mountroot mounted` → `load_init_program` → `exec init` → 签名/4K 全 rc=0 → `kboot exit rv=0`。XNU 已从真根卷把控制权交给用户态（bring-up 阶段 7）。用户态默认不往内核控制台输出，面板静默属预期。
 - ✅ **面板检查点（kboot）+ GENI 调试串口（v68）**：kboot 系列探针覆盖 exec 尾段；`hummer-uart=1` 把内核日志多路复用输出到 DTB `serial0`（qup_uart@a9c000，115200n8）。
+- 🧪 **Stage 7 显示栈（v69，移植自 OnePlus 13T/Pagani，同 SM8750 + 同 21H461 kernelcache）**：NativeLegacyDisplay 复用原版 IOMobileFramebufferLegacy，CPU 拷贝呈现到固件 GOP framebuffer（不过 GPU）；从 kernelcache 逆 358 槽虚表 ABI 生成绑定（`scripts/build-stage7-display.py`）；`sheng-vsync=60` 用 work-loop 定时器顶替 vblank 做 60Hz 软件刷新；Stage7Status 把进度打到面板。启动参数带 Pagani run 39 同款的用户态组合（`kt_fixed_zones=240` / `-no_corpses` / `offline-legacy-*` 等）。
 - 🧪 **Adreno 830 (a8xx)**：v68 起编入寄存器活性探针（`hummer-adreno-probe=1` 门控，复用引擎 bsd_init 钩子，零源码改动）；真显示驱动未开始。
-- ⬜ 持久 Data 卷（launchd 挂载路径已有探针覆盖）、GPU 驱动 —— 进行中。
+- ⬜ 持久 Data 卷（launchd 挂载路径已有探针覆盖）、GPU 加速、触摸（HID 框架已加载，控制器驱动未适配）—— 进行中。
 
 ## 目录
 
