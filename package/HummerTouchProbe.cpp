@@ -455,17 +455,19 @@ bool configureClock(Session &s, unsigned hz) {
 
 // Panic readout: the panic screen is the only console this bring-up has.
 void panicReadout(const Session &s, const char *why) {
-    static char text[760];
+    static char text[1024];
     const uint32_t *v = s.vals;
     snprintf(text, sizeof text,
         "HUMTOUCH %s s%u/%u st%u e%d\n"
         "HUMTOUCH vote%08x halt %08x %08x %08x %08x %08x gpll%08x pins %08x %08x %08x %08x\n"
-        "HUMTOUCH qup%08x fw%08x if%08x hw%08x lvl%u div%u %uHz dfs %08x %08x %08x %08x\n"
+        "HUMTOUCH qup%08x fw%08x if%08x hw%08x lvl%u div%u %uHz fd%u ud%u os%u dfs %08x %08x %08x %08x\n"
         "HUMTOUCH id rc%u via%u mode%u ver%d w%u mx%u my%u obj%u cfg%u fr%u ct%u agn%u oth%u bad%u feed%u rc%d n%u\n"
         "HUMTOUCH x0 %02x%02x%02x%02x%02x%02x/%02x%02x%02x%02x%02x%02x x1 %02x%02x%02x%02x%02x%02x/%02x%02x%02x%02x%02x%02x",
         why, native_htouch_stage_done, native_htouch_stage_req, native_htouch_step, native_htouch_error,
         v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[9], v[10], v[11], v[12],
-        v[19], v[20], v[21], v[22], s.level, s.div, static_cast<unsigned>(s.actualHz), v[15], v[16], v[17], v[18],
+        v[19], v[20], v[21], v[22], s.level, s.div, static_cast<unsigned>(s.actualHz),
+        static_cast<unsigned>(s.spi.info.fifo_disabled), static_cast<unsigned>(s.spi.use_dma),
+        static_cast<unsigned>(s.spi.oversampling), v[15], v[16], v[17], v[18],
         s.idRc, static_cast<unsigned>(s.viaCommand), s.fwMode, s.fwVersion, s.max_write, s.max_x, s.max_y,
         s.objects, s.config_size,
         native_htouch_frames, native_htouch_contacts, native_htouch_again, native_htouch_other, native_htouch_bad,
@@ -480,7 +482,10 @@ void panicReadout(const Session &s, const char *why) {
 unsigned gPanicAfter;
 void checkpoint(unsigned stage, const Session &s) {
     native_htouch_stage_done = stage;
-    if (gPanicAfter && gPanicAfter >= stage) panicReadout(s, "done");
+    // "Reach stage N": stops at the first checkpoint at or past gPanicAfter, so
+    // hummer-touch-panic=3 报的是 stage3 完成后的状态，而不是 stage1 就把机器停掉。
+    // The sub-stage probes in touchThread use 5/6/7 for the three steps of stage 3.
+    if (gPanicAfter && stage >= gPanicAfter) panicReadout(s, "done");
 }
 void checkpointFail(const Session &s) {
     if (gPanicAfter) panicReadout(s, "fail");
@@ -509,10 +514,17 @@ static void touchThread(void *, wait_result_t) {
         checkpoint(2, *s);
         if (stage < 3) break;
         if (!openBus(*s)) {checkpointFail(*s); break;}
+        // Sub-stage probes inside stage 3: 5 = engine initialised (DMA buffer, GENI),
+        // 6 = serial clock programmed, 7 = transfer buffers allocated. Each one stops
+        // the machine right before the next risky write, so a hard reset can be
+        // attributed to exactly one step.
+        if (gPanicAfter == 5) panicReadout(*s, "openBus done");
         if (!configureClock(*s, hz)) {checkpointFail(*s); break;}
+        if (gPanicAfter == 6) panicReadout(*s, "clock done");
         s->tx = static_cast<uint8_t *>(IOMalloc(S3910_MAX_PAYLOAD + 3));
         s->rx = static_cast<uint8_t *>(IOMalloc(S3910_MAX_PAYLOAD + 3));
         if (!s->tx || !s->rx) {fail(5, TCM_ENOMEM); checkpointFail(*s); break;}
+        if (gPanicAfter == 7) panicReadout(*s, "buffers done");
         const int r = tcmResetAndIdentify(*s);
         s->idRc = static_cast<unsigned>(r);
         if (r) {fail(5, r); checkpointFail(*s); break;}
