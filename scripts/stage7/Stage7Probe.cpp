@@ -18,6 +18,11 @@ extern "C" void boot_progress_display_status(const char *,uint64_t);
 extern "C" void native_legacy_display_static_init(void) __asm__("__GLOBAL__sub_I_NativeLegacyDisplay.cpp");
 extern "C" void native_keyevents_static_init(void) __asm__("__GLOBAL__sub_I_NativeKeyStoreEvents.cpp");
 extern "C" IOService *native_legacy_display_allocate(void),*native_keyevents_allocate(void);
+// Offline HID input device (package/HummerHidInput.cpp + drivers/NativeHidInput).
+// Strong reference on purpose: a weak one would not pull HummerHidInput.o out of
+// the archive, so the symbol would resolve to nothing at link time and the device
+// would never start. The archive always carries that object.
+extern "C" void native_hid_input_probe(void);
 static IOService *pendingDisplay;
 static bool displayInitialized,ephemeralState;
 static uint64_t frames,clients,aksCalls,aksOpens;
@@ -111,14 +116,24 @@ extern "C" void native_legacy_display_probe(void) {
     progress("display class initialized",pendingDisplay!=nullptr);
 }
 extern "C" void native_legacy_display_late_probe(void) {
+    // The offline HID source loads IOHIDFamily/IOHIDEventDriver itself whenever
+    // offline-hid-input=1 is set, and only creates the device when that first load
+    // succeeded - so it must run before anything else touches IOHID. Without that
+    // argument it returns at once and this probe keeps doing the load below for the
+    // plain display / key-state path.
+    unsigned hidEnabled=0;
+    bool hidRequested=PE_parse_boot_argn("offline-hid-input",&hidEnabled,sizeof hidEnabled) && hidEnabled==1;
+    native_hid_input_probe();
     progress("key state start enter",0);
     startKeyState();
     // Original HID services can register now; no synthetic input device or events.
-    progress("IOHIDFamily load enter",0);
-    progress("IOHIDFamily load",(uint32_t)OSKextLoadKextWithIdentifier("com.apple.iokit.IOHIDFamily"));
-    progress("IOHIDEventDriver load enter",0);
-    progress("IOHIDEventDriver matching",(uint32_t)OSKext::loadKextWithIdentifier(
-        "com.apple.iokit.IOHIDEventDriver",true,false,kOSKextExcludeNone,kOSKextExcludeNone,nullptr));
+    if(!hidRequested) {
+        progress("IOHIDFamily load enter",0);
+        progress("IOHIDFamily load",(uint32_t)OSKextLoadKextWithIdentifier("com.apple.iokit.IOHIDFamily"));
+        progress("IOHIDEventDriver load enter",0);
+        progress("IOHIDEventDriver matching",(uint32_t)OSKext::loadKextWithIdentifier(
+            "com.apple.iokit.IOHIDEventDriver",true,false,kOSKextExcludeNone,kOSKextExcludeNone,nullptr));
+    }
     OSDictionary *hidMatching=IOService::serviceMatching("IOHIDResource");
     IOService *hidResource=hidMatching?IOService::waitForMatchingService(hidMatching,5000000000ULL):nullptr;
     progress("IOHIDResource ready",hidResource!=nullptr);

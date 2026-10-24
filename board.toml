@@ -102,8 +102,15 @@ kernel_args = [
   "offline-legacy-cpu-present=1", "offline-key-events=1", "sheng-aks=1",
   # 多核：保留 6 核 ADT + /psci，走 XNU 标准 PSCI 起从核。
   # （不再用 sheng-smp/armcpu-spi-ipi：那条路径在异常向量就绪前就触发早期 fatal。）
-  # hummer 触屏：先关闭，过了 Hello 再改 =3（识别芯片）→ =4（上报触摸）
-  "hummer-touch=0", "hummer-touch-panic=0",
+  # 触屏上报链路（对齐 13T 的四个开关，缺一个都收不到触摸）：
+  #   offline-hid-input=1  HummerHidInput 启动（加载 IOHIDFamily/IOHIDEventDriver、
+  #                        创建 owned IOHIDDevice）
+  #   offline-hid-home=1   上面那段创建条件（13T 就把 Home 开关复用成总闸）
+  #   sheng-touch-hid=1    NativeHidInput 才注册 native_touch_set_sink、才拼
+  #                        触摸报告描述符、才置 Built-In/DisplayIntegrated
+  #   hummer-touch=4       S3910 探针跑到触点轮询并 publish
+  "offline-hid-input=1", "offline-hid-home=1", "sheng-touch-hid=1",
+  "hummer-touch=4", "hummer-touch-panic=0",
 ]
 trust_cache_sha256 = ["7416ca4f8377146626bb284e2133c76bee6cb4e3ee0af5d648b186235a7323a7"]
 

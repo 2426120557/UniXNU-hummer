@@ -66,6 +66,9 @@ volatile int native_htouch_error;
 volatile uint32_t native_htouch_frames, native_htouch_contacts, native_htouch_again,
     native_htouch_other, native_htouch_bad, native_htouch_hid_feeds;
 volatile int native_htouch_last_x = -1, native_htouch_last_y = -1;
+// NativeHidInput.cpp declares this extern and increments it per HID report it
+// emits from the mailbox below; the sheng kit defines it in TouchProbe.cpp.
+volatile uint32_t native_touch_hid_reports;
 }
 
 // ---- S3910 TouchComm constants (synaptics-s3910.c) ----

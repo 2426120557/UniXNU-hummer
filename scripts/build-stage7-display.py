@@ -189,7 +189,7 @@ def code(data,info):
     sec=next(s for g in info['segments'] for s in g['sections'] if s['name']=='__text');return data[sec['fileoff']:sec['fileoff']+sec['size']]
 require(code(raw,image)==code(late.read_bytes(),macho(late.read_bytes())),'Only owned initializer section registration changes')
 objects=[late,OUT/'original-bindings.o']
-for component in ('Stage7Probe','NativeKeyStoreEvents'):
+for component in ('Stage7Probe','NativeKeyStoreEvents','HummerHidInput'):
     print(run(['python3',ROOT/'scripts/build-stage7-driver.py',component],text=True),end='')
     directory=ROOT/'build'/('native-keystore-events' if component=='NativeKeyStoreEvents' else 'native-legacy-display')
     source_obj=directory/(component+'.o')
@@ -201,12 +201,72 @@ for component in ('Stage7Probe','NativeKeyStoreEvents'):
                 'Keystore late registration leaves instructions unchanged')
         objects.append(staged)
     else:objects.append(source_obj)
+# Offline HID input. drivers/NativeHidInput/NativeHidInput.cpp derives from the
+# original IOHIDDevice, whose ABI (207-slot vtable, 0xd0 instance size, the
+# original C2/D2/gMetaClass addresses) is frozen in kits/hummer/OriginalHidDeviceABI.h
+# and kits/hummer/hid-vtable.txt: the archive step runs *before* the prelink that the
+# engine's build-native-hid-input.py would have to read. Here the class is compiled
+# against that ABI, the inherited IOHIDDevice methods its own vtable imports are
+# bound to their qualified addresses, and the object is staged so HummerHidInput.cpp
+# can register the metaclass between preModLoad and postModLoad like the other late
+# classes. The frozen values are re-checked against the built object below.
+print(run(['python3',ROOT/'scripts/build-stage7-driver.py','NativeHidInput'],text=True),end='')
+hid=ROOT/'build/native-hid-input';hid_obj=hid/'NativeHidInput.o'
+hid_raw=hid_obj.read_bytes();hid_macho=macho(hid_raw)
+st=next(p for c,p,_ in hid_macho['commands'] if c==2)
+sy,count,strings,_=struct.unpack_from('<4I',hid_raw,st+8)
+symbols=[]
+for i in range(count):
+    ix,kind,section,_,va=struct.unpack_from('<IBBHQ',hid_raw,sy+i*16)
+    symbols.append((hid_raw[strings+ix:hid_raw.index(b'\0',strings+ix)].decode(),va,kind))
+vt=next(va for name,va,_ in symbols if name=='__ZTV14NativeHidInput')
+relocations={}
+for segment in hid_macho['segments']:
+    for sec in segment['sections']:
+        if sec['va']<=vt<sec['va']+sec['size']:
+            ro,rc=struct.unpack_from('<2I',hid_raw,sec['command_offset']+56)
+            for i in range(rc):
+                offset,bits=struct.unpack_from('<2I',hid_raw,ro+i*8)
+                if bits>>27&1 and bits>>28==0 and bits>>25&3==3:relocations[sec['va']+offset]=symbols[bits&0xffffff][0]
+compiled=[relocations.get(vt+16+i*8) for i in range(207)]
+require(all(compiled),'Compiled exact 207-slot IOHIDDevice vtable')
+slots=[int(v,16) for line in (ROOT/'kits/hummer/hid-vtable.txt').read_text().splitlines()
+       if line.strip() and not line.startswith('#') for v in line.split()]
+require(len(slots)==207,'Frozen IOHIDDevice vtable must have 207 slots')
+# The original object itself: same kernelcache and slide as hid-vtable.txt.
+bindings={'__ZN11IOHIDDeviceC2EPK11OSMetaClass':0xfffffff004ad94f8,
+          '__ZN11IOHIDDeviceD2Ev':0xfffffff004ad9518,
+          '__ZN11IOHIDDevice10gMetaClassE':0xfffffff006ae6fa0,
+          '__ZTV11IOHIDDevice':0xfffffff005d045b0}
+owned=[]
+for i,name in enumerate(compiled):
+    if name.startswith(('__ZN14NativeHidInput','__ZNK14NativeHidInput')):owned.append(i)
+    elif '11IOHIDDevice' in name:bindings[name]=slots[i]
+    else:require(i<168,'Inherited IOService method outside the qualified base range')
+# The qualified reference overrides these ten slots: 0/1 constructors and
+# destructor, 7/14/86/87/111 the IOService-only overrides, and 171/173/180 the
+# two new*String methods plus the pure newReportDescriptor. Printed rather than
+# required: the bindings above stay correct whatever the set is, and a hard
+# failure here would only turn a harmless source drift into a dead build.
+print('IOHIDDevice owned slots:',owned,flush=True)
+hid_asm=hid/'hid-original-bindings.S'
+hid_asm.write_text(''.join('.globl %s\n.set %s, %#x\n'%(n,n,a) for n,a in sorted(bindings.items())))
+run(['xcrun','clang','-target','arm64-apple-ios17.0','-isysroot',sdk,'-c',hid_asm,'-o',hid/'hid-original-bindings.o'])
+hid_late=hid/'NativeHidInput.late.o'
+run([llvm/'llvm-objcopy','--remove-section=__DATA,__mod_init_func',
+     '--globalize-symbol=__GLOBAL__sub_I_NativeHidInput.cpp',hid_obj,hid_late])
+require(code(hid_raw,hid_macho)==code(hid_late.read_bytes(),macho(hid_late.read_bytes())),
+        'Owned HID instructions unchanged by deferred metaclass registration')
+objects += [hid_late,hid/'hid-original-bindings.o']
 archive=OUT/'libNativeLegacyDisplay.late.a';archive.unlink(missing_ok=True)
 run(['xcrun','ar','rcs',archive,*objects])
 sources=[ROOT/'drivers/NativeMobileDisplay/NativeLegacyDisplay.cpp',
          ROOT/'drivers/NativeMobileDisplay/NativeLegacyRequest.h',
          ROOT/'drivers/NativeKeyStoreEvents/NativeKeyStoreEvents.cpp',
-         ROOT/'scripts/stage7/Stage7Probe.cpp',Path(__file__),
+         ROOT/'scripts/stage7/Stage7Probe.cpp',
+         ROOT/'kits/hummer/HummerHidInput.cpp',
+         ROOT/'drivers/NativeHidInput/NativeHidInput.cpp',
+         ROOT/'kits/hummer/OriginalHidDeviceABI.h',ROOT/'kits/hummer/hid-vtable.txt',Path(__file__),
          ROOT/'scripts/build-stage7-driver.py',ROOT/'scripts/original_stage7.py',ROOT/'scripts/audit-stage7-display.py']
 (OUT/'build-report.json').write_text(json.dumps(dict(original_sha256=original.sha256,
     archive_sha256=sha(archive),source_sha256={str(p.relative_to(ROOT)):sha(p) for p in sources},
