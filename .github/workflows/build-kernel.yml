@@ -30,11 +30,23 @@ jobs:
         with:
           python-version: "3.12"
 
+      # 缓存 out/ipsw（OS+SystemOS 解压后约 8 GiB）。单独成条目、且 key 稳定，
+      # 这样失败重跑不用再拉那 8 GiB——这正是之前每次重编都卡在拉 IPSW 的根因。
+      # 单仓库缓存上限 10 GiB，8 GiB 的 ipsw 单独存得下；引擎树/feeds 放第二个条目尽力缓存。
+      - name: Cache the fetched IPSW (OS + SystemOS, ~8 GiB)
+        uses: actions/cache@v4
+        with:
+          path: out/ipsw
+          key: hummer-ipsw-21H461-v1
+          restore-keys: |
+            hummer-ipsw-21H461-
+
       # 缓存这两块（第二轮起省掉 21 个子模块的 clone 和 7 个源码仓库的 fetch）：
       #   .cache      ./unixnu --prepare 产出的引擎树（按 upstream.rev + 补丁指纹命名，
       #               prepare() 发现有就直接返回，天然命中）
       #   out/feeds   ./unixnu fetch 的源码
-      # 不缓存 out/ipsw：OS+SystemOS 解压后约 8 GiB，会顶爆单仓库 10 GB 的缓存上限。
+      # 注意：若本仓库缓存总额已逼近 10 GiB，这个条目可能被 GitHub 拒存（非致命），
+      # 下一轮会回退到重新 clone/fetch——但 ipsw 那条已命中，仍省掉最大的下载。
       - name: Cache the prepared engine and fetched feeds
         uses: actions/cache@v4
         with:
@@ -85,7 +97,12 @@ jobs:
           # OS(4.9 GiB) + SystemOS(3.1 GiB) 很吃磁盘，先记一下余量，便于判断是不是
           # "no space left on device"（macOS runner 的可用空间并不宽裕）。
           df -h . | tee out/hummer/logs/actions-disk.log
-          ./unixnu ipsw fetch AppleLogo KernelCache OS Cryptex1,SystemOS StaticTrustCache Cryptex1,SystemTrustCache 2>&1 | tee out/hummer/logs/actions-ipsw.log
+          # 缓存命中则跳过抓取（省掉 8 GiB 下载）；只在文件缺失时才拉。
+          if [ -f out/ipsw/21H461/044-76040-038.dmg ]; then
+            echo "IPSW already restored from cache, skipping fetch" | tee out/hummer/logs/actions-ipsw.log
+          else
+            ./unixnu ipsw fetch AppleLogo KernelCache OS Cryptex1,SystemOS StaticTrustCache Cryptex1,SystemTrustCache 2>&1 | tee out/hummer/logs/actions-ipsw.log
+          fi
           # 下面每条单独落盘：上几轮全塞在一个步骤里，挂了也不知道是哪一条。
           ./unixnu tree 2>&1 | tee out/hummer/logs/actions-tree.log
           df -h . | tee -a out/hummer/logs/actions-disk.log

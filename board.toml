@@ -92,7 +92,9 @@ dram_size = "0x100000000"
 timeout = 10
 kernel_args = [
   "-v", "serial=0", "debug=0x14e", "cpus=6", "kt_fixed_zones=240",
-  "native-ufs-root=1", "native-ufs-partition=unixnu", "native-ufs-diagnostics=1", "sheng-pmgr=2",
+  # 根镜像所在分区：编译期由 GccUfs.h 的 UFS_ROOT_PARTITION 决定——SM8750 构建
+  # (-DNATIVE_UFS_SM8750=1) 已经锁成 "unixnu"，所以这里不用、也不能用启动参数覆盖。
+  "native-ufs-root=1", "native-ufs-diagnostics=1", "sheng-pmgr=2",
   "offline-apfs-load=1", "startup_debug=0", "-no_corpses",
   "sheng-vsync=60", "sheng-vsync-fixed=1", "offline-mobile-graphics-load=1",
   "offline-legacy-register=1", "offline-legacy-phase=4", "offline-legacy-gop=1",

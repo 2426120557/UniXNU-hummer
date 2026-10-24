@@ -3,73 +3,10 @@
 import argparse
 import hashlib
 import json
-import shutil
 from pathlib import Path
 import runpy
 import struct
 import subprocess
-
-# v54 (hummer dual-system): the SHNGROOT manifest can live on a partition other than
-# "userdata" (e.g. a dedicated "unixnu" partition), while Android keeps its own
-# userdata. Select it with the native-ufs-partition=<GPT name> boot argument. The
-# upstream driver hardcodes "userdata" in findRootLayout(); these edits make the
-# partition name configurable (default still "userdata", so sheng is unchanged).
-# Anchors are exact-once: if they stop matching the upstream source, the build fails
-# loudly instead of silently producing a driver that ignores the boot argument.
-NATIVE_UFS_PARTITION_EDITS = [
-    (
-        '  PE_parse_boot_argn ("native-ufs-root", &rootMode, sizeof (rootMode));\n'
-        '  native_ufs_probe_requested = probe != 0;\n',
-        '  PE_parse_boot_argn ("native-ufs-root", &rootMode, sizeof (rootMode));\n'
-        '  {\n'
-        '    // A dual-system board keeps Android\'s userdata and flashes the root image into a\n'
-        '    // separately named partition: native-ufs-partition=unixnu. The GPT name field is\n'
-        '    // UTF-16LE and 32 characters wide, so a longer value is not a name we can match.\n'
-        '    char name[sizeof (gRootPartitionName)] = {};\n'
-        '    if (PE_parse_boot_argn ("native-ufs-partition", name, sizeof (name)) && name[0]) {\n'
-        '      unsigned i = 0;\n'
-        '      for (; i + 1 < sizeof (gRootPartitionName) && name[i]; ++i) gRootPartitionName[i] = name[i];\n'
-        '      gRootPartitionName[i] = \'\\0\';\n'
-        '    }\n'
-        '  }\n'
-        '  native_ufs_probe_requested = probe != 0;\n',
-    ),
-]
-NATIVE_UFS_PARTITION_HEADER_EDITS = [
-    (
-        'RootLayout.h',
-        'static uint8_t gScratch[kDataMax];\n',
-        'static uint8_t gScratch[kDataMax];\n'
-        '\n'
-        '// v54: the partition whose first block carries the root manifest. sheng keeps the\n'
-        '// image in Android\'s own userdata; a dual-system board flashes it into a separate\n'
-        '// partition and selects it with native-ufs-partition=<GPT name>.\n'
-        'static char gRootPartitionName[32] = "userdata";\n',
-    ),
-    (
-        'RootLayout.h',
-        '  static const char wanted[] = "userdata";\n',
-        '  const char *wanted = gRootPartitionName;\n'
-        '  unsigned wantedLen = 0;\n'
-        '  while (wantedLen < sizeof (gRootPartitionName) - 1 && wanted[wantedLen]) ++wantedLen;\n',
-    ),
-    (
-        'RootLayout.h',
-        '    bool match = true;\n'
-        '    for (unsigned c = 0; c < sizeof (wanted); c++) {\n'
-        '      if (entry[56 + 2 * c] != static_cast<uint8_t> (wanted[c]) || entry[57 + 2 * c] != 0) {\n'
-        '        match = false;\n'
-        '        break;\n'
-        '      }\n'
-        '    }\n',
-        '    bool match = wantedLen > 0;\n'
-        '    for (unsigned c = 0; match && c <= wantedLen; c++) {\n'
-        '      if (entry[56 + 2 * c] != static_cast<uint8_t> (wanted[c]) || entry[57 + 2 * c] != 0) {\n'
-        '        match = false;\n'
-        '      }\n'
-        '    }\n',
-    ),
-]
 
 
 def main():
@@ -86,30 +23,8 @@ def main():
     output = root / {'NativeUfs': 'build/native-ufs', 'NativeVirtioBlock': 'build/native-virtio-block',
                      'NativeRamBlock': 'build/native-ram-block'}[args.component]
     output.mkdir(parents=True, exist_ok=True)
-    source = root / 'drivers' / args.component / (args.component + '.cpp')
-    if args.component == 'NativeUfs':
-        # v54 (hummer dual-system): apply the configurable-partition-name patch to a
-        # staged copy so the upstream submodule stays untouched. See the edit tables above.
-        staged = output / 'src'
-        if staged.exists():
-            shutil.rmtree(staged)
-        shutil.copytree(source.parent, staged)
-        patched = staged / source.name
-        text = patched.read_text()
-        if text.count(NATIVE_UFS_PARTITION_EDITS[0][0]) != 1:
-            raise SystemExit('NativeUfs partition patch anchor is not unique '
-                             f'({text.count(NATIVE_UFS_PARTITION_EDITS[0][0])} matches)')
-        patched.write_text(text.replace(NATIVE_UFS_PARTITION_EDITS[0][0], NATIVE_UFS_PARTITION_EDITS[0][1]))
-        for hname, hold, hnew in NATIVE_UFS_PARTITION_HEADER_EDITS:
-            target = staged / hname
-            header = target.read_text()
-            if header.count(hold) != 1:
-                raise SystemExit(f'NativeUfs header patch anchor is not unique '
-                                 f'({header.count(hold)} matches): {hname}')
-            target.write_text(header.replace(hold, hnew))
-        source = patched
     obj = output / (args.component + '.o')
-    command = compile_command(record, source, obj)
+    command = compile_command(record, root / 'drivers' / args.component / (args.component + '.cpp'), obj)
     command += ['-DNATIVE_UFS_SM8750=1', '-DNATIVE_UFS_READ_ONLY=1',
                 '-Wno-unused-function']
     if args.root_windows:
