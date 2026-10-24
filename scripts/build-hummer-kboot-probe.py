@@ -74,6 +74,7 @@ STALE_OBJECTS = ("startup.o", "startup.o.json",
                  "machine_task.o", "machine_task.o.json",
                  "sleh.o", "sleh.o.json",
                  "kern_exit.o", "kern_exit.o.json",
+                 "debug.o", "debug.o.json",
                  "vfs_syscalls.o", "vfs_syscalls.o.json")
 
 DECL = 'extern void hummer_early_prints (const char *, const char *);'
@@ -328,6 +329,33 @@ KEXIT_OPS = [
                '\t{ ' + DECL_U32X + ' hummer_early_u32x ("kboot exit rv", (unsigned int) rv); }\n']},
 ]
 
+# v73：panic 从来没在面板上出现过。
+# 面板上的每一行都来自探针显式调用的 hummer_early_prints；panic() 走的是
+# kprintf（串口/控制台），跟这个自绘渲染器毫无关系。所以 v71/v72 真机上
+# "kboot exit init / rv=0 之后什么都没有" 有两种完全不同的解释：内核 panic 了
+# 但看不见，或者 launchd 活着但卡住。分辨这两者必须先把 panic 印到面板上。
+#
+# panic、panic_with_options、panic_with_data 三个变体全部汇聚到
+# panic_trap_to_debugger（debug.c:1132），所以只在这一处的函数体开头插一次，
+# 就能覆盖全部。打三行：
+#   PANIC <格式串>        —— 格式串本身就能区分大多数死点
+#   PANIC caller lo/hi    —— 调用者地址：内核按固定基址链接
+#                            （ARM64_LINK_ADDR=0xfffffff007004000，slide -0x1000000），
+#                            事后能用 llvm-nm 对着 kernel.macho 反查是哪个 panic 调用点。
+# 没有任何引擎补丁碰 osfmk/kern/debug.c（grep patches/xnu 全部补丁的 --- a/ 清单核实），
+# 所以这是纯源码插入，不涉及 zzz 那种双改写。
+PANIC_ANCHOR = ('panic_trap_to_debugger(const char *panic_format_str, va_list *panic_args, '
+                'unsigned int reason, void *ctx,\n'
+                '    uint64_t panic_options_mask, void *panic_data_ptr, unsigned long panic_caller)\n'
+                '{\n')
+PANIC_OPS = [
+    {"anchor": PANIC_ANCHOR,
+     "after": ['\t{ ' + DECL + ' hummer_early_prints ("PANIC", panic_format_str); }\n',
+               '\t{ ' + DECL_U32X + ' hummer_early_u32x ("PANIC caller lo", (unsigned int) panic_caller); }\n',
+               '\t{ ' + DECL_U32X + ' hummer_early_u32x ("PANIC caller hi", '
+               '(unsigned int) ((unsigned long long) panic_caller >> 32)); }\n']},
+]
+
 # v68：launchd 之后的用户态可见性。
 # 1) 通用挂载探针（bsd/vfs/vfs_syscalls.c，没有任何补丁碰它 —— 纯源码插入，
 #    2026-10-24 对照引擎 b6ae99c 的 patches/xnu 全部 51 个补丁的 --- a/ 清单核实）。
@@ -375,6 +403,7 @@ IDEMPOTENT_KEYS = {
     "kern_exec.c": '"kboot exec rc"',
     "ubc_subr.c": 'kboot n4k rc',
     "vfs_syscalls.c": '"kboot mount rc"',
+    "debug.c": '"PANIC caller lo"',
 }
 
 SOURCE_OPS = {
@@ -382,6 +411,7 @@ SOURCE_OPS = {
     "machine_task.c": MACHINE_TASK_OPS,
     "sleh.c": SLEH_OPS,
     "kern_exit.c": KEXIT_OPS,
+    "debug.c": PANIC_OPS,
     "vfs_syscalls.c": MOUNT_OPS,
 }
 
@@ -415,6 +445,7 @@ def main():
         (XNU / "osfmk/arm64/machine_task.c", "ops"),
         (XNU / "osfmk/arm64/sleh.c", "ops"),
         (XNU / "bsd/kern/kern_exit.c", "ops"),
+        (XNU / "osfmk/kern/debug.c", "ops"),  # v73：panic -> 面板
         (XNU / "bsd/vfs/vfs_syscalls.c", "ops"),  # v68：mount_common
     ]
     for path, mode in targets:
