@@ -80,7 +80,7 @@ def make_tree(memory_size, random_seed, root_match_volume_uuid=None, trust_cache
                '<key>IOPropertyMatch</key><dict><key>UUID</key><string>' +
                volume_uuid + '</string></dict></dict>\0')
         root_matching = [('root-matching', xml.encode())]
-    return node('device-tree', [('model', b'iPad7,1\0' if ipad_identity else b'OnePlus 13T\0'),
+    return node('device-tree', [('model', b'iPad7,1\0' if ipad_identity else b'OnePlus Ace 5 Pro\0'),
                                *([('target-type', b'J120\0')] if ipad_identity else []),
                                ('compatible', b'oneplus,hummer\0qcom,sm8750\0')], [
         node('chosen', [('random-seed', random_seed), *empty_nvram_proxy(), *root_matching,
@@ -116,7 +116,7 @@ def make_tree(memory_size, random_seed, root_match_volume_uuid=None, trust_cache
         *([node('buttons', [('compatible', b'buttons\0'), ('device_type', b'buttons\0'),
                            ('button-names', b'hold\0voldown\0volup\0'),
                            ('home-button-type', struct.pack('<I', 2))])] if ipad_identity else []),
-        node('product', [('product-name', b'iPad Pro (12.9-inch) (2nd generation)\0' if ipad_identity else b'OnePlus 13T\0'),
+        node('product', [('product-name', b'iPad Pro (12.9-inch) (2nd generation)\0' if ipad_identity else b'OnePlus Ace 5 Pro\0'),
                          ('model', b'hummer\0'),
                          *([('product-description', b'iPad Pro (12.9-inch) (2nd generation)\0'),
                             ('artwork-device-idiom', b'pad\0'),
