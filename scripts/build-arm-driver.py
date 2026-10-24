@@ -139,6 +139,38 @@ NATIVE_UFS_EDITS = [
 """,
     ),
     (
+        # v62：v61 之后 IOStorageFamily 已经接上（driver=1、reads=61、media=3），
+        # 但等待条件用的是窗口内 GPT 的分区 GUID（9232A33A…），而分区方案真正
+        # 发布出来的是 APFS 容器与卷（uuid=E886F82C… / 8B46FE70…）——两者不是
+        # 同一个标识，于是 wait 永远超时、published 停在 1。
+        # 没有签名身份可比对时，改为"该窗口下出现了任何 IOMedia 就算发布成功"，
+        # 让两个窗口都走完发布；窗口的真实卷 UUID 从 probe=12 的媒体列表里读，
+        # 读到之后再把它填进 board.toml 的 root_match_volume_uuid。
+        'root: accept any media under the window when no identity exists',
+        """static bool mediaWithUuidExists (const char *uuid, NativeUfsBlock *window)
+{
+  OSDictionary *matching = IOService::serviceMatching ("IOMedia");
+  OSDictionary *properties = OSDictionary::withCapacity (1);
+  OSString *wanted = OSString::withCString (uuid);
+  bool found = false;
+  if (matching && properties && wanted && properties->setObject ("UUID", wanted) &&
+      matching->setObject ("IOPropertyMatch", properties)) {""",
+        """static bool mediaWithUuidExists (const char *uuid, NativeUfsBlock *window)
+{
+  OSDictionary *matching = IOService::serviceMatching ("IOMedia");
+  OSDictionary *properties = nullptr;
+  OSString *wanted = nullptr;
+  bool found = false;
+  // v62 bring-up: without a signed identity there is no UUID to compare, so any
+  // media published below this window proves the partition scheme parsed it.
+  if (uuid && uuid[0]) {
+    properties = OSDictionary::withCapacity (1);
+    wanted = OSString::withCString (uuid);
+  }
+  if (matching && (!wanted || (properties && properties->setObject ("UUID", wanted) &&
+      matching->setObject ("IOPropertyMatch", properties)))) {""",
+    ),
+    (
         # v61：真正的原因。预链接内核 __PRELINK_INFO 里 IOStorageFamily 的匹配规则是
         #   IOBlockStorageDriver: IOProviderClass=IOBlockStorageDevice
         #                        IOPropertyMatch = { device-type = "Generic" }
