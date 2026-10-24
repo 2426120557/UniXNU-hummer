@@ -247,6 +247,11 @@ jobs:
               for rel, rules in RULES.items():
                   for base in roots():
                       p = os.path.join(base, rel)
+                      # v64b：引擎在 feeds/ 上应用它自己的补丁；我们先改那里会让
+                      # 它的 bsd_init.c 补丁上下文对不上而整轮失败。只允许改编译副本
+                      # （.cache/xnu-work），那时补丁已经打完。
+                      if rel == "bsd/kern/bsd_init.c" and "/feeds/" in p.replace(os.sep, "/"):
+                          continue
                       if p in seen or not os.path.exists(p):
                           continue
                       try:
