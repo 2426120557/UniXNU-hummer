@@ -104,6 +104,23 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
+      # 日志可诊断性：job logs 需要 admin、artifacts 需要认证，只有 release 资产
+      # 是公开可下载的，所以每轮都把日志打到 ci-latest。删掉这一步就看不到报错。
+      - name: Publish build outputs
+        if: always()
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tar czf ci-logs.tar.gz UniXNU/out/hummer/logs \
+            out/hummer/logs out/hummer/kernel/kernel.macho out/hummer/payload/payload.img 2>/dev/null || \
+          tar czf ci-logs.tar.gz out/hummer/logs 2>/dev/null || true
+          gh release view ci-latest >/dev/null 2>&1 || \
+            gh release create ci-latest --title "ci latest" --notes "Rolling build outputs."
+          for f in ci-logs.tar.gz out/hummer/kernel/kernel.macho out/hummer/payload/payload.img; do
+            [ -f "$f" ] && gh release upload ci-latest "$f" --clobber
+          done
+
       - name: Result
         run: |
           if [ "$KERNEL_BUILT" = "yes" ]; then echo "kernel + payload built"; else echo "kernel did not build"; exit 1; fi
