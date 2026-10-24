@@ -130,8 +130,7 @@ extern "C" int native_verified_block_root_authorized(int device)
 // Called from the verified-root probe patch when XNU_VERIFIED_ROOT_PROBE=1.
 extern "C" void native_verified_root_probe(void)
 {
-	kprintf("hummer: verified root probe (bring-up, no policy bundle)
-");
+	kprintf("hummer: verified root probe (bring-up, no policy bundle)\n");
 }
 
 #pragma GCC visibility pop
