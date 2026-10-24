@@ -139,6 +139,36 @@ NATIVE_UFS_EDITS = [
 """,
     ),
     (
+        # v61：真正的原因。预链接内核 __PRELINK_INFO 里 IOStorageFamily 的匹配规则是
+        #   IOBlockStorageDriver: IOProviderClass=IOBlockStorageDevice
+        #                        IOPropertyMatch = { device-type = "Generic" }
+        #   IOGUIDPartitionScheme: IOProviderClass=IOMedia, Content Mask=GUID_partition_scheme
+        # 我们的 NativeUfsBlock 从来没设过 device-type，所以 IOBlockStorageDriver
+        # 根本不接（v59/v60 真机：drivers matched=0、media=0，而块设备本身已经
+        # published=1）。窗口里装的就是 GPT 磁盘镜像，因此同时把 Content 设为
+        # GUID_partition_scheme，让分区方案能接上去发布 OS/SystemOS 卷。
+        'block device: advertise the properties IOStorageFamily matches on',
+        """  online = true;
+  registerService ();
+  return true;
+}
+
+IOReturn NativeUfsBlock::doAsyncReadWrite""",
+        """  // v61: IOStorageFamily's IOBlockStorageDriver personality carries
+  // IOPropertyMatch { device-type = Generic } and the partition scheme matches a
+  // media whose Content is GUID_partition_scheme. Without the first property no
+  // driver ever attaches to the window; without the second the media is never
+  // parsed as a GPT and no volume is published.
+  setProperty ("device-type", "Generic");
+  setProperty ("Content", "GUID_partition_scheme");
+  online = true;
+  registerService ();
+  return true;
+}
+
+IOReturn NativeUfsBlock::doAsyncReadWrite""",
+    ),
+    (
         # v59：没有 owner 策略时 signedVolumeUuid() 应当仍然给出窗口的身份。
         # 文档（concepts/userdata.md「根卷匹配」）说得很清楚：UUID 是 OS 窗口的
         # 卷 UUID，分区方案发布的正是窗口内 GPT 的分区 GUID。所以没策略时直接
