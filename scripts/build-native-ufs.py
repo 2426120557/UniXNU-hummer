@@ -9,6 +9,59 @@ import struct
 import subprocess
 
 
+# hummer：一次链路超时不能把整个 root 打死。
+# 传输超时 + doorbell 已释放 + 无 fatal 状态 => 命令从未被控制器消费，
+# 可以唤醒链路（清 AHIT8 + Hibern8 exit）后重发同一个 UTRD，最多 2 次。
+# 写（direction == 1）不重试，保持原保守策略。
+ROOT_COMMANDS_ANCHOR = "    // No cancel/reset/retry: the controller may still own the buffer, even\n"
+ROOT_COMMANDS_RETRY = '''    // hummer: bounded recovery (injected by build-native-ufs.py). One stale or
+    // hibernated link must not poison the whole root: if the doorbell was released
+    // and no fatal status is latched, the command was never consumed, so wake the
+    // link and re-ring the same UTRD a bounded number of times. Writes never retry.
+    for (unsigned recover = 0; direction != 1 && recover < 2; ++recover) {
+      if (read32 (gHost.hc, 0x58) != 0) break;
+      if (read32 (gHost.hc, 0x20) & kUfsFatalStatus) break;
+      hostWrite (0x18, 0);
+#if defined(NATIVE_UFS_SM8750) && NATIVE_UFS_SM8750
+      {
+        const char *wakeWhy = nullptr;
+        if (!hostWakeLink (&wakeWhy)) break;
+      }
+#endif
+      hostWrite (0x20, 1);
+      cacheCivac (gHost.virt, kDataOffset + dataBytes);
+      started = mach_absolute_time ();
+      clock_interval_to_deadline (timeoutUs, kMicrosecondScale, &port.deadline);
+      hostWrite (0x58, 1);
+      state = UfsTransferPoll ();
+      end = pollUfsTransfer (port, state);
+      if (end == UfsTransferEnd::Completed) break;
+    }
+    if (end == UfsTransferEnd::Completed) {
+      *ocs = state.ocs;
+      gRootDiagnostic.elapsedTicks = mach_absolute_time () - started;
+      gRootDiagnostic.polls = state.polls;
+      gRootDiagnostic.dbSeen = state.doorbellSeen;
+      gRootDiagnostic.isSeen = state.interruptSeen;
+      cacheInvalidate (gHost.virt, kDataOffset + dataBytes);
+      gRootDiagnostic.response = loadBe32 (gHost.virt + kUcdOffset + kRspOffset);
+      return recordTransport (*ocs == 0 ? kIOReturnSuccess : kIOReturnIOError, *ocs);
+    }
+    // No cancel/reset/retry: the controller may still own the buffer, even
+'''
+
+
+def inject_read_retry(root):
+    path = root / 'drivers' / 'NativeUfs' / 'RootCommands.h'
+    text = path.read_text()
+    if 'hummer: bounded recovery' in text:
+        return
+    if ROOT_COMMANDS_ANCHOR not in text:
+        raise SystemExit('build-native-ufs: read-retry anchor not found in RootCommands.h')
+    path.write_text(text.replace(ROOT_COMMANDS_ANCHOR, ROOT_COMMANDS_RETRY, 1))
+    print('NativeUfs: injected bounded read retry')
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--root-windows', action='store_true')
@@ -17,6 +70,7 @@ def main():
     if args.component != 'NativeUfs' and not args.root_windows:
         parser.error('The root-binding helper requires --root-windows')
     root = Path(__file__).resolve().parents[1]
+    inject_read_retry(root)
     compile_command = runpy.run_path(str(root / 'scripts/build-arm-platform.py'))['compile_command']
     recipe = root / 'build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/iokit/DEVELOPMENT/IOPlatformExpert.cpo.json'
     record = json.loads(recipe.read_text().strip().rstrip(','))
