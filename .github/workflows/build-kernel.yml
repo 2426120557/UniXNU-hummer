@@ -90,7 +90,9 @@ jobs:
       # out/ipsw/21H461/kernelcache.decompressed，归档阶段直接用。
       # 解码用 macOS 的 compression_tool，所以这步必须在 macOS runner 上。
       - name: Decode the original kernelcache (display ABI audit input)
-        run: ./unixnu ipsw KernelCache -D "$GITHUB_WORKSPACE" 2>&1 | tee "$GITHUB_WORKSPACE/kernelcache.log"
+        # 引擎 CLI 的签名是 `ipsw <action> [components...]`（action 在前）——
+        # v69 第一次写成 `ipsw KernelCache`，argparse 直接拒了。
+        run: ./unixnu ipsw fetch KernelCache -D "$GITHUB_WORKSPACE" 2>&1 | tee "$GITHUB_WORKSPACE/kernelcache.log"
         working-directory: UniXNU
 
       # ── v42 诊断补丁 ─────────────────────────────────────────────────────
