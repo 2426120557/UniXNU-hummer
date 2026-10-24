@@ -34,6 +34,13 @@
 #include <pexpert/pexpert.h>
 #include <IOKit/IOLib.h>
 #include <arm/machine_routines.h>   /* ml_io_map lives here, not machine/ */
+
+/* ml_io_map is a PEXPERT_KERNEL_PRIVATE declaration in
+ * <arm/machine_routines.h>: the bsd compile record this file is built with
+ * carries KERNEL_PRIVATE but not PEXPERT_KERNEL_PRIVATE, so the prototype
+ * is compiled out (v68c lost a run to exactly that).  The prototype below
+ * is the header's own, verbatim. */
+extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
 #include <libkern/OSBase.h>
 #include <libkern/OSTypes.h>
 
