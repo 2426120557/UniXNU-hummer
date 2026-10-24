@@ -192,18 +192,22 @@ void fail(unsigned step, int code) {
 // ---- S3910 TouchComm protocol (faithful port of synaptics-s3910.c) ----
 namespace {
 int busTrace(Session &s, int rc, size_t len, const uint8_t *tx, const uint8_t *rx) {
-    if (!rc && s.traceN < 8) {
+    // Record every early success plus the FIRST failure. The failure's tx/rx bytes are
+    // what separates "nothing drove MISO" (all 0xff or all 0x00, i.e. pin mux, power or
+    // CS) from a real protocol mismatch. Bit 31 of traceLen marks a failed transfer.
+    const bool firstFailure = rc && !s.lastRc;
+    if ((!rc || firstFailure) && s.traceN < 8) {
         unsigned i = s.traceN++;
-        s.traceLen[i] = static_cast<uint32_t>(len);
+        s.traceLen[i] = static_cast<uint32_t>(len) | (rc ? 0x80000000u : 0);
         for (unsigned k = 0; k < 6 && k < len && tx; ++k) s.traceTx[i][k] = tx[k];
         for (unsigned k = 0; k < 6 && k < len && rx; ++k) s.traceRx[i][k] = rx[k];
     }
-    if (rc && !s.lastRc) {s.lastRc = rc; s.lastLen = static_cast<uint32_t>(len);}
+    if (firstFailure) {s.lastRc = rc; s.lastLen = static_cast<uint32_t>(len);}
     return rc;
 }
 int busXfer(Session &s, const uint8_t *tx, uint8_t *rx, size_t len) {
     int rc = geni_spi_transfer(&s.spi, tx, rx, len, 0);
-    return busTrace(s, rc, len, tx, rc ? nullptr : rx);
+    return busTrace(s, rc, len, tx, rx);
 }
 // One full-duplex read: clock `length` dummy 0xff bytes out, capture the response.
 int tcmRead(Session &s, size_t length) {
@@ -390,12 +394,10 @@ bool enable(Session &s) {
     s.vals[4] = rd32(s.gccHalt.va, TB_HALT_CORE_2X & 0xfff);
     s.vals[5] = rd32(s.gccS4.va, TB_HALT_S4 & 0xfff);
     if (!ok) {fail(2, TCM_ETIMEDOUT); return false;}   // never touch the engine without running clocks
-    // One lane function per pin: gpio48=MISO=l0, 49=MOSI=l1, 50=CLK=l2, 51=CS=l3
-    // (see HummerTouchBoard.h - the target DTS names them qup1_se4_l0..l3).
-    static const unsigned lane[4] = {TB_FUNC_QUP1_SE4_L0, TB_FUNC_QUP1_SE4_L1,
-                                     TB_FUNC_QUP1_SE4_L2, TB_FUNC_QUP1_SE4_L3};
-    for (unsigned i = 0; i < 4; ++i)
-        wr32(s.tlmmSpi.va, i * TB_GPIO_STRIDE, tb_pin_cfg(lane[i], TB_DRIVE_6MA));
+    // One function value for all four pins: the target kernel's pinctrl-sm8750.c puts
+    // qup1_se4 at funcs[1] for gpio48..51 alike (see HummerTouchBoard.h).
+    const uint32_t cfg = tb_pin_cfg(TB_FUNC_QUP1_SE4, TB_DRIVE_6MA);
+    for (unsigned i = 0; i < 4; ++i) wr32(s.tlmmSpi.va, i * TB_GPIO_STRIDE, cfg);
     for (unsigned i = 0; i < 4; ++i) s.vals[9 + i] = rd32(s.tlmmSpi.va, i * TB_GPIO_STRIDE);
     if (!mapRegion(TB_QUP_WRAPPER_BASE, 0x2000, s.wrapper) || !mapRegion(TB_SE_BASE, TB_SE_SIZE, s.se)) {
         fail(2, TCM_ENOMEM);
