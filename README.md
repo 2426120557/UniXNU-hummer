@@ -5,8 +5,11 @@ OnePlus Ace 5 Pro（`hummer` / PKR110 / SM8750 骁龙 8 Elite）的 UniXNU 设�
 ## 状态
 
 - ✅ **UEFI 层已完成**：固件含 UniXNU 菜单，真机 `fastboot boot` 成功（GOP 显示 + 按键输入均工作）。
-- 🧪 **XNU 内核阶段 — CI 试水中**：ADT 生成器已就绪；内核编译需 macOS，已配 GitHub Actions。
-- ⬜ GPU（Adreno 830 / a8xx）、持久数据卷 —— 未开始，另案（GPU 是最大障碍）。
+- ✅ **双系统分区 + 根卷（2026-10-24）**：从 userdata 切出 32 GiB `unixnu` 分区，SHNGROOT 根卷镜像已刷入并经哈希校验；UFS bring-up → 窗口发布 → APFS 容器 → **真根卷挂载** 全部打通。
+- ✅ **launchd 启动（v67，2026-10-24 真机验证）**：`vfs_mountroot mounted` → `load_init_program` → `exec init` → 签名/4K 全 rc=0 → `kboot exit rv=0`。XNU 已从真根卷把控制权交给用户态（bring-up 阶段 7）。用户态默认不往内核控制台输出，面板静默属预期。
+- ✅ **面板检查点（kboot）+ GENI 调试串口（v68）**：kboot 系列探针覆盖 exec 尾段；`hummer-uart=1` 把内核日志多路复用输出到 DTB `serial0`（qup_uart@a9c000，115200n8）。
+- 🧪 **Adreno 830 (a8xx)**：v68 起编入寄存器活性探针（`hummer-adreno-probe=1` 门控，复用引擎 bsd_init 钩子，零源码改动）；真显示驱动未开始。
+- ⬜ 持久 Data 卷（launchd 挂载路径已有探针覆盖）、GPU 驱动 —— 进行中。
 
 ## 目录
 
@@ -24,7 +27,8 @@ OnePlus Ace 5 Pro（`hummer` / PKR110 / SM8750 骁龙 8 Elite）的 UniXNU 设�
 | UFS hc / phy | 0x1d84000 / 0x1d80000 | 真机 `/proc/iomem` |
 | DRAM base / size | 0x80000000 / 0x400000000 (16 GiB) | — |
 | CPU | 6 性能核 + 2 Oryon 大核 | hummer.dts |
-| GPU | Adreno 830 (a8xx) | SM8750 |
+| GPU | Adreno 830 (a8xx)，KGSL 0x3d00000/0x40000，gpucc 0x3d90000/0x9800 | hummer.dts |
+| 调试串口 | qup_uart@0xa9c000（GENI SE9），115200n8，DTB `serial0` | hummer.dts |
 
 ## CI 试水：怎么跑
 

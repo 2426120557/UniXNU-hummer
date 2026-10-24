@@ -73,7 +73,8 @@ STALE_OBJECTS = ("startup.o", "startup.o.json",
                  "ubc_subr.o", "ubc_subr.o.json",
                  "machine_task.o", "machine_task.o.json",
                  "sleh.o", "sleh.o.json",
-                 "kern_exit.o", "kern_exit.o.json")
+                 "kern_exit.o", "kern_exit.o.json",
+                 "vfs_syscalls.o", "vfs_syscalls.o.json")
 
 DECL = 'extern void hummer_early_prints (const char *, const char *);'
 DECL_U32X = 'extern void hummer_early_u32x (const char *, unsigned int);'
@@ -272,6 +273,21 @@ TPS_CALL = '\t\tkr = thread_process_signature(imgp->ip_new_thread, proc_get_task
 EXEC_INIT_CALL = ('\t\terror = load_init_program_at_path(p, '
                   '(user_addr_t)scratch_addr, init_programs[i], init_envp);\n')
 
+# v68：launchd 之后的用户态可见性。
+# 1) 真实 execve 探针（kern_exec.c __mac_execve，xnu-10063.141.1 中 5165..5481
+#    —— 四个碰 kern_exec.c 的补丁（zzz / systemos-mount / z-air-init /
+#    gpu-addon-mount）的 hunk 全部落在 1..7436 的其它区间，与该锚点无重叠，
+#    纯源码插入；锚点唯一性在 141.1 原始源码上核对过 = 1）。
+#    exec_resettextvp 已把 p->p_name 换成新程序名（kern_exec.c exec_resettextvp
+#    里 bcopy cn_nameptr），所以这里打出来的是 exec 之后的新名字。静态计数器
+#    封顶 16 条，防止 launchd 起一堆服务把面板刷爆。
+EXECVE_ANCHOR = ('\t\tif (!error) {\n'
+                 '\t\t\ttask_transfer_turnstile_watchports(old_task,\n')
+EXECVE_OP = {"anchor": EXECVE_ANCHOR,
+             "before": ['\t\t{ static int hk_exec_n = 0; ' + DECL +
+                        ' if (hk_exec_n < 16) { ++hk_exec_n; '
+                        'hummer_early_prints ("kboot execve", p->p_name); } }\n']}
+
 KEXEC_OPS = [
     {"anchor": KEXEC_TERNARY, "after": [KEXEC_TERNARY_KCALL]},
     {"anchor": TPS_CALL,
@@ -280,6 +296,7 @@ KEXEC_OPS = [
     {"anchor": EXEC_INIT_CALL,
      "before": ['\t\t{ ' + DECL + ' hummer_early_prints ("kboot", "exec init"); }\n'],
      "after": ['\t\t{ ' + DECL_U32X + ' hummer_early_u32x ("kboot exec rc", (unsigned int) error); }\n']},
+    dict(EXECVE_OP),  # v68：真实 execve（前 16 个，见 EXECVE_ANCHOR 注释）
 ]
 
 MACHINE_TASK_ENTER = '\tbool const x18_entitled =\n'
@@ -311,6 +328,26 @@ KEXIT_OPS = [
                '\t{ ' + DECL_U32X + ' hummer_early_u32x ("kboot exit rv", (unsigned int) rv); }\n']},
 ]
 
+# v68：launchd 之后的用户态可见性。
+# 1) 通用挂载探针（bsd/vfs/vfs_syscalls.c，没有任何补丁碰它 —— 纯源码插入，
+#    2026-10-24 对照引擎 b6ae99c 的 patches/xnu 全部 51 个补丁的 --- a/ 清单核实）。
+#    mount_common 是 mount() 系统调用和内核挂载（KERNEL_MOUNT_KMOUNT）的共同
+#    收口：launchd 挂 Data 卷、SystemOS addon、GPU addon 都会走这里。
+#    入口打 fstypename（"apfs" 等），出口打返回码。
+MOUNT_ENTER_ANCHOR = '\tboolean_t kernelmount = !!(internal_flags & KERNEL_MOUNT_KMOUNT);\n'
+MOUNT_EXIT_ANCHOR = ('\tif (vfsp_ref) {\n'
+                     '\t\tmount_list_lock();\n'
+                     '\t\tvfsp->vfc_refcount--;\n'
+                     '\t\tmount_list_unlock();\n'
+                     '\t}\n')
+MOUNT_OPS = [
+    {"anchor": MOUNT_ENTER_ANCHOR,
+     "after": ['\t{ ' + DECL + ' hummer_early_prints ("kboot mount", fstypename); }\n']},
+    {"anchor": MOUNT_EXIT_ANCHOR,
+     "after": ['\t{ ' + DECL_U32X +
+               ' hummer_early_u32x ("kboot mount rc", (unsigned int) error); }\n']},
+]
+
 ZZZ_OPS = [
     {"file": "bsd/kern/kern_exec.c", "anchor": '+' + KEXEC_TERNARY,
      "after": ['+' + KEXEC_TERNARY_KCALL]},
@@ -337,6 +374,7 @@ IDEMPOTENT_KEYS = {
     "kern_exit.c": '"kboot exit rv"',
     "kern_exec.c": '"kboot exec rc"',
     "ubc_subr.c": 'kboot n4k rc',
+    "vfs_syscalls.c": '"kboot mount rc"',
 }
 
 SOURCE_OPS = {
@@ -344,6 +382,7 @@ SOURCE_OPS = {
     "machine_task.c": MACHINE_TASK_OPS,
     "sleh.c": SLEH_OPS,
     "kern_exit.c": KEXIT_OPS,
+    "vfs_syscalls.c": MOUNT_OPS,
 }
 
 
@@ -376,6 +415,7 @@ def main():
         (XNU / "osfmk/arm64/machine_task.c", "ops"),
         (XNU / "osfmk/arm64/sleh.c", "ops"),
         (XNU / "bsd/kern/kern_exit.c", "ops"),
+        (XNU / "bsd/vfs/vfs_syscalls.c", "ops"),  # v68：mount_common
     ]
     for path, mode in targets:
         if not path.is_file():

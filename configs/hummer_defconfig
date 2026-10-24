@@ -82,6 +82,14 @@ CONFIG_XNU_NATIVE_UFS=y
 # CONFIG_XNU_NATIVE_RAM_BLOCK=y
 # CONFIG_XNU_NATIVE_ARCH_TIMER=y
 # CONFIG_XNU_NATIVE_ADRENO=n        # Adreno 830 (a8xx) 未成熟
+
+# v68：Adreno 830 寄存器活性探针（不是驱动）。引擎的
+# offline-component-load-probes.patch 在 bsd_init 的 vfsinit 之后调用
+# native_adreno_firmware_probe()；本选项把它编进去，并由 baseline.sh
+# force_load build/adreno-firmware-probe/libAdrenoFirmwareProbe.a
+# （前置 XNU_SOURCE_CORECRYPTO14=1 已满足）。boot arg
+# hummer-adreno-probe=1 门控；默认不跑，不拦启动。
+CONFIG_XNU_ADRENO_FIRMWARE_PROBE=y
 # CONFIG_XNU_NATIVE_LEGACY_DISPLAY=n
 
 # 试水阶段：无条件引用的 offline-probe 钩子（native_legacy_display_probe /

@@ -108,6 +108,14 @@ archives = [
   # 符号表，据此自动生成 thunk（不在脚本里硬编码签名，也就不会随 storage-abi
   # 头漂移）。归档由 defconfig 的 XNU_EXTRA_LD_ARCHIVES force_load。
   "build-hummer-storage-stubs.py",
+  # v68：Adreno 830 (a8xx) 寄存器活性探针。复用引擎现成的钩子：
+  # offline-component-load-probes.patch 在 bsd_init 的 vfsinit 之后调
+  # native_adreno_firmware_probe()（CONFIG_XNU_ADRENO_FIRMWARE_PROBE=y 激活，
+  # CFLAGS -DXNU_ADRENO_FIRMWARE_PROBE=1），baseline.sh 在非 bootstrap pass
+  # force_load build/adreno-firmware-probe/libAdrenoFirmwareProbe.a ——
+  # 本脚本只负责按引擎约定的路径产出该归档，内核源码零改动。
+  # boot arg hummer-adreno-probe=1 才真正跑（跑完必然 panic 留值）。
+  "build-hummer-adreno-probe.py",
   # 注意：所有构建器都在 macOS 上跑（kernel.py 硬性要求 xcodebuild + iphoneos SDK）。
   #
   # 已下线 build-hummer-video-map.py：它在 PE_create_console() 前面调
@@ -144,6 +152,10 @@ archives = [
   # 上游未公开的 build-boot-progress.py 实现——暂不引入。本脚本照 zzz 补丁的
   # 锚点给每个检查点配一行 hummer_early_prints("kboot", ...)，零新 CONFIG。
   "build-hummer-kboot-probe.py",
+  # v68：GENI 调试串口（DTB serial0 = qup_uart@a9c000，115200n8）。
+  # pe_serial.c 的 gPESF 多路复用会把 kprintf 同时写给面板和 UART，
+  # 不需要动 PE_init_kprintf。boot arg hummer-uart=1 才注册。
+  "build-hummer-serial-uart.py",
 ]
 
 # prelink：把 4K 页 XNU 内核 prelink 进原版 kernelcache。
