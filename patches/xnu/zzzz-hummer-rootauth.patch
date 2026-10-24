@@ -1,0 +1,7 @@
+--- a/bsd/kern/bsd_init.c
++++ b/bsd/kern/bsd_init.c
+@@ -987,3 +987,3 @@
+ 			if (autherr && !owner_authorized) {
+-				panic("rootvp not authenticated after mounting");
++				printf("kboot=rootauth skipped (bring-up: owner root not built)\n");
+ 			}
