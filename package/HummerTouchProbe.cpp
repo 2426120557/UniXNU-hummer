@@ -163,7 +163,7 @@ void ioDelayUs(void *, unsigned us) {
 }
 
 struct Session {
-    Region gccLow, gccHalt, gccVote, gccS4, tlmmSpi, tlmmReset, tlmmPwr, wrapper, se;
+    Region gccLow, gccHalt, gccVote, gccS4, tlmmSpi, tlmmReset, wrapper, se;
     IOBufferMemoryDescriptor *dmaMem;
     uint64_t dmaPhys;
     struct geni_spi spi;
@@ -206,37 +206,9 @@ int busTrace(Session &s, int rc, size_t len, const uint8_t *tx, const uint8_t *r
     if (firstFailure) {s.lastRc = rc; s.lastLen = static_cast<uint32_t>(len);}
     return rc;
 }
-// v78: this SE reports FIFO_IF_DISABLE (if_disable bit0=1) -> GPI-only instance, the
-// serial engine is not wired to the pins. Drive SPI by GPIO bit-bang on gpio48..51.
-// tlmmSpi maps [0]=gpio48 MISO(in), [1]=gpio49 MOSI, [2]=gpio50 SCK, [3]=gpio51 CS.
-// Mode 0 (SCK idle low, latch rising), MSB first, active-low CS (per tycykp giulia_touch).
-static void bbSet(Session &s, unsigned i, unsigned v) {
-    uint32_t off = i * TB_GPIO_STRIDE + 4;
-    wr32(s.tlmmSpi.va, off, (rd32(s.tlmmSpi.va, off) & ~2u) | (v ? 2u : 0u));
-}
-static unsigned bbSample(Session &s) { return rd32(s.tlmmSpi.va, 0 * TB_GPIO_STRIDE + 4) & 1u; }
-
 int busXfer(Session &s, const uint8_t *tx, uint8_t *rx, size_t len) {
-    if (!len) return busTrace(s, TCM_EINVAL, len, tx, rx);
-    bbSet(s, 2, 0);                       // SCK idle low
-    bbSet(s, 3, 0);                       // CS low
-    ioDelayUs(nullptr, 2);
-    for (size_t i = 0; i < len; ++i) {
-        uint8_t send = tx ? tx[i] : 0xff, recv = 0;
-        for (unsigned bit = 0; bit < 8; ++bit) {
-            bbSet(s, 1, (send >> (7 - bit)) & 1u);   // MOSI out
-            ioDelayUs(nullptr, 1);
-            bbSet(s, 2, 1);                           // SCK rising: slave samples
-            ioDelayUs(nullptr, 1);
-            recv = static_cast<uint8_t>((recv << 1) | bbSample(s));
-            bbSet(s, 2, 0);                           // SCK falling
-        }
-        if (rx) rx[i] = recv;
-    }
-    ioDelayUs(nullptr, 2);
-    bbSet(s, 3, 1);                       // CS high
-    ioDelayUs(nullptr, 2);
-    return busTrace(s, 0, len, tx, rx);
+    int rc = geni_spi_transfer(&s.spi, tx, rx, len, 0);
+    return busTrace(s, rc, len, tx, rx);
 }
 // One full-duplex read: clock `length` dummy 0xff bytes out, capture the response.
 // rx is pre-filled with 0xAA so the panic trace can tell "transfer never started"
@@ -300,14 +272,7 @@ int tcmResetAndIdentify(Session &s) {
     IOSleep(10);
     wr32(s.tlmmReset.va, 4, tb_gpio_out_io(1));     // physical high: reset released
     IOSleep(200);
-    // Cold S3910 holds MISO low until its TouchCom app boots; the voluntary IDENTIFY
-    // does not arrive on the first read. Retry ~2 s before falling back to a command.
-    int code = TCM_EAGAIN;
-    for (unsigned i = 0; i < 100; ++i) {
-        IOSleep(20);
-        code = tcmReceive(s);
-        if (code == S3910_REPORT_IDENTIFY) break;
-    }
+    int code = tcmReceive(s);
     if (code != S3910_REPORT_IDENTIFY) {
         s.viaCommand = true;
         int rc = tcmCommand(s, S3910_IDENTIFY, nullptr, 0);
@@ -384,8 +349,7 @@ bool snapshot(Session &s) {
         !mapRegion(TB_GCC_BASE + 0x23000, 0x1000, s.gccHalt) ||
         !mapRegion(TB_GCC_BASE + 0x52000, 0x1000, s.gccVote) ||
         !mapRegion(TB_TLMM_BASE + tb_tlmm_ctl(TB_GPIO_SPI_MISO), 4 * TB_GPIO_STRIDE, s.tlmmSpi) ||
-        !mapRegion(TB_TLMM_BASE + tb_tlmm_ctl(TB_GPIO_RESET), TB_GPIO_STRIDE, s.tlmmReset) ||
-        !mapRegion(TB_TLMM_BASE + tb_tlmm_ctl(TB_GPIO_POWER), TB_GPIO_STRIDE, s.tlmmPwr)) {
+        !mapRegion(TB_TLMM_BASE + tb_tlmm_ctl(TB_GPIO_RESET), TB_GPIO_STRIDE, s.tlmmReset)) {
         fail(1, TCM_ENOMEM);
         return false;
     }
@@ -445,24 +409,8 @@ bool enable(Session &s) {
     if (!ok) {fail(2, TCM_ETIMEDOUT); return false;}   // never touch the engine without running clocks
     // One function value for all four pins: the target kernel's pinctrl-sm8750.c puts
     // qup1_se4 at funcs[1] for gpio48..51 alike (see HummerTouchBoard.h).
-    // v78: GPI-only -> mux the four pins to plain GPIO and bit-bang (func 0).
-    // pin0 gpio48=MISO input; pin1/2/3 gpio49/50/51=MOSI/SCK/CS outputs. Drive idle
-    // values before enabling OE: SCK low, MOSI/CS high.
-    for (unsigned i = 0; i < 4; ++i) {
-        wr32(s.tlmmSpi.va, i * TB_GPIO_STRIDE + 4, (i == 2) ? 0u : 2u);
-        // v81: keep upper cfg bits (AP ownership bit12 etc, tycykp old&~0x3ff), only
-        // rewrite func=0(GPIO)/drive/oe/pull. MISO(i==0)=input+pull-up; others output.
-        uint32_t keep = rd32(s.tlmmSpi.va, i * TB_GPIO_STRIDE) & ~0x3ffu;
-        uint32_t cfg = keep | tb_pin_cfg(0, TB_DRIVE_6MA) |
-                       (i != 0 ? (1u << TB_OE_BIT) : 0u) | (i == 0 ? 3u : 0u);
-        wr32(s.tlmmSpi.va, i * TB_GPIO_STRIDE, cfg);
-    }
-    // v80: power the panel via gpio108 (tycykp pin[4]): drive output high before reset.
-    wr32(s.tlmmPwr.va, 4, tb_gpio_out_io(1));
-    wr32(s.tlmmPwr.va, 0, tb_pin_cfg_out(TB_DRIVE_6MA));
-    IODelay(100);                                   // v81: let AVDD rail settle
-    s.vals[14] = rd32(s.tlmmPwr.va, 0); s.vals[15] = rd32(s.tlmmPwr.va, 4);
-    s.vals[16] = rd32(s.tlmmSpi.va, 0 * TB_GPIO_STRIDE + 4);   // idle MISO level (bit0)
+    const uint32_t cfg = tb_pin_cfg(TB_FUNC_QUP1_SE4, TB_DRIVE_6MA);
+    for (unsigned i = 0; i < 4; ++i) wr32(s.tlmmSpi.va, i * TB_GPIO_STRIDE, cfg);
     for (unsigned i = 0; i < 4; ++i) s.vals[9 + i] = rd32(s.tlmmSpi.va, i * TB_GPIO_STRIDE);
     if (!mapRegion(TB_QUP_WRAPPER_BASE, 0x2000, s.wrapper) || !mapRegion(TB_SE_BASE, TB_SE_SIZE, s.se)) {
         fail(2, TCM_ENOMEM);
@@ -521,6 +469,16 @@ bool openBus(Session &s) {
         s.spi.dma.rx_phys = s.dmaPhys + kDmaBytes;
         s.spi.dma.size = kDmaBytes;
     }
+    // v82: at reset the SE FIFO interface is disabled (SE_FIFO_IF_DISABLE 0x2008 bit0=1;
+    // read-only mirror is GENI_IF_DISABLE_RO 0x64). Mainline spi-geni-qcom, when no GPI DMA
+    // channel is available, falls back to FIFO and clears this bit via
+    // qcom-geni-se geni_se_select_mode(FIFO)->clrbits(SE_FIFO_IF_DISABLE). The XNU GeniSpi
+    // component only honours the flag in software and never touches the hardware bit, so the
+    // FIFO path stayed physically disabled -> RX FIFO never filled (rxfs=0, irq=0, -110).
+    // Clear it here before init so read_info already sees FIFO enabled.
+    s.vals[17] = rd32(s.se.va, 0x64);
+    wr32(s.se.va, 0x2008, rd32(s.se.va, 0x2008) & ~1u);   // clear FIFO_IF_DISABLE
+    s.vals[18] = rd32(s.se.va, 0x64);                      // expect bit0 now 0
     int r = geni_spi_init(&s.spi);
     if (r) {fail(3, r); return false;}
     return true;
@@ -550,7 +508,7 @@ void panicReadout(const Session &s, const char *why) {
     snprintf(text, sizeof text,
         "HUMTOUCH %s s%u/%u st%u e%d\n"
         "HUMTOUCH vote%08x halt %08x %08x %08x %08x %08x gpll%08x pins %08x %08x %08x %08x\n"
-        "HUMTOUCH qup%08x fw%08x if%08x hw%08x lvl%u div%u %uHz fd%u ud%u os%u dfs %08x %08x %08x %08x\n"
+        "HUMTOUCH qup%08x fw%08x if%08x hw%08x lvl%u div%u %uHz fd%u ud%u os%u dfs %08x %08x fifo %08x %08x\n"
         "HUMTOUCH id rc%u via%u mode%u ver%d w%u mx%u my%u obj%u cfg%u fr%u ct%u agn%u oth%u bad%u feed%u rc%d n%u\n"
         "HUMTOUCH x0 %02x%02x%02x%02x%02x%02x/%02x%02x%02x%02x%02x%02x x1 %02x%02x%02x%02x%02x%02x/%02x%02x%02x%02x%02x%02x\n"
         "HUMTOUCH snap irq%08x st%08x txfs%08x rxfs%08x dmatx%08x dmarx%08x valid%u",
