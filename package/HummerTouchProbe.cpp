@@ -174,7 +174,7 @@ struct Session {
     unsigned level = 0, div = 0;
     uint64_t actualHz = 0;
     uint32_t vals[24];                // live register snapshot for the panic readout
-    uint32_t dbg[6];                  // SE config read right after a failed transfer (bring-up diagnostics)
+    uint32_t dbg[12];                 // SE + S4 RCG config read right after a failed transfer (bring-up diagnostics)
     unsigned traceN;                  // first successful transfers on the wire
     uint32_t traceLen[8];
     uint8_t traceTx[8][6], traceRx[8][6];
@@ -199,6 +199,15 @@ void snapSe(Session &s) {
     s.dbg[3] = rd32(s.se.va, 0x258);   // SE_GENI_DMA_MODE_EN- 0 = FIFO mode
     s.dbg[4] = rd32(s.se.va, 0x614);   // SE_GENI_M_IRQ_EN
     s.dbg[5] = rd32(s.se.va, 0x040);   // SE_GENI_STATUS
+    // S4 RCG (the SE functional clock source) + GPLL0: is the clock actually programmed?
+    if (s.gccS4.va) {
+        s.dbg[6] = rd32(s.gccS4.va, (TB_S4_RCG + TB_RCG_CMD) & 0xfff);
+        s.dbg[7] = rd32(s.gccS4.va, (TB_S4_RCG + TB_RCG_CFG) & 0xfff);
+        s.dbg[8] = rd32(s.gccS4.va, (TB_S4_RCG + TB_RCG_DFSR_CMD) & 0xfff);
+        s.dbg[9] = rd32(s.gccS4.va, (TB_S4_RCG + TB_RCG_PERF_CFG(0)) & 0xfff);
+        s.dbg[10] = rd32(s.gccS4.va, TB_HALT_S4 & 0xfff);
+    }
+    if (s.gccLow.va) s.dbg[11] = rd32(s.gccLow.va, TB_GCC_GPLL0_MODE);
 }
 }  // namespace
 
@@ -514,6 +523,12 @@ bool configureClock(Session &s, unsigned hz) {
     s.actualHz = choice.actual_hz;
     int r = geni_spi_set_clock(&s.spi, hz, static_cast<unsigned>(choice.sclk_hz), choice.level);
     if (r) {fail(4, r); return false;}
+    // v86: force the QUPv3 wrap1 S4 RCG into DFS level 0 (TCXO 19.2 MHz). GPLL0 never
+    // locks on this board (gpll=0x5, RESET_N=0), so if the RCG still sits on its CMD
+    // default (GPLL0-parented) the SER clock has no live source; the SE then accepts the
+    // command (M_ACTIVE=1) but its FSM never clocks, and every FIFO transfer times out.
+    // Writing DFSR_CMD with DFS-enable + level 0 makes level 0 (TCXO) the active rate.
+    wr32(s.gccS4.va, (TB_S4_RCG + TB_RCG_DFSR_CMD) & 0xfff, 1u);   // DFS enable, current level 0
     r = geni_spi_setup(&s.spi, TB_SPI_MODE, 0);
     if (r) {fail(4, r); return false;}
     return true;
@@ -530,7 +545,8 @@ void panicReadout(const Session &s, const char *why) {
         "HUMTOUCH id rc%u via%u mode%u ver%d w%u mx%u my%u obj%u cfg%u fr%u ct%u agn%u oth%u bad%u feed%u rc%d n%u\n"
         "HUMTOUCH x0 %02x%02x%02x%02x%02x%02x/%02x%02x%02x%02x%02x%02x x1 %02x%02x%02x%02x%02x%02x/%02x%02x%02x%02x%02x%02x\n"
         "HUMTOUCH snap irq%08x st%08x txfs%08x rxfs%08x dmatx%08x dmarx%08x valid%u\n"
-        "HUMTOUCH snap2 mcmd%08x clk%08x sel%08x dma%08x mirq%08x",
+        "HUMTOUCH snap2 mcmd%08x clk%08x sel%08x dma%08x mirq%08x\n"
+        "HUMTOUCH snap3 rcmd%08x rcfg%08x rdfs%08x rpcfg%08x s4cbcr%08x gpll%08x",
         why, native_htouch_stage_done, native_htouch_stage_req, native_htouch_step, native_htouch_error,
         v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[9], v[10], v[11], v[12],
         v[19], v[20], v[21], v[22], s.level, s.div, static_cast<unsigned>(s.actualHz),
@@ -546,7 +562,8 @@ void panicReadout(const Session &s, const char *why) {
         s.traceRx[1][0], s.traceRx[1][1], s.traceRx[1][2], s.traceRx[1][3], s.traceRx[1][4], s.traceRx[1][5],
         s.spi.snap_irq, s.spi.snap_status, s.spi.snap_txfs, s.spi.snap_rxfs,
         s.spi.snap_dma_tx, s.spi.snap_dma_rx, s.spi.snap_valid,
-        s.dbg[0], s.dbg[1], s.dbg[2], s.dbg[3], s.dbg[4]);
+        s.dbg[0], s.dbg[1], s.dbg[2], s.dbg[3], s.dbg[4],
+        s.dbg[6], s.dbg[7], s.dbg[8], s.dbg[9], s.dbg[10], s.dbg[11]);
     panic("%s", text);
 }
 
