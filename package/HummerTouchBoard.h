@@ -16,6 +16,22 @@
 #define TB_APPS_SMMU_BASE 0x15000000ULL
 #define TB_APPS_SMMU_SIZE 0x100000ULL
 
+// sm8750.dtsi: gpi_dma1 = dma-controller@a00000, reg size 0x60000, compatible
+// qcom,sm6350-gpi-dma (ee_offset 0x10000), dma-channel-mask 0x1e (instances 1..4).
+// spi4 lists dmas = <&gpi_dma1 0 4 QCOM_GPI_SPI>, <&gpi_dma1 1 4 QCOM_GPI_SPI>, i.e.
+// TX on channel 0 and RX on channel 1 of whichever instance claims SE 4. Linux only
+// reaches this engine through the GSI: the SE's FIFO interface is disabled and its
+// DMA interface block is not host-accessible on this part.
+#define TB_GPI_DMA_BASE 0x00a00000ULL
+#define TB_GPI_DMA_SIZE 0x60000ULL
+#define TB_GPI_SEID 4u
+// sm8750.dtsi gpi_dma1 has iommus = <&apps_smmu 0xb6 0x0>: the GSI's own DMA goes
+// through apps_smmu stream 0xb6. A bare-metal boot has no SMMU context handler, so the
+// rings below are advertised by physical address - which is exactly what happens when
+// the bootloader leaves that stream bypassed (identity). If the GSI never completes a
+// transfer while every register reads back sane, this stream is the first suspect.
+
+
 // gcc-sm8750.c / sm8750.dtsi clock-controller@100000 (reg size 0x1f4200).
 #define TB_GCC_BASE 0x00100000ULL
 // Every QUPv3 wrap1 branch below votes through this register (gcc-sm8750.c enable_reg).

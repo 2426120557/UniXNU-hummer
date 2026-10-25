@@ -24,6 +24,8 @@ OUT.mkdir(parents=True, exist_ok=True)
 CPP_RECORD = ROOT / 'build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/iokit/DEVELOPMENT/IOPlatformExpert.cpo.json'
 C_RECORD = ROOT / 'build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/osfmk/DEVELOPMENT/startup.o.json'
 PROBE = ROOT / 'kits/hummer/HummerTouchProbe.cpp'
+GSI = ROOT / 'kits/hummer/HummerGsi.c'
+GSI_H = ROOT / 'kits/hummer/HummerGsi.h'
 GENI = ROOT / 'drivers/NativeGeniSpi/GeniSpi.c'
 GENI_H = ROOT / 'drivers/NativeGeniSpi/GeniSpi.h'
 
@@ -75,7 +77,7 @@ def audit(object_path):
         raise SystemExit(f'Unexpected platform deployment {deployment}')
 
 
-for required in (CPP_RECORD, C_RECORD, PROBE, ROOT / 'drivers/NativeGeniSpi/GeniSpi.h'):
+for required in (CPP_RECORD, C_RECORD, PROBE, GSI, GSI_H, ROOT / 'drivers/NativeGeniSpi/GeniSpi.h'):
     if not required.exists():
         raise SystemExit(f'{required} is missing; the touch build cannot proceed')
 
@@ -124,7 +126,21 @@ if c_command and c_command[0] in ('clang', 'cc', 'clang++'):
 run(c_command, c_dir)
 audit(OUT / 'GeniSpi.o')
 
+# GSI/GPI DMA engine (package/HummerGsi.c). The serial engine's FIFO interface is
+# disabled in hardware and its SE-DMA block is not host-accessible on this part, so the
+# only data path is the GPI: same kernel C flags as the rest of the engine code.
+gsi_command, gsi_dir = replay(C_RECORD, GSI, OUT / 'HummerGsi.o')
+gsi_command += ['-Wall', '-Wextra', '-mgeneral-regs-only',
+                '-I', str(ROOT / '.cache/xnu-work/osfmk'),
+                '-I', str(ROOT / 'kits/hummer')]
+if gsi_command and gsi_command[0] in ('clang', 'cc', 'clang++'):
+    gsi_command = ['xcrun', '--sdk', 'iphoneos', gsi_command[0]] + gsi_command[1:]
+(OUT / 'compile-command-gsi.json').write_text(json.dumps(gsi_command, indent=2) + '\n')
+run(gsi_command, gsi_dir)
+audit(OUT / 'HummerGsi.o')
+
 archive = OUT / 'libHummerTouch.a'
 archive.unlink(missing_ok=True)
-subprocess.run(['xcrun', 'ar', 'rcs', archive, OUT / 'HummerTouchProbe.o', OUT / 'GeniSpi.o'], check=True)
-print('HummerTouch: ARM64/iOS 17 object audit passed (probe + GeniSpi)')
+subprocess.run(['xcrun', 'ar', 'rcs', archive, OUT / 'HummerTouchProbe.o', OUT / 'GeniSpi.o',
+                OUT / 'HummerGsi.o'], check=True)
+print('HummerTouch: ARM64/iOS 17 object audit passed (probe + GeniSpi + GSI)')

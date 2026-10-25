@@ -1,6 +1,35 @@
 # GSI / GPI DMA port plan for hummer touch (spi4)
 
-Status: reference gathered, not yet implemented. Written 2026-10-26 after v89.
+Status: **implemented** in `package/HummerGsi.{h,c}` (v90). This file keeps the hardware
+facts and the reasoning; the code is in `HummerGsi.c` with the register map inline.
+
+## What the driver does (v90)
+
+- `hgs_init()`: selects the SE's GPI mode (`SE_IRQ_EN=0`, M_IRQ command/FIFO sources off,
+  `SE_GENI_DMA_MODE_EN=1`, `SE_GSI_EVENT_EN |= 0xF`) and brings up the GPI: mask every
+  interrupt type, allocate + program the event channel, allocate + program + start both
+  transfer channels. Every step is polled on the context registers (no GIC).
+- `hgs_xfer()`: builds CONFIG0 + GO(SPI_DUPLEX, CHAIN|LINK) + TX DMA on channel 0 and the
+  RX DMA on channel 1, cleans the rings and buffers, doorbells RX then TX, then polls the
+  event ring for the channel-0 completion event.
+- `hgs_init()` tries ee_offset 0x10000 first (sm6350-compatible, what the sm8750 DT node's
+  second compatible resolves to in the reference tree) and falls back to 0x0, and tries
+  GPII 1..4. The two offsets address disjoint 64 KiB windows, so the probe is harmless.
+- No SMMU programming: the rings are advertised by physical address, which is correct when
+  the bootloader leaves apps_smmu stream 0xb6 bypassed. If a transfer never completes while
+  every register reads back sane, that stream is the first thing to check.
+- No clock/interconnect votes: `gpi_dma1` has no `clocks` property and UFS proves the NoC is
+  pre-configured by the bootloader.
+
+## Diagnostics on the panic screen (v90)
+
+`HUMTOUCH gsi gpii.. ee.. irc.. rc.. ok.. ch0.. ch1.. ev.. evrp.. evn.. poll.. idx.. scr..`
+`HUMTOUCH gsiev <completion event dwords> irq.. glob.. errl.. sdma.. sgsi..`
+
+Reading: `irc` != 0 means init stopped at that code with `ch0/ch1/ev` showing the channel
+states (CHSTATE in bits 23:20: 1 allocated, 2 started, 0xF error). `irc=0` but `rc=-110`
+means the channels came up and the transfer alone failed - then `evn`/`ev`/`errl`/`glob`
+say whether the GSI produced events, and `ch0/ch1` whether it stayed started.
 
 ## Why GSI is required (proven, do not re-litigate)
 

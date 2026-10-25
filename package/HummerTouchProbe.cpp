@@ -23,6 +23,7 @@
 #include <pexpert/pexpert.h>
 extern "C" {
 #include "GeniSpi.h"
+#include "HummerGsi.h"
 #include "HummerTouchBoard.h"
 }
 
@@ -164,8 +165,12 @@ void ioDelayUs(void *, unsigned us) {
 
 struct Session {
     Region gccLow, gccHalt, gccVote, gccS4, tlmmSpi, tlmmReset, wrapper, se;
+    Region gpi;                       // GPI/GSI register window (0xa00000)
     IOBufferMemoryDescriptor *dmaMem;
     uint64_t dmaPhys;
+    IOBufferMemoryDescriptor *gsiMem; // event ring + TX ring + RX ring (one contiguous block)
+    uint64_t gsiPhys;
+    struct hgs_dma gsi;
     struct geni_spi spi;
     uint8_t *tx, *rx;                 // S3910_MAX_PAYLOAD + 3 each (heap: 16 KiB stacks)
     uint16_t max_write = 1024, config_size, max_x, max_y, objects;
@@ -184,6 +189,7 @@ struct Session {
     unsigned fwMode = 0, idRc = 0;
     bool viaCommand = false;          // IDENTIFY arrived by command, not spontaneously
     unsigned allowFifoDisabled = 1;   // hummer-touch-fifo=0 forces the GPI DMA path
+    int gsiEnable = 1;                // hummer-touch-gsi=0 keeps the SE/FIFO path (dead on this engine)
 };
 
 void fail(unsigned step, int code) {
@@ -227,8 +233,36 @@ int busTrace(Session &s, int rc, size_t len, const uint8_t *tx, const uint8_t *r
     if (firstFailure) {s.lastRc = rc; s.lastLen = static_cast<uint32_t>(len);}
     return rc;
 }
+// Cache-maintenance adapter for the GSI rings and buffers (same policy as the SE DMA
+// path: the block is cached memory the engine reaches by physical address). C linkage
+// so it matches hgs_sync_fn exactly.
+extern "C" void gsiSync(void *, void *virt, size_t len, int op) {cacheRange(virt, len, op);}
+
+// One transfer through the GSI engine. TouchComm reads are full duplex by nature
+// (every command clocks a response in, every read clocks 0xff out), so all transfers
+// are issued as SPI_DUPLEX - the byte stream on the wire is identical to TX-only.
+int gsiXfer(Session &s, const uint8_t *tx, uint8_t *rx, size_t len) {
+    if (!s.spi.dma.tx_virt || !s.spi.dma.rx_virt || len > s.spi.dma.size) return TCM_EINVAL;
+    if (tx) memcpy(s.spi.dma.tx_virt, tx, len);
+    else memset(s.spi.dma.tx_virt, 0xff, len);
+    struct hgs_spi_cfg cfg = {};
+    cfg.word_len = 8 - 4;                                  // mainline: bits_per_word - MIN_WORD_LEN
+    cfg.cpol = (TB_SPI_MODE & GENI_SPI_CPOL) ? 1u : 0u;
+    cfg.cpha = (TB_SPI_MODE & GENI_SPI_CPHA) ? 1u : 0u;
+    cfg.clk_div = s.div;
+    cfg.clk_src = s.level;
+    cfg.cs = 0;
+    const int rc = hgs_xfer(&s.gsi, &cfg, s.spi.dma.tx_virt, s.spi.dma.tx_phys,
+                            s.spi.dma.rx_virt, s.spi.dma.rx_phys, len);
+    if (rx) memcpy(rx, s.spi.dma.rx_virt, len);            // hgs_xfer invalidated the lines
+    return rc;
+}
+
 int busXfer(Session &s, const uint8_t *tx, uint8_t *rx, size_t len) {
-    int rc = geni_spi_transfer(&s.spi, tx, rx, len, 0);
+    // GSI/GPI is the only data path this engine has (its FIFO interface is disabled in
+    // hardware and the SE DMA block is not host-accessible). geni_spi_transfer's own
+    // paths are kept as the fallback the boot argument hummer-touch-gsi=0 selects.
+    int rc = s.gsi.ready ? gsiXfer(s, tx, rx, len) : geni_spi_transfer(&s.spi, tx, rx, len, 0);
     return busTrace(s, rc, len, tx, rx);
 }
 // One full-duplex read: clock `length` dummy 0xff bytes out, capture the response.
@@ -522,6 +556,12 @@ bool configureClock(Session &s, unsigned hz) {
     s.actualHz = choice.actual_hz;
     int r = geni_spi_set_clock(&s.spi, hz, static_cast<unsigned>(choice.sclk_hz), choice.level);
     if (r) {fail(4, r); return false;}
+    // The GSI CONFIG0 TRE has to carry the divider and source the SE actually ended up
+    // with. choice.div came from tb_choose_clock's original level pick, which the two
+    // lines above overrode with level 0 / 19.2 MHz, so read both back instead of
+    // assuming they match.
+    s.div = (rd32(s.se.va, GENI_SER_M_CLK_CFG) >> GENI_CLK_DIV_SHIFT) & GENI_CLK_DIV_MAX;
+    s.level = rd32(s.se.va, SE_GENI_CLK_SEL) & 0x7u;
     // v86: force the QUPv3 wrap1 S4 RCG into DFS level 0 (TCXO 19.2 MHz). GPLL0 never
     // locks on this board (gpll=0x5, RESET_N=0), so if the RCG still sits on its CMD
     // default (GPLL0-parented) the SER clock has no live source; the SE then accepts the
@@ -530,24 +570,63 @@ bool configureClock(Session &s, unsigned hz) {
     wr32(s.gccS4.va, (TB_S4_RCG + TB_RCG_DFSR_CMD) & 0xfff, 1u);   // DFS enable, current level 0
     r = geni_spi_setup(&s.spi, TB_SPI_MODE, 0);
     if (r) {fail(4, r); return false;}
-    // v89: SE-DMA needs the SE DMA interface enabled. Mainline geni_load_se_fw sets
-    // SE_DMA_IF_EN (0x2004) bit0 and, for a non-FIFO mode, SE_FIFO_IF_DISABLE (0x2008)
-    // bit0. The classic path leaves both at the bootloader default, so on this engine the
-    // DMA master may never be armed - a likely reason an SE-DMA transfer faults. These
-    // four registers (0x2000..0x2008) live in the SE PROG_RAM/clock-control block, which
-    // is only accessible once the SER clock is up (poking 0x2008 before init bus-errored),
-    // so do it here, after geni_spi_set_clock(). Capture the read-back for the snap3 line.
-    s.dbg[12] = rd32(s.se.va, 0x2004);
-    wr32(s.se.va, 0x2004, s.dbg[12] | 1u);              // SE_DMA_IF_EN = DMA_IF_EN
-    s.dbg[13] = rd32(s.se.va, 0x2008);
-    wr32(s.se.va, 0x2008, s.dbg[13] | 1u);              // SE_FIFO_IF_DISABLE = FIFO_IF_DISABLE (DMA mode)
+    // v89 tried to arm the SE DMA interface here (SE_DMA_IF_EN 0x2004 | FIFO_IF_DISABLE
+    // 0x2008) and the very first read of 0x2004 took a synchronous external abort with
+    // FAR = se.va + 0x2004: the whole 0x2000..0x2008 block is PROG_RAM, not host
+    // accessible on this part (mainline only touches it right after loading SE firmware,
+    // which sm8750 does not do). That kills the SE-DMA path and leaves GSI as the only
+    // data path - openGsi() below. The two snap3 slots keep GENI_IF_DISABLE_RO so the
+    // line keeps its shape.
+    s.dbg[12] = rd32(s.se.va, 0x64);
+    s.dbg[13] = s.dbg[12];
+    return true;
+}
+
+// GSI/GPI bring-up: the engine the vendor kernel drives spi4 with. Runs after the
+// serial clock because the GPI starts a channel against a live SE (SPI protocol, SER
+// clock on). Everything is polled; every GPI interrupt source is masked inside
+// HummerGsi.c, since this board has no handler for lines 279..284 / 293..298.
+bool openGsi(Session &s) {
+    if (!s.gsiEnable) return true;                     // hummer-touch-gsi=0 keeps the old path
+    if (!mapRegion(TB_GPI_DMA_BASE, TB_GPI_DMA_SIZE, s.gpi)) {fail(4, TCM_EIO); return false;}
+    // One physically contiguous block holds the event ring, the TX ring and the RX
+    // ring. Rings must be aligned to their length (4096 / 1024 / 1024), so the block is
+    // page aligned first; the spare page absorbs whatever the allocator hands out.
+    s.gsiMem = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(kernel_task,
+        static_cast<IOOptionBits>(kIODirectionInOut) | static_cast<IOOptionBits>(kIOMemoryPhysicallyContiguous),
+        HGS_RING_BYTES + 0x1000, 0xfffffff000ULL);
+    if (!s.gsiMem || s.gsiMem->prepare() != kIOReturnSuccess) {fail(4, TCM_ENOMEM); return false;}
+    addr64_t segLen = 0;
+    uint64_t phys = s.gsiMem->getPhysicalSegment(0, &segLen);
+    uint8_t *virt = static_cast<uint8_t *>(s.gsiMem->getBytesNoCopy());
+    if (!virt || !phys || segLen < HGS_RING_BYTES + 0x1000) {fail(4, TCM_EIO); return false;}
+    // The VA and PA must share their page offset for a single padding step to align both.
+    if (((uintptr_t)virt & 0xfff) != (phys & 0xfff)) {fail(4, TCM_EIO); return false;}
+    const uint64_t pad = (0x1000 - (phys & 0xfff)) & 0xfff;
+    virt += pad;
+    phys += pad;
+    memset(virt, 0, HGS_RING_BYTES);
+    cacheRange(virt, HGS_RING_BYTES, 1);
+    struct hgs_rings rings = {};
+    rings.ev_virt = virt;
+    rings.ev_phys = phys;
+    rings.ev_len = HGS_EV_BYTES;
+    rings.tx_virt = virt + HGS_EV_BYTES;
+    rings.tx_phys = phys + HGS_EV_BYTES;
+    rings.tx_len = HGS_TX_BYTES;
+    rings.rx_virt = virt + HGS_EV_BYTES + HGS_TX_BYTES;
+    rings.rx_phys = phys + HGS_EV_BYTES + HGS_TX_BYTES;
+    rings.rx_len = HGS_RX_BYTES;
+    const int rc = hgs_init(&s.gsi, s.gpi.va, s.se.va, &rings, TB_GPI_SEID, gsiSync, nullptr);
+    if (rc) {fail(4, rc); return false;}
     return true;
 }
 
 // Panic readout: the panic screen is the only console this bring-up has.
 void panicReadout(const Session &s, const char *why) {
-    static char text[1200];
+    static char text[1600];
     const uint32_t *v = s.vals;
+    const uint32_t *d = s.gsi.diag;
     snprintf(text, sizeof text,
         "HUMTOUCH %s s%u/%u st%u e%d\n"
         "HUMTOUCH vote%08x halt %08x %08x %08x %08x %08x gpll%08x pins %08x %08x %08x %08x\n"
@@ -556,7 +635,9 @@ void panicReadout(const Session &s, const char *why) {
         "HUMTOUCH x0 %02x%02x%02x%02x%02x%02x/%02x%02x%02x%02x%02x%02x x1 %02x%02x%02x%02x%02x%02x/%02x%02x%02x%02x%02x%02x\n"
         "HUMTOUCH snap irq%08x st%08x txfs%08x rxfs%08x dmatx%08x dmarx%08x valid%u\n"
         "HUMTOUCH snap2 mcmd%08x clk%08x sel%08x dma%08x mirq%08x\n"
-        "HUMTOUCH snap3 rcmd%08x rcfg%08x rdfs%08x rpcfg%08x s4cbcr%08x gpll%08x ifen%08x fifoif%08x",
+        "HUMTOUCH snap3 rcmd%08x rcfg%08x rdfs%08x rpcfg%08x s4cbcr%08x gpll%08x ifen%08x fifoif%08x\n"
+        "HUMTOUCH gsi gpii%u ee%05x irc%d rc%d ok%d ch0%08x ch1%08x ev%08x evrp%08x evn%u poll%u idx%08x scr%08x\n"
+        "HUMTOUCH gsiev %08x %08x %08x %08x irq%08x glob%08x errl%08x sdma%08x sgsi%08x",
         why, native_htouch_stage_done, native_htouch_stage_req, native_htouch_step, native_htouch_error,
         v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[9], v[10], v[11], v[12],
         v[19], v[20], v[21], v[22], s.level, s.div, static_cast<unsigned>(s.actualHz),
@@ -573,7 +654,12 @@ void panicReadout(const Session &s, const char *why) {
         s.spi.snap_irq, s.spi.snap_status, s.spi.snap_txfs, s.spi.snap_rxfs,
         s.spi.snap_dma_tx, s.spi.snap_dma_rx, s.spi.snap_valid,
         s.dbg[0], s.dbg[1], s.dbg[2], s.dbg[3], s.dbg[4],
-        s.dbg[6], s.dbg[7], s.dbg[8], s.dbg[9], s.dbg[10], s.dbg[11], s.dbg[12], s.dbg[13]);
+        s.dbg[6], s.dbg[7], s.dbg[8], s.dbg[9], s.dbg[10], s.dbg[11], s.dbg[12], s.dbg[13],
+        d[HGS_D_GPII], d[HGS_D_EE], (int)d[HGS_D_INIT_RC], (int)d[HGS_D_RC], s.gsi.ready,
+        d[HGS_D_CH0], d[HGS_D_CH1], d[HGS_D_EV], d[HGS_D_EV_RP], d[HGS_D_EVN], d[HGS_D_POLL],
+        d[HGS_D_IDX], d[HGS_D_SCRATCH],
+        d[HGS_D_EV0], d[HGS_D_EV1], d[HGS_D_EV2], d[HGS_D_EV3],
+        d[HGS_D_IRQ_STTS], d[HGS_D_GLOB], d[HGS_D_ERRL], d[HGS_D_SE_DMA], d[HGS_D_SE_GSI]);
     panic("%s", text);
 }
 
@@ -612,6 +698,9 @@ static void touchThread(void *, wait_result_t) {
     unsigned fifoMode = 1;
     PE_parse_boot_argn("hummer-touch-fifo", &fifoMode, sizeof fifoMode);
     s->allowFifoDisabled = fifoMode ? 1 : 0;
+    int gsiMode = 1;
+    PE_parse_boot_argn("hummer-touch-gsi", &gsiMode, sizeof gsiMode);
+    s->gsiEnable = gsiMode ? 1 : 0;
     do {
         if (!snapshot(*s)) {checkpointFail(*s); break;}
         checkpoint(1, *s);
@@ -627,6 +716,8 @@ static void touchThread(void *, wait_result_t) {
         if (gPanicAfter == 5) panicReadout(*s, "openBus done");
         if (!configureClock(*s, hz)) {checkpointFail(*s); break;}
         if (gPanicAfter == 6) panicReadout(*s, "clock done");
+        if (!openGsi(*s)) {checkpointFail(*s); break;}
+        if (gPanicAfter == 8) panicReadout(*s, "gsi done");
         s->tx = static_cast<uint8_t *>(IOMalloc(S3910_MAX_PAYLOAD + 3));
         s->rx = static_cast<uint8_t *>(IOMalloc(S3910_MAX_PAYLOAD + 3));
         if (!s->tx || !s->rx) {fail(5, TCM_ENOMEM); checkpointFail(*s); break;}
