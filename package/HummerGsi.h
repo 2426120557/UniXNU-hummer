@@ -45,6 +45,8 @@ enum hgs_diag {
     HGS_D_EE,            // ee_offset in use (0x10000 on this part, proven by the decode window)
     HGS_D_INIT_RC,       // 0 = ready, else the failure code
     HGS_D_PRE,           // CH0 CNTXT_0 before we touch anything (state in bits 23:20: 1 = already allocated)
+    HGS_D_A0,            // CH0 CNTXT_0 immediately after its ALLOCATE (state 1 = the engine took it)
+    HGS_D_A1,            // CH1 CNTXT_0 immediately after its ALLOCATE
     HGS_D_RB,            // CH0 CNTXT_1 read back after programming (0x400 = the ring length stored)
     HGS_D_TRACE,         // per-command result, 2 bits each: alloc0 alloc1 start0 start1 (0 ok, 1 timeout, 2 error)
     HGS_D_TIRQ,          // CNTXT_TYPE_IRQ after the event-channel ALLOCATE (bit0 = CH_CTRL)

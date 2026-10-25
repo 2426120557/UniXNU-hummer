@@ -82,6 +82,7 @@
 // CNTXT_0 fields.
 #define HGS_C0_EL_SIZE(sz) ((uint32_t)(sz) << 24)
 #define HGS_C0_CHSTATE(v) (((v) >> 20) & 0xfu)
+#define HGS_C0_CHSTATE_MASK 0x00f00000u
 #define HGS_C0_DIR_OUT 0x8u          // GPI_CHTYPE_DIR_OUT (bit 3)
 #define HGS_C0_PROTO_GPI 0x2u
 #define HGS_EV_C0_INTTYPE_IRQ (1u << 16)
@@ -207,8 +208,14 @@ static void hgs_program_chan(struct hgs_dma *g, unsigned ch, unsigned dir_out,
     const unsigned n = g->gpii;
     const uint32_t base = HGS_CH_CNTXT(n, ch);
     (void)ring;
+    // CHSTATE lives in bits 23:20 of CNTXT_0 and this engine reports the channel state
+    // there (the event channel reads back 1 after its ALLOCATE). Mainline writes the whole
+    // word - which puts 0 into CHSTATE - but it does so right after ALLOCATE and never
+    // re-reads the field. Here the write is ordered before ALLOCATE and the field is
+    // preserved on top, so either interpretation of the register is safe.
+    uint32_t keep = hgs_rd(g, base + HGS_C_CONFIG) & HGS_C0_CHSTATE_MASK;
     hgs_wr(g, base + HGS_C_CONFIG,
-           HGS_C0_EL_SIZE(HGS_TRE_BYTES) | (dir_out ? HGS_C0_DIR_OUT : 0u) | HGS_C0_PROTO_GPI);
+           keep | HGS_C0_EL_SIZE(HGS_TRE_BYTES) | (dir_out ? HGS_C0_DIR_OUT : 0u) | HGS_C0_PROTO_GPI);
     hgs_wr(g, base + HGS_C_R_LENGTH, len);
     hgs_wr(g, base + HGS_C_RING_BASE_LSB, (uint32_t)phys);
     hgs_wr(g, base + HGS_C_RING_BASE_MSB, (uint32_t)(phys >> 32));
@@ -295,25 +302,36 @@ static int hgs_channels_start(struct hgs_dma *g) {
     // allocated by the bootloader, and deallocating a channel that was never allocated is
     // itself an error the engine logs (v95 showed ERROR_LOG already set before the first
     // real command, which then vetoed all four instances).
-    // Each command's completion flag must be dropped first: the SRC bit from ALLOCATE
-    // would otherwise make the following START look complete the instant it is polled.
+    // Program the transfer rings BEFORE allocating, then allocate last and read the state
+    // back immediately. Rationale: v97 showed the event channel reporting CHSTATE = 1 while
+    // both transfer channels read 0 after the same sequence, and the only structural
+    // difference is that the transfer channels get CNTXT_0 rewritten *after* their
+    // ALLOCATE - a full-word write that clears bits 23:20. Ordering the program first makes
+    // ALLOCATE the last thing that touches the state field, and A0/A1 record what it became.
+    for (unsigned ch = 0; ch < 2; ++ch) {
+        hgs_program_chan(g, ch, ch == 0,
+                         ch == 0 ? g->rings.tx_virt : g->rings.rx_virt,
+                         ch == 0 ? g->rings.tx_phys : g->rings.rx_phys,
+                         ch == 0 ? g->rings.tx_len : g->rings.rx_len);
+    }
     for (unsigned ch = 0; ch < 2; ++ch) {
         hgs_wr(g, HGS_SRC_CH_IRQ_CLR(n), 1u << ch);
         hgs_chan_cmd(g, ch, HGS_CH_ALLOCATE);
         int rc = hgs_wait_state(g, HGS_CH_CNTXT(n, ch), HGS_ST_ALLOCATED,
                                 HGS_SRC_CH_IRQ(n), 1u << ch, HGS_POLL_TRIES);
         trace |= hgs_step_result(rc) << (2u * ch);
-        if (ch == 0) g->diag[HGS_D_E2] = hgs_rd(g, HGS_ERRL(n));
-        else g->diag[HGS_D_E3] = hgs_rd(g, HGS_ERRL(n));
+        if (ch == 0) {
+            g->diag[HGS_D_A0] = hgs_rd(g, HGS_CH_CNTXT(n, 0));
+            g->diag[HGS_D_E2] = hgs_rd(g, HGS_ERRL(n));
+            g->diag[HGS_D_SRC] = hgs_rd(g, HGS_SRC_CH_IRQ(n));
+        } else {
+            g->diag[HGS_D_A1] = hgs_rd(g, HGS_CH_CNTXT(n, 1));
+            g->diag[HGS_D_E3] = hgs_rd(g, HGS_ERRL(n));
+        }
         if (rc) {
             g->diag[HGS_D_TRACE] = trace;
             return rc;
         }
-        hgs_program_chan(g, ch, ch == 0,
-                         ch == 0 ? g->rings.tx_virt : g->rings.rx_virt,
-                         ch == 0 ? g->rings.tx_phys : g->rings.rx_phys,
-                         ch == 0 ? g->rings.tx_len : g->rings.rx_len);
-        if (ch == 0) g->diag[HGS_D_SRC] = hgs_rd(g, HGS_SRC_CH_IRQ(n));
     }
     // Did the ring length actually store? A zero length is a ring the engine cannot run.
     g->diag[HGS_D_RB] = hgs_rd(g, HGS_CH_CNTXT(n, 0) + HGS_C_R_LENGTH);
