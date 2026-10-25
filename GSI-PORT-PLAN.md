@@ -1,8 +1,8 @@
 # GSI / GPI DMA port plan for hummer touch (spi4)
 
-Status: **driver implemented (v90..v97), GSI proven alive, blocked on START.**
-Read the "Where it stands" section first; everything below it is the reasoning and the
-hardware facts that were established along the way.
+Status: **driver implemented (v90..v99), GSI proven alive, blocked on START.**
+Read "Where it stands" and "Deviations from mainline" first; everything below is the
+reasoning and the hardware facts established along the way.
 
 ## Where it stands after v97 (2026-10-26 ~03:00)
 
@@ -21,6 +21,36 @@ Proven on hardware:
 
 So the remaining question is narrow: **why does the START command not take effect, and what
 logs the error between the RX context programming and the STARTs.**
+
+## Deviations from mainline `gpi.c` (read this before changing anything)
+
+The rule for this port: **reproduce mainline literally; deviate only where a measurement
+proves the deviation is required, and write down which measurement.** Every deviation made
+"because it looked reasonable" turned out to be a bug, so they are listed here explicitly.
+
+Kept, each with a hard reason:
+
+| Deviation | Why it is required |
+|---|---|
+| Polling instead of GPI interrupts | This board installs no handler for GIC 279..284 / 293..298 and the ADT publishes no such interrupt; every GPI interrupt source is masked so nothing asserts. Commands are therefore confirmed through `SRC_CH_IRQ` / `SRC_EV_CH_IRQ` and `CHSTATE`. |
+| No SMMU programming | The vendor DT's `qup1_gpi_iommu_region` maps `0x0..0x100000` and `0x200000..0x1_00000000` identically, so physical ring addresses are correct as long as they avoid `0x100000..0x200000` (ours is at `0xcc344000`). |
+| No clk / interconnect votes | `gpi_dma1` has no `clocks` property, and UFS runs with zero interconnect votes, so the bootloader has already configured the NoC. |
+| Register writes instead of dmaengine | There is no Linux DMA/PM/devres framework in XNU; the sequences are reproduced by hand (`hgs_*`). |
+
+Removed, all of them self-inflicted bugs (kept here as a warning):
+
+| Removed deviation | What it cost |
+|---|---|
+| `DE_ALLOC` + `RESET` pre-clean before ALLOCATE | `pre == 0` had already proven the channels were free; deallocating a never-allocated channel makes the engine log `GSI_UNSUPPORTED_INTER_EE_OP_ERR`, which then vetoed every instance (v93/v95 wasted). |
+| "`ERROR_LOG` grew" as the accept criterion | A set `SRC` bit means "command completed" *or* "command rejected", but the log can also grow for unrelated reasons; using it as a veto rejected all four GPIIs and reported `ok=0` (v98). Mainline judges by the channel-control interrupt plus `CHSTATE`; the port now uses `ERRL2` (the allocate phase only). |
+| Writing the ring context **before** ALLOCATE | v98 proved ALLOCATE initialises the context: `SCRATCH_0` read 0 instead of `0x10024` and `CNTXT_0` lost the proto/dir bits. Mainline order (ALLOCATE, then context) is forced by hardware. |
+| `ee_offset` probed with **writes** | Writing to the undeccoded `0xa27088` raised a synchronous external abort and panicked the kernel (v90). The right probe is read-only - `HW_PARAM_2` answers it safely, and the vendor DT states `0x10000` outright. |
+
+Non-deviations worth remembering: mainline writes `CNTXT_0` as a whole word after ALLOCATE,
+which puts 0 into `CHSTATE` (bits 23:20); mainline never re-reads that field, so it does not
+notice. This port keeps the write read-modify-write so the state survives, and v99 reads it
+back at two points (`A0/A2` right after ALLOCATE, `A1/A3` after the context write) to prove
+which step breaks it.
 
 Leads, in priority order:
 
