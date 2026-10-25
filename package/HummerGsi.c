@@ -446,6 +446,74 @@ static int hgs_try(struct hgs_dma *g) {
     return HGS_OK;
 }
 
+// ---------------------------------------------------------------------------
+// apps_smmu: register the GPI's stream before the engine is allowed to touch memory.
+//
+// On this board the SMMU is left by the bootloader in the state UFS documented on
+// 2026-10-17 (drivers/NativeUfs/NativeUfs.cpp): sCR0 = 0x002f0406, i.e. USFCFG = 1 -
+// every stream that has no stream-match entry FAULTS. The GPI is behind stream 0xb6
+// (`iommus = <&apps_smmu 0xb6 0x0>` in sm8750.dtsi) and nothing ever registered it, so
+// the engine's own DMA faults the moment it touches a ring: ALLOCATE only writes
+// registers and succeeds, START needs the ring and is therefore rejected with the channel
+// pushed back to NOT_ALLOCATED - which is exactly the symptom chain v97..v101 recorded.
+//
+// The sequence is the one that already works for UFS (drivers/NativeUfs/SmmuTakeover.h,
+// configureUfsSmmu), which is itself Linux's bypass_quirk: reserve a context bank, put
+// SCTLR = 0 (stage 1 off) and CBAR.TYPE = S1_TRANS_S2_BYPASS in it, then map the stream to
+// that bank with S2CR (written before SMR). Stage 2 bypass means physical addresses are
+// used untranslated, which is why the rings can stay ordinary physical addresses.
+#define HGS_SMMU_IDR0 0x020u
+#define HGS_SMMU_IDR1 0x024u
+#define HGS_SMMU_SMR(i) (0x800u + 4u * (i))
+#define HGS_SMMU_S2CR(i) (0xc00u + 4u * (i))
+#define HGS_SMMU_CBAR(b) (0x1000u + 4u * (b))
+#define HGS_SMMU_CBA2R(b) (0x1800u + 4u * (b))
+
+static int hgs_smmu_bypass(struct hgs_dma *g, uint32_t sid, unsigned bank_from_top) {
+    if (!g->smmu) return HGS_ERR_PARAM;
+    volatile uint32_t *m = (volatile uint32_t *)g->smmu;
+    const uint32_t idr0 = m[HGS_SMMU_IDR0 / 4u];
+    const uint32_t idr1 = m[HGS_SMMU_IDR1 / 4u];
+    unsigned count = idr0 & 0xffu;
+    unsigned banks = idr1 & 0xffu;
+    const unsigned pages = 1u << (((idr1 >> 28) & 7u) + 1u);
+    if (count > 128) count = 128;                 // firmware's reliably usable groups
+    if (!count || banks < 2 || banks > 128) return HGS_ERR_IO;
+    if (bank_from_top >= banks - 1u) return HGS_ERR_IO;
+    if ((pages + banks) * 4096u > 0xd0000u) return HGS_ERR_IO;
+    const unsigned bank = banks - 1u - bank_from_top;
+    // Never take a bank that is already in use: a bypass-quirk bank has CBA2R = 1 and
+    // CBAR = 0x10000, an idle one has both at their reset value.
+    if (m[HGS_SMMU_CBA2R(bank) / 4u] || m[HGS_SMMU_CBAR(bank) / 4u]) return HGS_ERR_IO;
+    // First free stream-match slot (bit 31 clear).
+    unsigned slot = count;
+    for (unsigned i = 0; i < count; ++i)
+        if (!(m[HGS_SMMU_SMR(i) / 4u] & 0x80000000u)) {slot = i; break;}
+    if (slot == count) return HGS_ERR_IO;
+
+    const uint32_t cb = (pages + bank) * 4096u;
+    m[cb / 4u] = 0;                                // SCTLR = 0: stage 1 disabled
+    hgs_barrier();
+    if (m[cb / 4u] != 0) return HGS_ERR_IO;
+    m[HGS_SMMU_CBA2R(bank) / 4u] = 1u;             // VA64
+    hgs_barrier();
+    m[HGS_SMMU_CBAR(bank) / 4u] = 0x10000u;        // TYPE = S1_TRANS_S2_BYPASS
+    hgs_barrier();
+    if (m[HGS_SMMU_CBA2R(bank) / 4u] != 1u || m[HGS_SMMU_CBAR(bank) / 4u] != 0x10000u)
+        return HGS_ERR_IO;
+    m[HGS_SMMU_S2CR(slot) / 4u] = bank;            // S2CR before SMR (arm_smmu_write_sme)
+    hgs_barrier();
+    if (m[HGS_SMMU_S2CR(slot) / 4u] != bank) return HGS_ERR_IO;
+    m[HGS_SMMU_SMR(slot) / 4u] = 0x80000000u | (sid & 0xffffu);
+    hgs_barrier();
+    g->diag[HGS_D_SMMU] = slot | (bank << 16);
+    g->diag[HGS_D_SMR] = m[HGS_SMMU_SMR(slot) / 4u];
+    g->diag[HGS_D_S2CR] = m[HGS_SMMU_S2CR(slot) / 4u];
+    g->diag[HGS_D_CBAR] = m[HGS_SMMU_CBAR(bank) / 4u];
+    if (g->diag[HGS_D_SMR] != (0x80000000u | (sid & 0xffffu))) return HGS_ERR_IO;
+    return HGS_OK;
+}
+
 int hgs_init(struct hgs_dma *g, uintptr_t regs, uintptr_t se, const struct hgs_rings *r,
              unsigned seid, hgs_sync_fn sync, void *sync_ctx) {
     if (!g) return HGS_ERR_PARAM;
@@ -470,6 +538,10 @@ int hgs_init(struct hgs_dma *g, uintptr_t regs, uintptr_t se, const struct hgs_r
         (r->rx_phys & (r->rx_len - 1u)))
         return hgs_setrc(g, HGS_ERR_PARAM);
 
+    // The engine's DMA has to be reachable before any command is issued: register the GPI
+    // stream in apps_smmu first, otherwise START faults on its own ring (see hgs_smmu_bypass).
+    g->diag[HGS_D_SMMU] = 0xffffffffu;
+    g->diag[HGS_D_SMMU_RC] = (uint32_t)hgs_smmu_bypass(g, HGS_GPI_STREAM_ID, 1u);
     hgs_se_gpi_mode(g);
 
     // dma-channel-mask in the DT is 0x1e: instances 1..4 exist and the block stops

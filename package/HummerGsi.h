@@ -79,6 +79,11 @@ enum hgs_diag {
     HGS_D_SRCM,          // CNTXT_SRC_CH_IRQ_MSK read back (non-zero = CH_CTRL status can latch)
     HGS_D_GLOBEN,        // GLOB_IRQ_EN read back
     HGS_D_GPIIEN,        // GPII_IRQ_EN read back
+    HGS_D_SMMU,          // apps_smmu stream result: slot | bank << 16 (0xffffffff = not attempted)
+    HGS_D_SMR,           // stream-match register read back
+    HGS_D_S2CR,          // stream-to-context register read back
+    HGS_D_CBAR,          // context-bank attribute read back (0x10000 = S1_TRANS_S2_BYPASS)
+    HGS_D_SMMU_RC,       // 0 = stream registered, else the step that failed
     HGS_D_SE_DMA,        // SE_GENI_DMA_MODE_EN (1 = engine in DMA mode)
     HGS_D_SE_GSI,        // SE_GSI_EVENT_EN
     HGS_D_SCRATCH,       // CH0 SCRATCH_0 (pair/proto/seid)
@@ -107,9 +112,13 @@ struct hgs_spi_cfg {
     unsigned cs;
 };
 
+#define HGS_GPI_STREAM_ID 0xb6u     // sm8750.dtsi gpi_dma1: iommus = <&apps_smmu 0xb6 0x0>
+#define HGS_SMMU_BANK_USED 0xfffffffeu  // HGS_D_SMMU sentinel: no free bypass bank
+
 struct hgs_dma {
     uintptr_t regs;         // GPI register window (device regs base, 0xa00000)
     uintptr_t se;           // serial engine window (0xa90000)
+    uintptr_t smmu;         // apps_smmu window (0x15000000); 0 = not mapped, skip stream setup
     unsigned ee;            // ee_offset in use (GPII offsets are relative to regs - ee)
     unsigned gpii;          // GPI instance in use (dma-channel-mask = 0x1e -> 1..4)
     unsigned seid;          // serial engine index (spi4 -> 4)
