@@ -273,12 +273,9 @@ static unsigned hgs_step_result(int rc) {
     return (rc == HGS_ERR_TIMEOUT) ? 1u : 2u;
 }
 
-// Force a channel back to "not allocated". The bootloader drives this same SE4 touch
-// controller over the same GSI before handing over (early boot UI, fastboot), so a
-// channel it left allocated would make our ALLOCATE a no-op and our START illegal -
-// which is exactly the v92 picture: ALLOCATE "reports" through SRC, CHSTATE stays 0,
-// START never reports, and ERROR_LOG records a fault. Best effort: the state readback is
-// unreliable on this GPI, so each command just gets time to settle.
+// Force a channel back to "not allocated". Unused: pre == 0 proves the bootloader left
+// nothing allocated, and a DE_ALLOC on a free channel only adds an error-log entry.
+static void hgs_chan_clean(struct hgs_dma *g, unsigned ch) __attribute__((unused));
 static void hgs_chan_clean(struct hgs_dma *g, unsigned ch) {
     const unsigned n = g->gpii;
     hgs_wr(g, HGS_SRC_CH_IRQ_CLR(n), 1u << ch);
@@ -294,7 +291,10 @@ static int hgs_channels_start(struct hgs_dma *g) {
     // Was the channel already owned before we touched it? State 1 here means the
     // bootloader left it allocated and the clean-up below is what makes progress possible.
     g->diag[HGS_D_PRE] = hgs_rd(g, HGS_CH_CNTXT(n, 0));
-    for (unsigned ch = 0; ch < 2; ++ch) hgs_chan_clean(g, ch);
+    // No DE_ALLOC/RESET here any more: pre == 0 on every instance proves nothing was left
+    // allocated by the bootloader, and deallocating a channel that was never allocated is
+    // itself an error the engine logs (v95 showed ERROR_LOG already set before the first
+    // real command, which then vetoed all four instances).
     // Each command's completion flag must be dropped first: the SRC bit from ALLOCATE
     // would otherwise make the following START look complete the instant it is polled.
     for (unsigned ch = 0; ch < 2; ++ch) {
@@ -381,13 +381,7 @@ static int hgs_try(struct hgs_dma *g) {
     // cannot be cleared on this part, and only a *change* would be meaningful.
     g->diag[HGS_D_E0] = hgs_rd(g, HGS_ERRL(n));
 
-    // Same clean slate for the event channel.
-    hgs_wr(g, HGS_EV_CMD(n), (HGS_EV_DE_ALLOC << 24) | 0u);
-    hgs_wait_us(2000);
-    hgs_wr(g, HGS_SRC_EV_CH_IRQ_CLR(n), 1u);
-    hgs_wr(g, HGS_EV_CMD(n), (HGS_EV_RESET << 24) | 0u);
-    hgs_wait_us(2000);
-
+    // v93's EV clean-up is gone for the same reason as the channel one.
     hgs_wr(g, HGS_SRC_EV_CH_IRQ_CLR(n), 1u);
     hgs_wr(g, HGS_EV_CMD(n), (HGS_CH_ALLOCATE << 24) | 0u);
     int rc = hgs_wait_state(g, HGS_EV_CNTXT(n), HGS_ST_ALLOCATED,
@@ -396,7 +390,9 @@ static int hgs_try(struct hgs_dma *g) {
     g->diag[HGS_D_EVSRC] = hgs_rd(g, HGS_SRC_EV_CH_IRQ(n));
     g->diag[HGS_D_EV] = hgs_rd(g, HGS_EV_CNTXT(n));
     g->diag[HGS_D_E1] = hgs_rd(g, HGS_ERRL(n));
-    if (rc) return rc;
+    // Do not give up here: whether the channels and the ring work is what matters, and an
+    // EV-only complaint must not veto the instance (that is what cost v95 all four).
+    (void)rc;
     hgs_program_ev(g);
     // Pre-seed the event ring pointers exactly like gpi_alloc_ev_chan(): wp starts one
     // slot behind base so the first recycled event wraps it onto base.
@@ -406,10 +402,10 @@ static int hgs_try(struct hgs_dma *g) {
 
     rc = hgs_channels_start(g);
     if (rc) return rc;
-    // Only a clean error log proves the engine accepted the commands: a set SRC bit can
-    // also mean "command rejected", which is exactly what the v92/v93 readouts looked
-    // like. If the log grew, this instance is unusable and hgs_init tries the next one.
-    if (hgs_rd(g, HGS_ERRL(n)) != g->diag[HGS_D_E0]) return HGS_ERR_IO;
+    // Only a clean error log proves the engine accepted the *channel* commands: a set SRC
+    // bit can also mean "command rejected". The baseline is E1 (after the event-channel
+    // ALLOCATE), so an EV-only complaint does not veto an otherwise usable instance.
+    if (hgs_rd(g, HGS_ERRL(n)) != g->diag[HGS_D_E1]) return HGS_ERR_IO;
     g->diag[HGS_D_CH0] = hgs_rd(g, HGS_CH_CNTXT(n, 0));
     g->diag[HGS_D_CH1] = hgs_rd(g, HGS_CH_CNTXT(n, 1));
     g->diag[HGS_D_EV] = hgs_rd(g, HGS_EV_CNTXT(n));
