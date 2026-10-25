@@ -477,6 +477,10 @@ bool openBus(Session &s) {
 bool configureClock(Session &s, unsigned hz) {
     struct tb_clock_choice choice = {};
     if (tb_choose_clock(s.levelHz, TB_DFS_LEVELS, s.spi.oversampling, hz, &choice)) {fail(4, TCM_EINVAL); return false;}
+    // v77: force TCXO-backed DFS level 0 (perf CFG=0x1, parent src=0 = TCXO 19.2MHz).
+    // GPLL0 stays untouched; the level-0 RCG output is the always-on 19.2M reference.
+    choice.level = 0;
+    choice.sclk_hz = 19200000u;
     s.level = choice.level;
     s.div = choice.div;
     s.actualHz = choice.actual_hz;
