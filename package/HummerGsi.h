@@ -24,8 +24,11 @@
 // Biggest transfer this engine is asked for is S3910_MAX_PAYLOAD + 3 (1027 bytes);
 // the TRE length field is 24 bits, so nothing to worry about.
 #define HGS_TRE_BYTES 16u
-#define HGS_CH_ELEMS 64u                    // gpi.c CHAN_TRES
-#define HGS_EV_ELEMS 256u                   // gpi.c CHAN_TRES << EV_FACTOR(2)
+#define HGS_CH_ELEMS 64u                    // gpi.c CHAN_TRES, and the vendor DT's 64 in `dmas`
+// The vendor node says qcom,ev-factor = <1> -> CHAN_TRES << 1 = 128 elements (2048 bytes),
+// while mainline uses EV_FACTOR 2 (256 / 4096). Match the vendor: if the engine validates
+// the event ring length against its own factor, a doubled ring is a rejected ALLOCATE.
+#define HGS_EV_ELEMS 128u
 
 // Ring geometry as the probe must lay it out (all rings are pages of one physically
 // contiguous, 4 KiB aligned buffer). Sizes are bytes and already powers of two, which
@@ -57,6 +60,11 @@ enum hgs_diag {
     HGS_D_EV3,           // dword 3: status | type<<16 | chid<<24
     HGS_D_IRQ_STTS,      // CNTXT_TYPE_IRQ (must stay 0: all sources masked)
     HGS_D_GLOB,          // CNTXT_GLOB_IRQ_STTS (bit0 = error)
+    HGS_D_E0,            // ERROR_LOG right after the initial clear (does clearing work at all?)
+    HGS_D_E1,            // ERROR_LOG after the event-channel ALLOCATE
+    HGS_D_E2,            // ERROR_LOG after channel 0 ALLOCATE
+    HGS_D_E3,            // ERROR_LOG after channel 1 ALLOCATE
+    HGS_D_E4,            // ERROR_LOG after both STARTs
     HGS_D_ERRL,          // GPII error log after the START attempts
     HGS_D_ERRL2,         // GPII error log right after the ALLOCATE pair
     HGS_D_SE_DMA,        // SE_GENI_DMA_MODE_EN (1 = engine in DMA mode)

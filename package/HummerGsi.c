@@ -292,6 +292,8 @@ static int hgs_channels_start(struct hgs_dma *g) {
         int rc = hgs_wait_state(g, HGS_CH_CNTXT(n, ch), HGS_ST_ALLOCATED,
                                 HGS_SRC_CH_IRQ(n), 1u << ch, HGS_POLL_TRIES);
         trace |= hgs_step_result(rc) << (2u * ch);
+        if (ch == 0) g->diag[HGS_D_E2] = hgs_rd(g, HGS_ERRL(n));
+        else g->diag[HGS_D_E3] = hgs_rd(g, HGS_ERRL(n));
         if (rc) {
             g->diag[HGS_D_TRACE] = trace;
             return rc;
@@ -313,6 +315,7 @@ static int hgs_channels_start(struct hgs_dma *g) {
         trace |= hgs_step_result(rc) << (4u + 2u * ch);
     }
     g->diag[HGS_D_TRACE] = trace;
+    g->diag[HGS_D_E4] = hgs_rd(g, HGS_ERRL(n));
     // A command the engine rejects also raises CH_CTRL (which is why a set SRC bit alone
     // is not proof of success), so capture the error reporting here as well: GLOB bit0 is
     // the general-error interrupt and ERROR_LOG is what mainline dumps on failure.
@@ -363,6 +366,9 @@ static int hgs_try(struct hgs_dma *g) {
     hgs_ee_setup(g);
     hgs_wr(g, HGS_SRC_CH_IRQ_CLR(n), 0x3u);
     hgs_wr(g, HGS_SRC_IEOB_IRQ_CLR(n), 0x1u);
+    // Baseline for "did any command log an error": a non-zero read here means ERROR_LOG
+    // cannot be cleared on this part, and only a *change* would be meaningful.
+    g->diag[HGS_D_E0] = hgs_rd(g, HGS_ERRL(n));
 
     // Same clean slate for the event channel.
     hgs_wr(g, HGS_EV_CMD(n), (HGS_EV_DE_ALLOC << 24) | 0u);
@@ -378,6 +384,7 @@ static int hgs_try(struct hgs_dma *g) {
     g->diag[HGS_D_TIRQ] = hgs_rd(g, HGS_TYPE_IRQ(n));
     g->diag[HGS_D_EVSRC] = hgs_rd(g, HGS_SRC_EV_CH_IRQ(n));
     g->diag[HGS_D_EV] = hgs_rd(g, HGS_EV_CNTXT(n));
+    g->diag[HGS_D_E1] = hgs_rd(g, HGS_ERRL(n));
     if (rc) return rc;
     hgs_program_ev(g);
     // Pre-seed the event ring pointers exactly like gpi_alloc_ev_chan(): wp starts one
@@ -388,6 +395,10 @@ static int hgs_try(struct hgs_dma *g) {
 
     rc = hgs_channels_start(g);
     if (rc) return rc;
+    // Only a clean error log proves the engine accepted the commands: a set SRC bit can
+    // also mean "command rejected", which is exactly what the v92/v93 readouts looked
+    // like. If the log grew, this instance is unusable and hgs_init tries the next one.
+    if (hgs_rd(g, HGS_ERRL(n)) != g->diag[HGS_D_E0]) return HGS_ERR_IO;
     g->diag[HGS_D_CH0] = hgs_rd(g, HGS_CH_CNTXT(n, 0));
     g->diag[HGS_D_CH1] = hgs_rd(g, HGS_CH_CNTXT(n, 1));
     g->diag[HGS_D_EV] = hgs_rd(g, HGS_EV_CNTXT(n));
