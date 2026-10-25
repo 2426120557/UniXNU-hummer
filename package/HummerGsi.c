@@ -238,8 +238,20 @@ static void hgs_se_gpi_mode(struct hgs_dma *g) {
 }
 
 // Allocate + program + start both channels at ring index 0 (the initial bring-up).
+//
+// The v91 run showed this GPI never reflects ALLOCATE or START in CNTXT_0's CHSTATE
+// field (it stays 0) while the SRC_* control-status bits do set, so completion is taken
+// from those. A START that produces neither is *not* fatal here: the engine may already
+// be running, and only a queued transfer can prove it - so the caller still proceeds and
+// the event ring reports the truth. Each command's outcome is packed into HGS_D_TRACE.
+static unsigned hgs_step_result(int rc) {
+    if (!rc) return 0;
+    return (rc == HGS_ERR_TIMEOUT) ? 1u : 2u;
+}
+
 static int hgs_channels_start(struct hgs_dma *g) {
     const unsigned n = g->gpii;
+    uint32_t trace = 0;
     // Each command's completion flag must be dropped first: the SRC bit from ALLOCATE
     // would otherwise make the following START look complete the instant it is polled.
     for (unsigned ch = 0; ch < 2; ++ch) {
@@ -247,20 +259,33 @@ static int hgs_channels_start(struct hgs_dma *g) {
         hgs_chan_cmd(g, ch, HGS_CH_ALLOCATE);
         int rc = hgs_wait_state(g, HGS_CH_CNTXT(n, ch), HGS_ST_ALLOCATED,
                                 HGS_SRC_CH_IRQ(n), 1u << ch, HGS_POLL_TRIES);
-        if (rc) return rc;
+        trace |= hgs_step_result(rc) << (2u * ch);
+        if (rc) {
+            g->diag[HGS_D_TRACE] = trace;
+            return rc;
+        }
         hgs_program_chan(g, ch, ch == 0,
                          ch == 0 ? g->rings.tx_virt : g->rings.rx_virt,
                          ch == 0 ? g->rings.tx_phys : g->rings.rx_phys,
                          ch == 0 ? g->rings.tx_len : g->rings.rx_len);
         if (ch == 0) g->diag[HGS_D_SRC] = hgs_rd(g, HGS_SRC_CH_IRQ(n));
     }
+    // Did the ring length actually store? A zero length is a ring the engine cannot run.
+    g->diag[HGS_D_RB] = hgs_rd(g, HGS_CH_CNTXT(n, 0) + HGS_C_R_LENGTH);
     for (unsigned ch = 0; ch < 2; ++ch) {
         hgs_wr(g, HGS_SRC_CH_IRQ_CLR(n), 1u << ch);
         hgs_chan_cmd(g, ch, HGS_CH_START);
         int rc = hgs_wait_state(g, HGS_CH_CNTXT(n, ch), HGS_ST_STARTED,
                                 HGS_SRC_CH_IRQ(n), 1u << ch, HGS_POLL_TRIES);
-        if (rc) return rc;
+        trace |= hgs_step_result(rc) << (4u + 2u * ch);
     }
+    g->diag[HGS_D_TRACE] = trace;
+    // A command the engine rejects also raises CH_CTRL (which is why a set SRC bit alone
+    // is not proof of success), so capture the error reporting here as well: GLOB bit0 is
+    // the general-error interrupt and ERROR_LOG is what mainline dumps on failure.
+    g->diag[HGS_D_IRQ_STTS] = hgs_rd(g, HGS_TYPE_IRQ(n));
+    g->diag[HGS_D_GLOB] = hgs_rd(g, HGS_GLOB_IRQ_STTS(n));
+    g->diag[HGS_D_ERRL] = hgs_rd(g, HGS_ERRL(n));
     g->tx_wp = 0;
     g->rx_wp = 0;
     // No doorbell here: gpi_start_chan() only sends START, and the first doorbell is
@@ -280,15 +305,6 @@ static void hgs_put_tre(void *ring, unsigned idx, uint32_t d0, uint32_t d1, uint
 
 static int hgs_try(struct hgs_dma *g) {
     const unsigned n = g->gpii;
-    // Is this block really decoded and writable? CNTXT_1 (ring length) is a plain RW
-    // field, so a pattern written before any ALLOCATE reads back verbatim when the GPII
-    // is there. 0x400 in HGS_D_RB means "the registers are real"; anything else means the
-    // offsets are wrong and no amount of command writes can help.
-    const uint32_t c1 = HGS_CH_CNTXT(n, 0) + HGS_C_R_LENGTH;
-    hgs_wr(g, c1, 0x00000400u);
-    g->diag[HGS_D_RB] = hgs_rd(g, c1);
-    hgs_wr(g, c1, 0);
-
     // No GIC handler exists for this GPI, so mask every interrupt type before anything
     // can assert. A mask of zero means the engine only ever updates its status
     // registers, which is what the poll loops read.

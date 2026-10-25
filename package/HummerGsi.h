@@ -41,7 +41,8 @@ enum hgs_diag {
     HGS_D_GPII = 0,      // GPI instance that answered ALLOCATE
     HGS_D_EE,            // ee_offset in use (0x10000 on this part, proven by the decode window)
     HGS_D_INIT_RC,       // 0 = ready, else the failure code
-    HGS_D_RB,            // CH0 CNTXT_1 write/read-back test (0x400 = the block decodes and stores)
+    HGS_D_RB,            // CH0 CNTXT_1 read back after programming (0x400 = the ring length stored)
+    HGS_D_TRACE,         // per-command result, 2 bits each: alloc0 alloc1 start0 start1 (0 ok, 1 timeout, 2 error)
     HGS_D_TIRQ,          // CNTXT_TYPE_IRQ after the event-channel ALLOCATE (bit0 = CH_CTRL)
     HGS_D_SRC,           // CNTXT_SRC_CH_IRQ after the TX channel ALLOCATE (bit k = channel k changed)
     HGS_D_EVSRC,         // CNTXT_SRC_EV_CH_IRQ after the event-channel ALLOCATE
