@@ -474,16 +474,17 @@ bool openBus(Session &s) {
         s.spi.dma.rx_phys = s.dmaPhys + kDmaBytes;
         s.spi.dma.size = kDmaBytes;
     }
-    // v82: at reset the SE FIFO interface is disabled (SE_FIFO_IF_DISABLE 0x2008 bit0=1;
-    // read-only mirror is GENI_IF_DISABLE_RO 0x64). Mainline spi-geni-qcom, when no GPI DMA
-    // channel is available, falls back to FIFO and clears this bit via
-    // qcom-geni-se geni_se_select_mode(FIFO)->clrbits(SE_FIFO_IF_DISABLE). The XNU GeniSpi
-    // component only honours the flag in software and never touches the hardware bit, so the
-    // FIFO path stayed physically disabled -> RX FIFO never filled (rxfs=0, irq=0, -110).
-    // Clear it here before init so read_info already sees FIFO enabled.
+    // v84: DO NOT touch SE offset 0x2008. The v82 attempt to "clear FIFO_IF_DISABLE" there
+    // (rd32/str 0x2008) is exactly the kernel data abort this board kept hitting:
+    //   pc inside touchThread (the inlined openBus) at `ldr w9, [x8, #0x2008]`, x8 = se.va,
+    //   FAR = se.va + 0x2008, ESR 0x96000010 = synchronous external abort (bus error).
+    // Reading SE+0x64 (GENI_IF_DISABLE_RO) just before it succeeds, so the SE is clocked and
+    // mapped; 0x2008 is simply not decoded on this engine. Nothing in the mainline GENI map
+    // lives at 0x2008, and FIFO-vs-DMA is selected by SE_GENI_DMA_MODE_EN (0x258), which
+    // geni_spi_init() already clears. GENI_IF_DISABLE_RO (0x64) is read-only, so there is no
+    // "FIFO_IF_DISABLE" bit to clear here. Snapshot 0x64 twice and leave 0x2008 alone.
     s.vals[17] = rd32(s.se.va, 0x64);
-    wr32(s.se.va, 0x2008, rd32(s.se.va, 0x2008) & ~1u);   // clear FIFO_IF_DISABLE
-    s.vals[18] = rd32(s.se.va, 0x64);                      // expect bit0 now 0
+    s.vals[18] = s.vals[17];
     int r = geni_spi_init(&s.spi);
     if (r) {fail(3, r); return false;}
     return true;
