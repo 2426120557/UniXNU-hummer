@@ -450,14 +450,13 @@ bool enable(Session &s) {
 
 // Stage 3 bus setup: FIFO mode, GENI init, then the serial clock.
 //
-// The engine reports FIFO_IF_DISABLE (if_disable=1 on this DTS), which nominally means
-// "use GPI DMA": a GSI channel, its iommu context and the qup-core/qup-config/qup-memory
-// interconnect votes. None of that is implemented here, so the code below kept the SE's
-// own DMA master instead - and that hard-resets the machine the moment a transfer starts
-// (stage 3, no panic screen, even with SE_IRQ_EN cleared). GeniSpi.h exposes the Linux
-// fallback for exactly this case: allow_fifo_disabled keeps the FIFO path alive although
-// the engine advertises FIFO_IF_DISABLE. The DMA setup is kept but never taken, so
-// switching back is one condition.
+// v88: FIFO_IF_DISABLE=1 (if_disable bit0) marks the PIO FIFO unusable, which v84-v87
+// proved: with perfect config (SER clock CLK_EN=1, DFS level 0 = TCXO, DMA_MODE_EN=0,
+// M_IRQ_EN set) and BOTH opcodes (3 and 7) the engine latches M_ACTIVE but never moves a
+// byte - irq/txfs/rxfs stay 0 and rx never leaves 0xAA. So stop forcing the FIFO and fall
+// back to the SE's own DMA master (transfer_dma, SE_DMA_* registers, physical addressing,
+// which suits this spi4 that has no iommu). If that hard-resets, the next step is a full
+// GSI/GPI DMA implementation (GSI channel + descriptor ring).
 bool openBus(Session &s) {
     s.spi.poll_limit = 400000;
     // poll_only=1: geni_spi_init() clears SE_IRQ_EN (0xe1c), so the SE never asserts its
@@ -472,7 +471,7 @@ bool openBus(Session &s) {
     // the old opcode-3 path, where the engine silently dropped the illegal command and the
     // status stayed 0; with the real opcode 7 the transfer runs and latches as expected.)
     s.spi.poll_only = 1;
-    s.spi.allow_fifo_disabled = 1;   // FIFO even though FIFO_IF_DISABLE is set
+    s.spi.allow_fifo_disabled = 0;   // v88: FIFO_IF_DISABLE -> fall back to the SE DMA master, not PIO FIFO
     if (s.spi.info.fifo_disabled && !s.spi.allow_fifo_disabled) {
         s.dmaMem = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(kernel_task,
             static_cast<IOOptionBits>(kIODirectionInOut) | static_cast<IOOptionBits>(kIOMemoryPhysicallyContiguous),
