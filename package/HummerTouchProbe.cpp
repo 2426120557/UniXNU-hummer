@@ -300,7 +300,14 @@ int tcmResetAndIdentify(Session &s) {
     IOSleep(10);
     wr32(s.tlmmReset.va, 4, tb_gpio_out_io(1));     // physical high: reset released
     IOSleep(200);
-    int code = tcmReceive(s);
+    // Cold S3910 holds MISO low until its TouchCom app boots; the voluntary IDENTIFY
+    // does not arrive on the first read. Retry ~2 s before falling back to a command.
+    int code = TCM_EAGAIN;
+    for (unsigned i = 0; i < 100; ++i) {
+        IOSleep(20);
+        code = tcmReceive(s);
+        if (code == S3910_REPORT_IDENTIFY) break;
+    }
     if (code != S3910_REPORT_IDENTIFY) {
         s.viaCommand = true;
         int rc = tcmCommand(s, S3910_IDENTIFY, nullptr, 0);
