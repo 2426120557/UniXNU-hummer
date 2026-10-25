@@ -62,6 +62,7 @@ static inline uint64_t tb_src_hz(unsigned sel) {return sel==0?19200000ULL:sel==1
 #define TB_GPIO_SPI_MOSI 49
 #define TB_GPIO_SPI_CLK 50
 #define TB_GPIO_SPI_CS 51
+#define TB_GPIO_POWER 108                      // panel power/AVDD enable (tycykp giulia pin[4], driven high)
 #define TB_GPIO_RESET 161                    // reset-gpios = <&tlmm 161 GPIO_ACTIVE_LOW>
 #define TB_GPIO_IRQ 162                      // interrupts = <162 IRQ_TYPE_LEVEL_LOW>; bring-up polls instead
 // pinctrl-msm.c writes the GROUP-LOCAL function index (position in the PINGROUP funcs

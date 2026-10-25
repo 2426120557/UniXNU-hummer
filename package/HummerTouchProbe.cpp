@@ -163,7 +163,7 @@ void ioDelayUs(void *, unsigned us) {
 }
 
 struct Session {
-    Region gccLow, gccHalt, gccVote, gccS4, tlmmSpi, tlmmReset, wrapper, se;
+    Region gccLow, gccHalt, gccVote, gccS4, tlmmSpi, tlmmReset, tlmmPwr, wrapper, se;
     IOBufferMemoryDescriptor *dmaMem;
     uint64_t dmaPhys;
     struct geni_spi spi;
@@ -384,7 +384,8 @@ bool snapshot(Session &s) {
         !mapRegion(TB_GCC_BASE + 0x23000, 0x1000, s.gccHalt) ||
         !mapRegion(TB_GCC_BASE + 0x52000, 0x1000, s.gccVote) ||
         !mapRegion(TB_TLMM_BASE + tb_tlmm_ctl(TB_GPIO_SPI_MISO), 4 * TB_GPIO_STRIDE, s.tlmmSpi) ||
-        !mapRegion(TB_TLMM_BASE + tb_tlmm_ctl(TB_GPIO_RESET), TB_GPIO_STRIDE, s.tlmmReset)) {
+        !mapRegion(TB_TLMM_BASE + tb_tlmm_ctl(TB_GPIO_RESET), TB_GPIO_STRIDE, s.tlmmReset) ||
+        !mapRegion(TB_TLMM_BASE + tb_tlmm_ctl(TB_GPIO_POWER), TB_GPIO_STRIDE, s.tlmmPwr)) {
         fail(1, TCM_ENOMEM);
         return false;
     }
@@ -452,6 +453,10 @@ bool enable(Session &s) {
         uint32_t cfg = tb_pin_cfg(0, TB_DRIVE_6MA) | (i != 0 ? (1u << TB_OE_BIT) : 0u);
         wr32(s.tlmmSpi.va, i * TB_GPIO_STRIDE, cfg);
     }
+    // v80: power the panel via gpio108 (tycykp pin[4]): drive output high before reset.
+    wr32(s.tlmmPwr.va, 4, tb_gpio_out_io(1));
+    wr32(s.tlmmPwr.va, 0, tb_pin_cfg_out(TB_DRIVE_6MA));
+    s.vals[14] = rd32(s.tlmmPwr.va, 0); s.vals[15] = rd32(s.tlmmPwr.va, 4);
     for (unsigned i = 0; i < 4; ++i) s.vals[9 + i] = rd32(s.tlmmSpi.va, i * TB_GPIO_STRIDE);
     if (!mapRegion(TB_QUP_WRAPPER_BASE, 0x2000, s.wrapper) || !mapRegion(TB_SE_BASE, TB_SE_SIZE, s.se)) {
         fail(2, TCM_ENOMEM);
