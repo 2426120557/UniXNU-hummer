@@ -174,7 +174,7 @@ struct Session {
     unsigned level = 0, div = 0;
     uint64_t actualHz = 0;
     uint32_t vals[24];                // live register snapshot for the panic readout
-    uint32_t dbg[12];                 // SE + S4 RCG config read right after a failed transfer (bring-up diagnostics)
+    uint32_t dbg[14];                 // SE + S4 RCG config read right after a failed transfer (bring-up diagnostics)
     unsigned traceN;                  // first successful transfers on the wire
     uint32_t traceLen[8];
     uint8_t traceTx[8][6], traceRx[8][6];
@@ -530,6 +530,17 @@ bool configureClock(Session &s, unsigned hz) {
     wr32(s.gccS4.va, (TB_S4_RCG + TB_RCG_DFSR_CMD) & 0xfff, 1u);   // DFS enable, current level 0
     r = geni_spi_setup(&s.spi, TB_SPI_MODE, 0);
     if (r) {fail(4, r); return false;}
+    // v89: SE-DMA needs the SE DMA interface enabled. Mainline geni_load_se_fw sets
+    // SE_DMA_IF_EN (0x2004) bit0 and, for a non-FIFO mode, SE_FIFO_IF_DISABLE (0x2008)
+    // bit0. The classic path leaves both at the bootloader default, so on this engine the
+    // DMA master may never be armed - a likely reason an SE-DMA transfer faults. These
+    // four registers (0x2000..0x2008) live in the SE PROG_RAM/clock-control block, which
+    // is only accessible once the SER clock is up (poking 0x2008 before init bus-errored),
+    // so do it here, after geni_spi_set_clock(). Capture the read-back for the snap3 line.
+    s.dbg[12] = rd32(s.se.va, 0x2004);
+    wr32(s.se.va, 0x2004, s.dbg[12] | 1u);              // SE_DMA_IF_EN = DMA_IF_EN
+    s.dbg[13] = rd32(s.se.va, 0x2008);
+    wr32(s.se.va, 0x2008, s.dbg[13] | 1u);              // SE_FIFO_IF_DISABLE = FIFO_IF_DISABLE (DMA mode)
     return true;
 }
 
@@ -545,7 +556,7 @@ void panicReadout(const Session &s, const char *why) {
         "HUMTOUCH x0 %02x%02x%02x%02x%02x%02x/%02x%02x%02x%02x%02x%02x x1 %02x%02x%02x%02x%02x%02x/%02x%02x%02x%02x%02x%02x\n"
         "HUMTOUCH snap irq%08x st%08x txfs%08x rxfs%08x dmatx%08x dmarx%08x valid%u\n"
         "HUMTOUCH snap2 mcmd%08x clk%08x sel%08x dma%08x mirq%08x\n"
-        "HUMTOUCH snap3 rcmd%08x rcfg%08x rdfs%08x rpcfg%08x s4cbcr%08x gpll%08x",
+        "HUMTOUCH snap3 rcmd%08x rcfg%08x rdfs%08x rpcfg%08x s4cbcr%08x gpll%08x ifen%08x fifoif%08x",
         why, native_htouch_stage_done, native_htouch_stage_req, native_htouch_step, native_htouch_error,
         v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[9], v[10], v[11], v[12],
         v[19], v[20], v[21], v[22], s.level, s.div, static_cast<unsigned>(s.actualHz),
@@ -562,7 +573,7 @@ void panicReadout(const Session &s, const char *why) {
         s.spi.snap_irq, s.spi.snap_status, s.spi.snap_txfs, s.spi.snap_rxfs,
         s.spi.snap_dma_tx, s.spi.snap_dma_rx, s.spi.snap_valid,
         s.dbg[0], s.dbg[1], s.dbg[2], s.dbg[3], s.dbg[4],
-        s.dbg[6], s.dbg[7], s.dbg[8], s.dbg[9], s.dbg[10], s.dbg[11]);
+        s.dbg[6], s.dbg[7], s.dbg[8], s.dbg[9], s.dbg[10], s.dbg[11], s.dbg[12], s.dbg[13]);
     panic("%s", text);
 }
 
