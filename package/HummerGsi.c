@@ -43,6 +43,16 @@
 #define HGS_SRC_EV_CH_IRQ_CLR(n) (0x230A4u + 0x4000u * (n))
 #define HGS_SRC_IEOB_IRQ_CLR(n) (0x230C0u + 0x4000u * (n))
 #define HGS_GLOB_IRQ_STTS(n) (0x23100u + 0x4000u * (n))
+#define HGS_GLOB_IRQ_EN(n) (0x23108u + 0x4000u * (n))
+#define HGS_GPII_IRQ_EN(n) (0x23120u + 0x4000u * (n))
+#define HGS_INTSET(n) (0x23180u + 0x4000u * (n))
+#define HGS_MSI_BASE_LSB(n) (0x23188u + 0x4000u * (n))
+#define HGS_MSI_BASE_MSB(n) (0x2318Cu + 0x4000u * (n))
+#define HGS_GPII_SCRATCH_0(n) (0x23400u + 0x4000u * (n))
+#define HGS_GPII_SCRATCH_1(n) (0x23404u + 0x4000u * (n))
+#define HGS_SRC_CH_IRQ_MSK(n) (0x23098u + 0x4000u * (n))
+#define HGS_SRC_EV_CH_IRQ_MSK(n) (0x2309Cu + 0x4000u * (n))
+#define HGS_SRC_IEOB_IRQ_MSK(n) (0x230B8u + 0x4000u * (n))
 #define HGS_ERRL(n) (0x23200u + 0x4000u * (n))
 
 // Context sub-offsets (gpi.c enum CNTXT_OFFS).
@@ -326,15 +336,33 @@ static void hgs_put_tre(void *ring, unsigned idx, uint32_t d0, uint32_t d1, uint
     t[0] = d0; t[1] = d1; t[2] = d2; t[3] = d3;
 }
 
+// The one mainline init function v92 skipped: gpi_config_interrupts(). Besides the masks
+// it programs the EE's interrupt plumbing (INTSET, MSI base, GLOB/GPII enables, the
+// GPII-level scratch registers). The masks below are the deliberate deviation - this board
+// installs no handler for GPI lines 279..284 / 293..298, so TYPE_IRQ_MSK stays 0 and the
+// engine never asserts. Everything else is written exactly as mainline does.
+static void hgs_ee_setup(struct hgs_dma *g) {
+    const unsigned n = g->gpii;
+    hgs_wr(g, HGS_TYPE_IRQ_MSK(n), 0);
+    hgs_wr(g, HGS_SRC_IEOB_IRQ_MSK(n), 0x1u);
+    hgs_wr(g, HGS_SRC_CH_IRQ_MSK(n), 0x3u);
+    hgs_wr(g, HGS_SRC_EV_CH_IRQ_MSK(n), 0x1u);
+    hgs_wr(g, HGS_GLOB_IRQ_EN(n), 0xfu);
+    hgs_wr(g, HGS_GPII_IRQ_EN(n), 0xfu);
+    hgs_wr(g, HGS_MSI_BASE_LSB(n), 0);
+    hgs_wr(g, HGS_MSI_BASE_MSB(n), 0);
+    hgs_wr(g, HGS_GPII_SCRATCH_0(n), 0);
+    hgs_wr(g, HGS_GPII_SCRATCH_1(n), 0);
+    hgs_wr(g, HGS_INTSET(n), 1);        // level-IRQ set, not MSI
+    hgs_wr(g, HGS_ERRL(n), 0);
+}
+
 static int hgs_try(struct hgs_dma *g) {
     const unsigned n = g->gpii;
-    // No GIC handler exists for this GPI, so mask every interrupt type before anything
-    // can assert. A mask of zero means the engine only ever updates its status
-    // registers, which is what the poll loops read.
-    hgs_wr(g, HGS_TYPE_IRQ_MSK(n), 0);
+    // Full mainline EE/interrupt setup (masks kept at zero, see hgs_ee_setup).
+    hgs_ee_setup(g);
     hgs_wr(g, HGS_SRC_CH_IRQ_CLR(n), 0x3u);
     hgs_wr(g, HGS_SRC_IEOB_IRQ_CLR(n), 0x1u);
-    hgs_wr(g, HGS_ERRL(n), 0);          // mainline clears it with gpi_update_reg(.., U32_MAX, 0)
 
     // Same clean slate for the event channel.
     hgs_wr(g, HGS_EV_CMD(n), (HGS_EV_DE_ALLOC << 24) | 0u);
