@@ -174,6 +174,7 @@ struct Session {
     unsigned level = 0, div = 0;
     uint64_t actualHz = 0;
     uint32_t vals[24];                // live register snapshot for the panic readout
+    uint32_t dbg[6];                  // SE config read right after a failed transfer (bring-up diagnostics)
     unsigned traceN;                  // first successful transfers on the wire
     uint32_t traceLen[8];
     uint8_t traceTx[8][6], traceRx[8][6];
@@ -187,6 +188,17 @@ struct Session {
 
 void fail(unsigned step, int code) {
     if (!native_htouch_error && code) {native_htouch_step = step; native_htouch_error = code;}
+}
+// Bring-up diagnostics: after a failed transfer, read the SE config so the panic
+// screen answers "did the command latch / is the serial clock running / FIFO or DMA".
+void snapSe(Session &s) {
+    if (!s.se.va) return;
+    s.dbg[0] = rd32(s.se.va, 0x600);   // SE_GENI_M_CMD0     - opcode latched?
+    s.dbg[1] = rd32(s.se.va, 0x048);   // GENI_SER_M_CLK_CFG - CLK_EN (bit0) + divider
+    s.dbg[2] = rd32(s.se.va, 0x07c);   // SE_GENI_CLK_SEL    - DFS level selected
+    s.dbg[3] = rd32(s.se.va, 0x258);   // SE_GENI_DMA_MODE_EN- 0 = FIFO mode
+    s.dbg[4] = rd32(s.se.va, 0x614);   // SE_GENI_M_IRQ_EN
+    s.dbg[5] = rd32(s.se.va, 0x040);   // SE_GENI_STATUS
 }
 }  // namespace
 
@@ -517,7 +529,8 @@ void panicReadout(const Session &s, const char *why) {
         "HUMTOUCH qup%08x fw%08x if%08x hw%08x lvl%u div%u %uHz fd%u ud%u os%u dfs %08x %08x fifo %08x %08x\n"
         "HUMTOUCH id rc%u via%u mode%u ver%d w%u mx%u my%u obj%u cfg%u fr%u ct%u agn%u oth%u bad%u feed%u rc%d n%u\n"
         "HUMTOUCH x0 %02x%02x%02x%02x%02x%02x/%02x%02x%02x%02x%02x%02x x1 %02x%02x%02x%02x%02x%02x/%02x%02x%02x%02x%02x%02x\n"
-        "HUMTOUCH snap irq%08x st%08x txfs%08x rxfs%08x dmatx%08x dmarx%08x valid%u",
+        "HUMTOUCH snap irq%08x st%08x txfs%08x rxfs%08x dmatx%08x dmarx%08x valid%u\n"
+        "HUMTOUCH snap2 mcmd%08x clk%08x sel%08x dma%08x mirq%08x",
         why, native_htouch_stage_done, native_htouch_stage_req, native_htouch_step, native_htouch_error,
         v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[9], v[10], v[11], v[12],
         v[19], v[20], v[21], v[22], s.level, s.div, static_cast<unsigned>(s.actualHz),
@@ -532,7 +545,8 @@ void panicReadout(const Session &s, const char *why) {
         s.traceTx[1][0], s.traceTx[1][1], s.traceTx[1][2], s.traceTx[1][3], s.traceTx[1][4], s.traceTx[1][5],
         s.traceRx[1][0], s.traceRx[1][1], s.traceRx[1][2], s.traceRx[1][3], s.traceRx[1][4], s.traceRx[1][5],
         s.spi.snap_irq, s.spi.snap_status, s.spi.snap_txfs, s.spi.snap_rxfs,
-        s.spi.snap_dma_tx, s.spi.snap_dma_rx, s.spi.snap_valid);
+        s.spi.snap_dma_tx, s.spi.snap_dma_rx, s.spi.snap_valid,
+        s.dbg[0], s.dbg[1], s.dbg[2], s.dbg[3], s.dbg[4]);
     panic("%s", text);
 }
 
@@ -595,7 +609,7 @@ static void touchThread(void *, wait_result_t) {
         if (gPanicAfter == 7) panicReadout(*s, "buffers done");
         const int r = tcmResetAndIdentify(*s);
         s->idRc = static_cast<unsigned>(r);
-        if (r) {fail(5, r); checkpointFail(*s); break;}
+        if (r) {snapSe(*s); fail(5, r); checkpointFail(*s); break;}
         checkpoint(3, *s);
         if (stage < 4) break;
         // GET_APP_INFO (payload at rx+2, s.lastLength set by the accepted receive):
