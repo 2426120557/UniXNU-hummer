@@ -214,8 +214,14 @@ static void hgs_program_chan(struct hgs_dma *g, unsigned ch, unsigned dir_out,
     // re-reads the field. Here the write is ordered before ALLOCATE and the field is
     // preserved on top, so either interpretation of the register is safe.
     uint32_t keep = hgs_rd(g, base + HGS_C_CONFIG) & HGS_C0_CHSTATE_MASK;
-    hgs_wr(g, base + HGS_C_CONFIG,
-           keep | HGS_C0_EL_SIZE(HGS_TRE_BYTES) | (dir_out ? HGS_C0_DIR_OUT : 0u) | HGS_C0_PROTO_GPI);
+    // mainline gpi.c declares `u32 dir` in struct gchan and NEVER assigns it, so
+    // GPII_n_CH_k_CNTXT_0(..., chan->dir, ...) always writes DIR = 0 - for the TX channel as
+    // well as the RX one. This port had been setting GPI_CHTYPE_DIR_OUT on channel 0 out of
+    // tidiness, i.e. it was the single field where our channel context differed from a
+    // configuration known to work. Follow mainline exactly: EL_SIZE | PROTO, nothing else
+    // (plus whatever CHSTATE the engine left there).
+    (void)dir_out;
+    hgs_wr(g, base + HGS_C_CONFIG, keep | HGS_C0_EL_SIZE(HGS_TRE_BYTES) | HGS_C0_PROTO_GPI);
     hgs_wr(g, base + HGS_C_R_LENGTH, len);
     hgs_wr(g, base + HGS_C_RING_BASE_LSB, (uint32_t)phys);
     hgs_wr(g, base + HGS_C_RING_BASE_MSB, (uint32_t)(phys >> 32));
