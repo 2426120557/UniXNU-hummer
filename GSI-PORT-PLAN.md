@@ -1,35 +1,70 @@
 # GSI / GPI DMA port plan for hummer touch (spi4)
 
-Status: **implemented** in `package/HummerGsi.{h,c}` (v90). This file keeps the hardware
-facts and the reasoning; the code is in `HummerGsi.c` with the register map inline.
+Status: **driver implemented (v90..v97), GSI proven alive, blocked on START.**
+Read the "Where it stands" section first; everything below it is the reasoning and the
+hardware facts that were established along the way.
 
-## What the driver does (v90)
+## Where it stands after v97 (2026-10-26 ~03:00)
 
-- `hgs_init()`: selects the SE's GPI mode (`SE_IRQ_EN=0`, M_IRQ command/FIFO sources off,
-  `SE_GENI_DMA_MODE_EN=1`, `SE_GSI_EVENT_EN |= 0xF`) and brings up the GPI: mask every
-  interrupt type, allocate + program the event channel, allocate + program + start both
-  transfer channels. Every step is polled on the context registers (no GIC).
-- `hgs_xfer()`: builds CONFIG0 + GO(SPI_DUPLEX, CHAIN|LINK) + TX DMA on channel 0 and the
-  RX DMA on channel 1, cleans the rings and buffers, doorbells RX then TX, then polls the
-  event ring for the channel-0 completion event.
-- `hgs_init()` tries ee_offset 0x10000 first (sm6350-compatible, what the sm8750 DT node's
-  second compatible resolves to in the reference tree) and falls back to 0x0, and tries
-  GPII 1..4. The two offsets address disjoint 64 KiB windows, so the probe is harmless.
-- No SMMU programming: the rings are advertised by physical address, which is correct when
-  the bootloader leaves apps_smmu stream 0xb6 bypassed. If a transfer never completes while
-  every register reads back sane, that stream is the first thing to check.
-- No clock/interconnect votes: `gpi_dma1` has no `clocks` property and UFS proves the NoC is
-  pre-configured by the bootloader.
+Proven on hardware:
 
-## Diagnostics on the panic screen (v90)
+| Fact | Evidence |
+|---|---|
+| The PIO FIFO cannot work | `GENI_IF_DISABLE_RO` bit0 = 1; v84..v87 showed config/clock/opcode all irrelevant (M_ACTIVE latches, nothing moves) |
+| The SE-DMA block cannot be armed from the CPU | v89: reading `0x2004` raises a synchronous external abort, FAR = se.va + 0x2004 |
+| The GPI register layout is right | writes store, contexts read back verbatim; decode window is exactly `0xa10000..0xa24000` = 5 x 0x4000 = GPII 0..4 |
+| ee_offset = 0x10000 | vendor DT `qcom,gpi-ee-offset = <0x10000>`; window arithmetic matches only under the subtractive reading |
+| GSI is alive | `gsiee st00000001 sw20070000` -> EE ENABLED, firmware 2.7 present, HW_PARAM readable |
+| EV ALLOCATE + both channel ALLOCATEs are accepted | v97 `gsierr e0=e1=e2=e3=00000000` |
+| START never completes | `tr00000050` (alloc0/1 = ok, start0/1 = timeout) and the event ring never advances |
+| An error is logged *before* the first START | v97 `errl2` (read before the START pair) already equals `errl` = `0x1000a020` |
 
-`HUMTOUCH gsi gpii.. ee.. irc.. rc.. ok.. ch0.. ch1.. ev.. evrp.. evn.. poll.. idx.. scr..`
-`HUMTOUCH gsiev <completion event dwords> irq.. glob.. errl.. sdma.. sgsi..`
+So the remaining question is narrow: **why does the START command not take effect, and what
+logs the error between the RX context programming and the STARTs.**
 
-Reading: `irc` != 0 means init stopped at that code with `ch0/ch1/ev` showing the channel
-states (CHSTATE in bits 23:20: 1 allocated, 2 started, 0xF error). `irc=0` but `rc=-110`
-means the channels came up and the transfer alone failed - then `evn`/`ev`/`errl`/`glob`
-say whether the GSI produced events, and `ch0/ch1` whether it stayed started.
+Leads, in priority order:
+
+1. **The vendor GPI driver.** Mainline `gpi.c` only ever touches offsets >= 0x20000, i.e. it
+   assumes the bootloader already owns/configured the EE side. The vendor driver (with
+   `qcom,static-gpii-mask`, `qcom,gpi-ee-offset`, `#dma-cells = <5>`) clearly does more.
+   Getting that source would end the guessing; the OnePlusOSS repo only ships devicetree,
+   so it has to come from a vendor kernel mirror.
+2. **EE ownership.** Documented vendor behaviour: `qcom,gpii-mask = 0x1e` reserves GPII 0
+   for firmware/hypervisor, and `qcom,gpi-ee-offset` separates EE 0 (Linux) from EE 1
+   (hypervisor/TrustZone). A channel that is "allocated" but cannot be started looks a lot
+   like an EE/ownership refusal - and the error log we read decodes to
+   GSI_UNSUPPORTED_INTER_EE_OP_ERR in one of the two readings.
+3. **Ring DMA reachability.** The vendor node wants the rings in `qup1_gpi_iommu_region`
+   with `iommus = <&apps_smmu 0xb6>` and `dma-coherent`. That region's `iommu-addresses`
+   is an identity map (`0x0..0x100000`, `0x200000..0x100000000`), so physical addresses are
+   the right thing to advertise - but only if apps_smmu actually lets stream 0xb6 through.
+   A blocked ring fetch would also produce "error logged, no events".
+4. **Interrupt-based completion.** Everything is polled here because this board has no
+   handler for GPI lines 279..284 / 293..298. Mainline completes commands through those
+   interrupts; polling SRC bits works for ALLOCATE but not for START. This is the one
+   deliberate deviation left, and it is a candidate for the START failure.
+
+## What the driver does (v90..v97, package/HummerGsi.{h,c})
+
+- `hgs_init()`: EE setup (masks zeroed, INTSET/GLOB/GPII enables, MSI base), event channel
+  ALLOCATE + context, both channel ALLOCATE + context (`SCRATCH_0 = pair | proto | seid 4`),
+  then START. Every step is polled and its ERROR_LOG snapshot kept (`gsierr e0..e4`).
+- `hgs_xfer()`: CONFIG0 + GO(SPI_DUPLEX, CHAIN|LINK) + TX DMA on channel 0, RX DMA on
+  channel 1, doorbell RX then TX, poll the event ring for the channel-0 completion event.
+- `hgs_init` reads the EE's own identity first and prints it as `gsiee` - that read is what
+  proved the engine is usable.
+
+## Diagnostics on the panic screen
+
+```
+HUMTOUCH gsi   gpii.. ee.. irc.. rc.. ok.. pre.. rb.. tr.. tirq.. src.. evsrc..
+HUMTOUCH gsich ch0.. ch1.. ev.. evrp.. evn.. poll.. idx.. scr..
+HUMTOUCH gsiev <event dwords> irq.. glob.. errl.. errl2.. sdma.. sgsi..
+HUMTOUCH gsierr e0.. e1.. e2.. e3.. e4..      (ERROR_LOG after clear / EV alloc / ch0 / ch1 / starts)
+HUMTOUCH gsiee st.. sw.. hw2.. hw4..          (EE status: bit0 enabled, SW version, HW params)
+```
+
+`tr` packs 2 bits per command: alloc0, alloc1, start0, start1 (0 ok, 1 timeout, 2 error).
 
 ## Why GSI is required (proven, do not re-litigate)
 
