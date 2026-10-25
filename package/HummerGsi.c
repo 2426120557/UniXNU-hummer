@@ -394,6 +394,13 @@ static int hgs_try(struct hgs_dma *g) {
     const unsigned n = g->gpii;
     // Full mainline EE/interrupt setup (masks kept at zero, see hgs_ee_setup).
     hgs_ee_setup(g);
+    // Did those writes actually land? If the SRC mask reads back 0 the engine will never
+    // latch CH_CTRL for a command, which would explain "ALLOCATE works via CHSTATE but
+    // START never reports anything".
+    g->diag[HGS_D_MSK] = hgs_rd(g, HGS_TYPE_IRQ_MSK(n));
+    g->diag[HGS_D_SRCM] = hgs_rd(g, HGS_SRC_CH_IRQ_MSK(n));
+    g->diag[HGS_D_GLOBEN] = hgs_rd(g, HGS_GLOB_IRQ_EN(n));
+    g->diag[HGS_D_GPIIEN] = hgs_rd(g, HGS_GPII_IRQ_EN(n));
     hgs_wr(g, HGS_SRC_CH_IRQ_CLR(n), 0x3u);
     hgs_wr(g, HGS_SRC_IEOB_IRQ_CLR(n), 0x1u);
     // Baseline for "did any command log an error": a non-zero read here means ERROR_LOG

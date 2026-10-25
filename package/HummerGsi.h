@@ -75,6 +75,10 @@ enum hgs_diag {
     HGS_D_HWP4,          // GSI_EE_n_GSI_HW_PARAM_4
     HGS_D_ERRL,          // GPII error log after the START attempts
     HGS_D_ERRL2,         // GPII error log right after the ALLOCATE pair
+    HGS_D_MSK,           // CNTXT_TYPE_IRQ_MSK read back (0 here: the GIC line is deliberately kept off)
+    HGS_D_SRCM,          // CNTXT_SRC_CH_IRQ_MSK read back (non-zero = CH_CTRL status can latch)
+    HGS_D_GLOBEN,        // GLOB_IRQ_EN read back
+    HGS_D_GPIIEN,        // GPII_IRQ_EN read back
     HGS_D_SE_DMA,        // SE_GENI_DMA_MODE_EN (1 = engine in DMA mode)
     HGS_D_SE_GSI,        // SE_GSI_EVENT_EN
     HGS_D_SCRATCH,       // CH0 SCRATCH_0 (pair/proto/seid)

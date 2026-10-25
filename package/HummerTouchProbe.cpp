@@ -179,7 +179,7 @@ struct Session {
     unsigned level = 0, div = 0;
     uint64_t actualHz = 0;
     uint32_t vals[24];                // live register snapshot for the panic readout
-    uint32_t dbg[14];                 // SE + S4 RCG config read right after a failed transfer (bring-up diagnostics)
+    uint32_t dbg[17];                 // SE + S4 RCG config read right after a failed transfer (bring-up diagnostics)
     unsigned traceN;                  // first successful transfers on the wire
     uint32_t traceLen[8];
     uint8_t traceTx[8][6], traceRx[8][6];
@@ -322,11 +322,20 @@ int tcmCommand(Session &s, uint8_t command, const void *payload, size_t length) 
 // then volunteers its IDENTIFY report (Linux: gpiod 1 -> physical low, 10 ms,
 // gpiod 0 -> physical high, 200 ms, then receive).
 int tcmResetAndIdentify(Session &s) {
+    // GPIO162 is the controller's IRQ line (bringup dtsi: interrupts=<162 LEVEL_LOW>,
+    // bias-disable + input-enable). Sampling it is the cheapest way to answer the one
+    // question never tested so far: is the chip actually powered and out of reset? A
+    // powered Synaptics part holds its IRQ line de-asserted (high) once it has booted,
+    // while an unpowered one leaves it floating with no pull.
+    wr32(s.tlmmReset.va, TB_GPIO_STRIDE, tb_pin_cfg(0, TB_DRIVE_2MA) | (1u << TB_IN_BIT));
+    s.dbg[14] = rd32(s.tlmmReset.va, TB_GPIO_STRIDE);          // GPIO162 control word
+    s.dbg[15] = rd32(s.tlmmReset.va, TB_GPIO_STRIDE + 4);      // IRQ level before the pulse
     wr32(s.tlmmReset.va, 0, tb_pin_cfg_out(TB_DRIVE_2MA));
     wr32(s.tlmmReset.va, 4, tb_gpio_out_io(0));     // physical low: reset asserted
     IOSleep(10);
     wr32(s.tlmmReset.va, 4, tb_gpio_out_io(1));     // physical high: reset released
     IOSleep(200);
+    s.dbg[16] = rd32(s.tlmmReset.va, TB_GPIO_STRIDE + 4);      // IRQ level after release
     int code = tcmReceive(s);
     if (code != S3910_REPORT_IDENTIFY) {
         s.viaCommand = true;
@@ -404,7 +413,7 @@ bool snapshot(Session &s) {
         !mapRegion(TB_GCC_BASE + 0x23000, 0x1000, s.gccHalt) ||
         !mapRegion(TB_GCC_BASE + 0x52000, 0x1000, s.gccVote) ||
         !mapRegion(TB_TLMM_BASE + tb_tlmm_ctl(TB_GPIO_SPI_MISO), 4 * TB_GPIO_STRIDE, s.tlmmSpi) ||
-        !mapRegion(TB_TLMM_BASE + tb_tlmm_ctl(TB_GPIO_RESET), TB_GPIO_STRIDE, s.tlmmReset)) {
+        !mapRegion(TB_TLMM_BASE + tb_tlmm_ctl(TB_GPIO_RESET), 2 * TB_GPIO_STRIDE, s.tlmmReset)) {
         fail(1, TCM_ENOMEM);
         return false;
     }
@@ -624,7 +633,7 @@ bool openGsi(Session &s) {
 
 // Panic readout: the panic screen is the only console this bring-up has.
 void panicReadout(const Session &s, const char *why) {
-    static char text[1900];
+    static char text[2100];
     const uint32_t *v = s.vals;
     const uint32_t *d = s.gsi.diag;
     snprintf(text, sizeof text,
@@ -637,10 +646,11 @@ void panicReadout(const Session &s, const char *why) {
         "HUMTOUCH snap2 mcmd%08x clk%08x sel%08x dma%08x mirq%08x\n"
         "HUMTOUCH snap3 rcmd%08x rcfg%08x rdfs%08x rpcfg%08x s4cbcr%08x gpll%08x ifen%08x fifoif%08x\n"
         "HUMTOUCH gsi gpii%u ee%05x irc%d rc%d ok%d pre%08x a0%08x a1%08x a2%08x a3%08x rb%08x tr%08x tirq%08x src%08x evsrc%08x\n"
-        "HUMTOUCH gsich ch0%08x ch1%08x ev%08x evrp%08x evn%u poll%u idx%08x scr%08x\n"
+        "HUMTOUCH gsich ch0%08x ch1%08x ev%08x evrp%08x evn%u poll%u idx%08x scr%08x msk%08x srcm%08x globen%08x gpiien%08x\n"
         "HUMTOUCH gsiev %08x %08x %08x %08x irq%08x glob%08x errl%08x errl2%08x sdma%08x sgsi%08x\n"
         "HUMTOUCH gsierr e0%08x e1%08x e2%08x e3%08x e4%08x\n"
-        "HUMTOUCH gsiee st%08x sw%08x hw2%08x hw4%08x",
+        "HUMTOUCH gsiee st%08x sw%08x hw2%08x hw4%08x\n"
+        "HUMTOUCH tpin g162c%08x irqb%08x irqa%08x g161%08x",
         why, native_htouch_stage_done, native_htouch_stage_req, native_htouch_step, native_htouch_error,
         v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[9], v[10], v[11], v[12],
         v[19], v[20], v[21], v[22], s.level, s.div, static_cast<unsigned>(s.actualHz),
@@ -663,11 +673,13 @@ void panicReadout(const Session &s, const char *why) {
         d[HGS_D_RB], d[HGS_D_TRACE], d[HGS_D_TIRQ], d[HGS_D_SRC], d[HGS_D_EVSRC],
         d[HGS_D_CH0], d[HGS_D_CH1], d[HGS_D_EV], d[HGS_D_EV_RP], d[HGS_D_EVN], d[HGS_D_POLL],
         d[HGS_D_IDX], d[HGS_D_SCRATCH],
+        d[HGS_D_MSK], d[HGS_D_SRCM], d[HGS_D_GLOBEN], d[HGS_D_GPIIEN],
         d[HGS_D_EV0], d[HGS_D_EV1], d[HGS_D_EV2], d[HGS_D_EV3],
         d[HGS_D_IRQ_STTS], d[HGS_D_GLOB], d[HGS_D_ERRL], d[HGS_D_ERRL2],
         d[HGS_D_SE_DMA], d[HGS_D_SE_GSI],
         d[HGS_D_E0], d[HGS_D_E1], d[HGS_D_E2], d[HGS_D_E3], d[HGS_D_E4],
-        d[HGS_D_STAT], d[HGS_D_SWVER], d[HGS_D_HWP2], d[HGS_D_HWP4]);
+        d[HGS_D_STAT], d[HGS_D_SWVER], d[HGS_D_HWP2], d[HGS_D_HWP4],
+        s.dbg[14], s.dbg[15], s.dbg[16], v[13]);
     panic("%s", text);
 }
 
