@@ -96,21 +96,22 @@ if cpp_command and cpp_command[0] in ('clang', 'clang++'):
 run(cpp_command, cpp_dir)
 audit(OUT / 'HummerTouchProbe.o')
 
-# v76b: do NOT patch GENI_M_CMD_TX_RX. The engine header defines it as 3, and that
-# is correct: GeniSpi.c line 312 sets cmd = GENI_M_CMD_TX_RX only when both tx and
-# rx are present, which is SPI_TX_ONLY|SPI_RX_ONLY = 1|2 = 3. The Linux enum
-# SPI_TX_RX=7 is never returned by get_spi_m_cmd(); writing 7 to SE_GENI_M_CMD0
-# is an illegal opcode that triggers GENI_M_ILLEGAL_CMD and makes every full-duplex
-# read time out with -110 (the exact panic we saw: rc=-110, rx all-zero).
-# Just copy the engine header verbatim.
+# The engine's GeniSpi.h declares the full-duplex SPI opcode as 3. That is wrong: the
+# SPI command opcodes are SPI_TX_ONLY 1, SPI_RX_ONLY 2, SPI_TX_RX 7 (see
+# drivers/spi/spi-geni-qcom.c in AnyLaySys/linux_oneplus_ace5_pro, and get_spi_m_cmd()
+# which returns 7 whenever both tx and rx are present). With 3 the engine never starts
+# the transfer and every full-duplex read - which is how TouchComm reads a response -
+# times out with -110. The header is copied next to the source with that one value
+# corrected, so the engine tree itself stays untouched.
 geni_source = OUT / 'GeniSpi.c'
 geni_header = OUT / 'GeniSpi.h'
 header_text = GENI_H.read_text()
-if '#define GENI_M_CMD_TX_RX 3' not in header_text:
-    raise SystemExit('GeniSpi.h no longer defines GENI_M_CMD_TX_RX as 3; re-check')
-geni_header.write_text(header_text)
+opcode = '#define GENI_M_CMD_TX_RX 3'
+if opcode not in header_text:
+    raise SystemExit('GeniSpi.h no longer defines GENI_M_CMD_TX_RX as 3; re-check the SPI opcode')
+geni_header.write_text(header_text.replace(opcode, '#define GENI_M_CMD_TX_RX 7'))
 geni_source.write_text(GENI.read_text())
-print('HummerTouch: GeniSpi.h used verbatim (GENI_M_CMD_TX_RX=3, no patch)')
+print('HummerTouch: GENI_M_CMD_TX_RX patched 3 -> 7 (real full-duplex SPI opcode)')
 
 c_command, c_dir = replay(C_RECORD, geni_source, OUT / 'GeniSpi.o')
 # GeniSpi.c is ENGINE code (drivers/NativeGeniSpi); compiling it with -Werror

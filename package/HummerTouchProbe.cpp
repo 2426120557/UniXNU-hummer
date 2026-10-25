@@ -439,13 +439,18 @@ bool enable(Session &s) {
 // switching back is one condition.
 bool openBus(Session &s) {
     s.spi.poll_limit = 400000;
-    // poll_only=2 keeps SE_IRQ_EN on. The previous attempt cleared it (poll_only=1) and
-    // every polled transfer then timed out with SE_GENI_M_IRQ_STATUS untouched: the
-    // engine only maintains the M status bits while its interrupt output is enabled.
-    // Nothing acknowledges the SE's GIC SPI (357 - this board installs no handler and
-    // the ADT publishes no interrupt), but the poll loop clears M_IRQ_STATUS on every
-    // pass, so a level interrupt drops by itself.
-    s.spi.poll_only = 2;
+    // poll_only=1: geni_spi_init() clears SE_IRQ_EN (0xe1c), so the SE never asserts its
+    // GIC SPI (357). This board installs no handler for that line and the ADT publishes no
+    // interrupt, so an asserted 357 is a fatal "ghost handler" data abort - seen on the op7
+    // build as ESR 0x96000010 / FAR 0xffffffff284708008 (Address-size fault on a truncated
+    // 64-bit handler pointer). With SE_IRQ_EN=0 the line stays silent and the kernel survives.
+    //
+    // SE_GENI_M_IRQ_STATUS (0x610) is gated by SE_GENI_M_IRQ_EN (0x614) - which init always
+    // sets - NOT by SE_IRQ_EN. So polling 0x610 still sees M_CMD_DONE fire when a transfer
+    // completes. (The earlier "poll_only=1 froze M_IRQ_STATUS" note was measured only under
+    // the old opcode-3 path, where the engine silently dropped the illegal command and the
+    // status stayed 0; with the real opcode 7 the transfer runs and latches as expected.)
+    s.spi.poll_only = 1;
     s.spi.allow_fifo_disabled = 1;   // FIFO even though FIFO_IF_DISABLE is set
     if (s.spi.info.fifo_disabled && !s.spi.allow_fifo_disabled) {
         s.dmaMem = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(kernel_task,
