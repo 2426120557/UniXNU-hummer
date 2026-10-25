@@ -65,6 +65,10 @@ enum hgs_diag {
     HGS_D_E2,            // ERROR_LOG after channel 0 ALLOCATE
     HGS_D_E3,            // ERROR_LOG after channel 1 ALLOCATE
     HGS_D_E4,            // ERROR_LOG after both STARTs
+    HGS_D_STAT,          // GSI_EE_n_GSI_STATUS (bit0 = ENABLED): is this EE enabled at all?
+    HGS_D_SWVER,         // GSI_EE_n_GSI_SW_VERSION: 0 means no GSI firmware behind the block
+    HGS_D_HWP2,          // GSI_EE_n_GSI_HW_PARAM_2
+    HGS_D_HWP4,          // GSI_EE_n_GSI_HW_PARAM_4
     HGS_D_ERRL,          // GPII error log after the START attempts
     HGS_D_ERRL2,         // GPII error log right after the ALLOCATE pair
     HGS_D_SE_DMA,        // SE_GENI_DMA_MODE_EN (1 = engine in DMA mode)

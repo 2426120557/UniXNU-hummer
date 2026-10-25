@@ -30,6 +30,17 @@
 #define HGS_CH_SCRATCH(n, k) (0x20060u + 0x4000u * (n) + 0x80u * (k))
 #define HGS_CH_DB(n, k) (0x22000u + 0x4000u * (n) + 0x8u * (k))
 #define HGS_CH_CMD(n) (0x23008u + 0x4000u * (n))
+// EE-level block. The IPA driver's register table (gsihal_reg.c) puts GSI_EE_n_GSI_STATUS at
+// 0x25000 with CH_CMD at 0x25008, EV_CMD 0x25010, TYPE_IRQ 0x25080 - the same sub-offsets the
+// GPI block uses at 0x23000. So the GPI's EE status/version registers are:
+//   GSI_STATUS 0x23000 (bit0 = ENABLED), CH_CMD 0x23008, SW_VERSION 0x23044,
+//   HW_PARAM_2 0x23040, HW_PARAM_4 0x23050.
+// Reading them answers whether this EE is enabled and whether any GSI firmware is there.
+#define HGS_EE_STATUS(n) (0x23000u + 0x4000u * (n))
+#define HGS_EE_HW_PARAM_2(n) (0x23040u + 0x4000u * (n))
+#define HGS_EE_SW_VERSION(n) (0x23044u + 0x4000u * (n))
+#define HGS_EE_HW_PARAM_4(n) (0x23050u + 0x4000u * (n))
+#define HGS_EE_STATUS_ENABLED (1u << 0)
 // Event channel block.
 #define HGS_EV_CNTXT(n) (0x21000u + 0x4000u * (n))
 #define HGS_EV_DB(n) (0x22100u + 0x4000u * (n))
@@ -436,6 +447,13 @@ int hgs_init(struct hgs_dma *g, uintptr_t regs, uintptr_t se, const struct hgs_r
     // a bare-metal boot is 1; try the rest in case the bootloader left one claimed.
     int rc = HGS_ERR_TIMEOUT;
     g->ee = HGS_EE_OFF;
+    // Read the EE's own identity once, before touching any channel: an ENABLED bit of 0 or a
+    // zero SW_VERSION means no amount of command programming can work, and says why the
+    // engine answers "unsupported inter-EE operation".
+    g->diag[HGS_D_STAT] = hgs_rd(g, HGS_EE_STATUS(1));
+    g->diag[HGS_D_SWVER] = hgs_rd(g, HGS_EE_SW_VERSION(1));
+    g->diag[HGS_D_HWP2] = hgs_rd(g, HGS_EE_HW_PARAM_2(1));
+    g->diag[HGS_D_HWP4] = hgs_rd(g, HGS_EE_HW_PARAM_4(1));
     for (unsigned n = 1; n <= 4; ++n) {
         g->gpii = n;
         g->tx_wp = g->rx_wp = 0;

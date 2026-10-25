@@ -639,7 +639,8 @@ void panicReadout(const Session &s, const char *why) {
         "HUMTOUCH gsi gpii%u ee%05x irc%d rc%d ok%d pre%08x rb%08x tr%08x tirq%08x src%08x evsrc%08x\n"
         "HUMTOUCH gsich ch0%08x ch1%08x ev%08x evrp%08x evn%u poll%u idx%08x scr%08x\n"
         "HUMTOUCH gsiev %08x %08x %08x %08x irq%08x glob%08x errl%08x errl2%08x sdma%08x sgsi%08x\n"
-        "HUMTOUCH gsierr e0%08x e1%08x e2%08x e3%08x e4%08x",
+        "HUMTOUCH gsierr e0%08x e1%08x e2%08x e3%08x e4%08x\n"
+        "HUMTOUCH gsiee st%08x sw%08x hw2%08x hw4%08x",
         why, native_htouch_stage_done, native_htouch_stage_req, native_htouch_step, native_htouch_error,
         v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[9], v[10], v[11], v[12],
         v[19], v[20], v[21], v[22], s.level, s.div, static_cast<unsigned>(s.actualHz),
@@ -664,7 +665,8 @@ void panicReadout(const Session &s, const char *why) {
         d[HGS_D_EV0], d[HGS_D_EV1], d[HGS_D_EV2], d[HGS_D_EV3],
         d[HGS_D_IRQ_STTS], d[HGS_D_GLOB], d[HGS_D_ERRL], d[HGS_D_ERRL2],
         d[HGS_D_SE_DMA], d[HGS_D_SE_GSI],
-        d[HGS_D_E0], d[HGS_D_E1], d[HGS_D_E2], d[HGS_D_E3], d[HGS_D_E4]);
+        d[HGS_D_E0], d[HGS_D_E1], d[HGS_D_E2], d[HGS_D_E3], d[HGS_D_E4],
+        d[HGS_D_STAT], d[HGS_D_SWVER], d[HGS_D_HWP2], d[HGS_D_HWP4]);
     panic("%s", text);
 }
 
