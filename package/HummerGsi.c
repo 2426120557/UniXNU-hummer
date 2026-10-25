@@ -15,14 +15,14 @@
 #include "HummerGsi.h"
 
 // GPII register offsets are relative to the engine's "ee_base", which mainline derives
-// as regs - ee_offset: 0x10000 for the sm6350-compatible block (every SoC from sm8350
-// on), 0x0 for sdm845/sm8150/sm8250. The sm8750 DT node names its own compatible first
-// ("qcom,sm8750-gpi-dma", then "qcom,sm6350-gpi-dma"), so the vendor driver could pin
-// either value; hgs_init tries 0x10000 first and falls back to 0x0. The two readings
-// address disjoint 64 KiB windows of the same 0x60000 resource, so a wrong guess cannot
-// disturb the right one.
-#define HGS_EE_PRIMARY 0x10000u
-#define HGS_EE_ALT 0x0u
+// as regs - ee_offset: 0x10000 for the sm6350-compatible block, 0x0 for
+// sdm845/sm8150/sm8250. This part is 0x10000, and the hardware says so: with that
+// reading the four implemented instances sit at 0xa10000..0xa24000 and every access
+// works, while reading the same GPII offsets as ee_offset 0 (0xa27088 for GPII 5) takes a
+// synchronous external abort - the block simply stops decoding above 0xa24xxx, which is
+// exactly the DT's dma-channel-mask = 0x1e (instances 1..4). Do not "probe" the other
+// reading again: it panics the kernel on the first write.
+#define HGS_EE_OFF 0x10000u
 
 // Channel context block (GPII_n_CH_k_*), n = GPII instance, k = channel 0..1.
 #define HGS_CH_CNTXT(n, k) (0x20000u + 0x4000u * (n) + 0x80u * (k))
@@ -38,6 +38,9 @@
 #define HGS_TYPE_IRQ(n) (0x23080u + 0x4000u * (n))
 #define HGS_TYPE_IRQ_MSK(n) (0x23088u + 0x4000u * (n))
 #define HGS_SRC_CH_IRQ_CLR(n) (0x230A0u + 0x4000u * (n))
+#define HGS_SRC_CH_IRQ(n) (0x23090u + 0x4000u * (n))
+#define HGS_SRC_EV_CH_IRQ(n) (0x23094u + 0x4000u * (n))
+#define HGS_SRC_EV_CH_IRQ_CLR(n) (0x230A4u + 0x4000u * (n))
 #define HGS_SRC_IEOB_IRQ_CLR(n) (0x230C0u + 0x4000u * (n))
 #define HGS_GLOB_IRQ_STTS(n) (0x23100u + 0x4000u * (n))
 #define HGS_ERRL(n) (0x23200u + 0x4000u * (n))
@@ -153,11 +156,18 @@ static int hgs_setrc(struct hgs_dma *g, int rc) {
     return rc;
 }
 
-static int hgs_wait_state(struct hgs_dma *g, uint32_t cntxt, uint32_t want, unsigned tries) {
+// Wait for a command to take effect. Mainline learns about it from the channel-control
+// interrupt and then reads the state out of CNTXT_0, so accept either signal: the state
+// field itself, or the corresponding SRC_CH_IRQ / SRC_EV_CH_IRQ bit (which the hardware
+// sets whether or not the interrupt is masked).
+static int hgs_wait_state(struct hgs_dma *g, uint32_t cntxt, uint32_t want,
+                          uint32_t src_off, uint32_t src_bit, unsigned tries) {
     for (unsigned i = 0; i < tries; ++i) {
-        uint32_t st = HGS_C0_CHSTATE(hgs_rd(g, cntxt + HGS_C_CONFIG));
+        uint32_t raw = hgs_rd(g, cntxt + HGS_C_CONFIG);
+        uint32_t st = HGS_C0_CHSTATE(raw);
         if (st == want) return HGS_OK;
         if (st == HGS_ST_ERROR) return HGS_ERR_IO;
+        if (src_off && src_bit && (hgs_rd(g, src_off) & src_bit)) return HGS_OK;
         hgs_wait_us(100);
     }
     return HGS_ERR_TIMEOUT;
@@ -230,18 +240,25 @@ static void hgs_se_gpi_mode(struct hgs_dma *g) {
 // Allocate + program + start both channels at ring index 0 (the initial bring-up).
 static int hgs_channels_start(struct hgs_dma *g) {
     const unsigned n = g->gpii;
+    // Each command's completion flag must be dropped first: the SRC bit from ALLOCATE
+    // would otherwise make the following START look complete the instant it is polled.
     for (unsigned ch = 0; ch < 2; ++ch) {
+        hgs_wr(g, HGS_SRC_CH_IRQ_CLR(n), 1u << ch);
         hgs_chan_cmd(g, ch, HGS_CH_ALLOCATE);
-        int rc = hgs_wait_state(g, HGS_CH_CNTXT(n, ch), HGS_ST_ALLOCATED, HGS_POLL_TRIES);
+        int rc = hgs_wait_state(g, HGS_CH_CNTXT(n, ch), HGS_ST_ALLOCATED,
+                                HGS_SRC_CH_IRQ(n), 1u << ch, HGS_POLL_TRIES);
         if (rc) return rc;
         hgs_program_chan(g, ch, ch == 0,
                          ch == 0 ? g->rings.tx_virt : g->rings.rx_virt,
                          ch == 0 ? g->rings.tx_phys : g->rings.rx_phys,
                          ch == 0 ? g->rings.tx_len : g->rings.rx_len);
+        if (ch == 0) g->diag[HGS_D_SRC] = hgs_rd(g, HGS_SRC_CH_IRQ(n));
     }
     for (unsigned ch = 0; ch < 2; ++ch) {
+        hgs_wr(g, HGS_SRC_CH_IRQ_CLR(n), 1u << ch);
         hgs_chan_cmd(g, ch, HGS_CH_START);
-        int rc = hgs_wait_state(g, HGS_CH_CNTXT(n, ch), HGS_ST_STARTED, HGS_POLL_TRIES);
+        int rc = hgs_wait_state(g, HGS_CH_CNTXT(n, ch), HGS_ST_STARTED,
+                                HGS_SRC_CH_IRQ(n), 1u << ch, HGS_POLL_TRIES);
         if (rc) return rc;
     }
     g->tx_wp = 0;
@@ -263,16 +280,30 @@ static void hgs_put_tre(void *ring, unsigned idx, uint32_t d0, uint32_t d1, uint
 
 static int hgs_try(struct hgs_dma *g) {
     const unsigned n = g->gpii;
+    // Is this block really decoded and writable? CNTXT_1 (ring length) is a plain RW
+    // field, so a pattern written before any ALLOCATE reads back verbatim when the GPII
+    // is there. 0x400 in HGS_D_RB means "the registers are real"; anything else means the
+    // offsets are wrong and no amount of command writes can help.
+    const uint32_t c1 = HGS_CH_CNTXT(n, 0) + HGS_C_R_LENGTH;
+    hgs_wr(g, c1, 0x00000400u);
+    g->diag[HGS_D_RB] = hgs_rd(g, c1);
+    hgs_wr(g, c1, 0);
+
     // No GIC handler exists for this GPI, so mask every interrupt type before anything
     // can assert. A mask of zero means the engine only ever updates its status
     // registers, which is what the poll loops read.
     hgs_wr(g, HGS_TYPE_IRQ_MSK(n), 0);
     hgs_wr(g, HGS_SRC_CH_IRQ_CLR(n), 0x3u);
     hgs_wr(g, HGS_SRC_IEOB_IRQ_CLR(n), 0x1u);
-    hgs_wr(g, HGS_ERRL(n), 0xffffffffu);
+    hgs_wr(g, HGS_ERRL(n), 0);          // mainline clears it with gpi_update_reg(.., U32_MAX, 0)
 
+    hgs_wr(g, HGS_SRC_EV_CH_IRQ_CLR(n), 1u);
     hgs_wr(g, HGS_EV_CMD(n), (HGS_CH_ALLOCATE << 24) | 0u);
-    int rc = hgs_wait_state(g, HGS_EV_CNTXT(n), HGS_ST_ALLOCATED, HGS_POLL_TRIES);
+    int rc = hgs_wait_state(g, HGS_EV_CNTXT(n), HGS_ST_ALLOCATED,
+                            HGS_SRC_EV_CH_IRQ(n), 1u, HGS_POLL_TRIES);
+    g->diag[HGS_D_TIRQ] = hgs_rd(g, HGS_TYPE_IRQ(n));
+    g->diag[HGS_D_EVSRC] = hgs_rd(g, HGS_SRC_EV_CH_IRQ(n));
+    g->diag[HGS_D_EV] = hgs_rd(g, HGS_EV_CNTXT(n));
     if (rc) return rc;
     hgs_program_ev(g);
     // Pre-seed the event ring pointers exactly like gpi_alloc_ev_chan(): wp starts one
@@ -315,27 +346,22 @@ int hgs_init(struct hgs_dma *g, uintptr_t regs, uintptr_t se, const struct hgs_r
 
     hgs_se_gpi_mode(g);
 
-    // dma-channel-mask in the DT is 0x1e: instances 1..4 exist. Linux picks the first
-    // free one, which on a bare-metal boot is 1; try the rest if this GSI does not
-    // answer, because a leftover claim from the bootloader would shift the winner. The
-    // two ee_offset interpretations use disjoint windows, so trying them in sequence is
-    // safe and decides the layout from hardware instead of from a guess.
+    // dma-channel-mask in the DT is 0x1e: instances 1..4 exist and the block stops
+    // decoding above them (see HGS_EE_OFF). Linux picks the first free instance, which on
+    // a bare-metal boot is 1; try the rest in case the bootloader left one claimed.
     int rc = HGS_ERR_TIMEOUT;
-    const unsigned ee_try[2] = {HGS_EE_PRIMARY, HGS_EE_ALT};
-    for (unsigned e = 0; e < 2; ++e) {
-        g->ee = ee_try[e];
-        for (unsigned n = 1; n <= 4; ++n) {
-            g->gpii = n;
-            g->tx_wp = g->rx_wp = 0;
-            g->ev_rp = g->ev_wp = 0;
-            rc = hgs_try(g);
-            if (!rc) {
-                g->diag[HGS_D_GPII] = n;
-                g->diag[HGS_D_EE] = g->ee;
-                g->ready = 1;
-                g->diag[HGS_D_INIT_RC] = 0;
-                return HGS_OK;
-            }
+    g->ee = HGS_EE_OFF;
+    for (unsigned n = 1; n <= 4; ++n) {
+        g->gpii = n;
+        g->tx_wp = g->rx_wp = 0;
+        g->ev_rp = g->ev_wp = 0;
+        rc = hgs_try(g);
+        if (!rc) {
+            g->diag[HGS_D_GPII] = n;
+            g->diag[HGS_D_EE] = g->ee;
+            g->ready = 1;
+            g->diag[HGS_D_INIT_RC] = 0;
+            return HGS_OK;
         }
     }
     g->diag[HGS_D_GPII] = g->gpii;

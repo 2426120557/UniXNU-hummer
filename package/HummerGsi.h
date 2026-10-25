@@ -39,8 +39,12 @@
 // the engine get", so keep them ordered by the init/transfer sequence.
 enum hgs_diag {
     HGS_D_GPII = 0,      // GPI instance that answered ALLOCATE
-    HGS_D_EE,            // ee_offset that answered (0x10000 = sm6350-style, 0 = sdm845-style)
+    HGS_D_EE,            // ee_offset in use (0x10000 on this part, proven by the decode window)
     HGS_D_INIT_RC,       // 0 = ready, else the failure code
+    HGS_D_RB,            // CH0 CNTXT_1 write/read-back test (0x400 = the block decodes and stores)
+    HGS_D_TIRQ,          // CNTXT_TYPE_IRQ after the event-channel ALLOCATE (bit0 = CH_CTRL)
+    HGS_D_SRC,           // CNTXT_SRC_CH_IRQ after the TX channel ALLOCATE (bit k = channel k changed)
+    HGS_D_EVSRC,         // CNTXT_SRC_EV_CH_IRQ after the event-channel ALLOCATE
     HGS_D_CH0,           // CH0 CNTXT_0 (state in bits 23:20) after init
     HGS_D_CH1,           // CH1 CNTXT_0
     HGS_D_EV,            // event channel CNTXT_0
