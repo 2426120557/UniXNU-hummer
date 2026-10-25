@@ -110,10 +110,10 @@ kernel_args = [
   #                        触摸报告描述符、才置 Built-In/DisplayIntegrated
   #   hummer-touch=4       S3910 探针跑到触点轮询并 publish
   # v76 bring-up: 切到 =3 + panic=3 读 IDENTIFY 寄存器，fifo=1 强 FIFO 路径。
-  # 拍屏后看 x0 行斜杠后半段(traceRx[0])：
-  #   ff ff ff ff  -> SPI 真在跑，从机死（供电问题，接 PMIC LDO）
-  #   00 00 00 00  -> 传输没启动（opcode 缓存或 FIFO_IF_DISABLE 真不工作）
-  # 若要切 DMA 路径试：把 fifo=0（注意：旧版直接硬复位，无 panic 屏）。
+  # v76a: 加 memset(rx, 0xaa) 诊断。panic 屏 x0 斜杠后若还是 aa aa aa aa
+  #   -> geni_spi_transfer 根本没启动 SCLK（opcode/FIFO_IF_DISABLE 问题）
+  #   -> 变成 00/ff/其他 -> 传输跑了，从机没驱动 MISO（供电/复位引脚问题）
+  # fifo=0 (DMA) 实测硬复位，无 panic 屏，排除。
   "offline-hid-input=1", "offline-hid-home=1", "sheng-touch-hid=1",
   "hummer-touch=3", "hummer-touch-panic=3", "hummer-touch-fifo=1",
 ]

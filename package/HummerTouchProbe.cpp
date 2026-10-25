@@ -211,9 +211,12 @@ int busXfer(Session &s, const uint8_t *tx, uint8_t *rx, size_t len) {
     return busTrace(s, rc, len, tx, rx);
 }
 // One full-duplex read: clock `length` dummy 0xff bytes out, capture the response.
+// rx is pre-filled with 0xAA so the panic trace can tell "transfer never started"
+// (rx still 0xAA) from "transfer ran but slave drove MISO low/high" (rx changed).
 int tcmRead(Session &s, size_t length) {
     if (!s.tx || !s.rx || length > S3910_MAX_PAYLOAD + 3) return TCM_EINVAL;
     memset(s.tx, 0xff, length);
+    memset(s.rx, 0xaa, length);
     return busXfer(s, s.tx, s.rx, length);
 }
 // Read the response header (4 bytes: marker, code, length_le16), then length+3
