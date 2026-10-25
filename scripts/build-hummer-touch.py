@@ -96,22 +96,21 @@ if cpp_command and cpp_command[0] in ('clang', 'clang++'):
 run(cpp_command, cpp_dir)
 audit(OUT / 'HummerTouchProbe.o')
 
-# The engine's GeniSpi.h declares the full-duplex SPI opcode as 3. That is wrong: the
-# SPI command opcodes are SPI_TX_ONLY 1, SPI_RX_ONLY 2, SPI_TX_RX 7 (see
-# drivers/spi/spi-geni-qcom.c in AnyLaySys/linux_oneplus_ace5_pro, and get_spi_m_cmd()
-# which returns 7 whenever both tx and rx are present). With 3 the engine never starts
-# the transfer and every full-duplex read - which is how TouchComm reads a response -
-# times out with -110. The header is copied next to the source with that one value
-# corrected, so the engine tree itself stays untouched.
+# Mainline spi-geni-qcom.c setup_se_xfer() - the SE/FIFO path, which is what this driver
+# uses - builds the full-duplex command as `m_cmd |= SPI_TX_ONLY; m_cmd |= SPI_RX_ONLY;`,
+# i.e. 1 | 2 = 3. SPI_TX_RX (7) exists in the driver but is NOT used by the SE path (the
+# GSI path uses its own peripheral.cmd enums). So the engine header's value 3 is correct;
+# an earlier "3 -> 7" patch here was wrong and left the engine latching M_ACTIVE without
+# ever executing the command (every full-duplex read timed out at -110). Keep 3 verbatim.
 geni_source = OUT / 'GeniSpi.c'
 geni_header = OUT / 'GeniSpi.h'
 header_text = GENI_H.read_text()
 opcode = '#define GENI_M_CMD_TX_RX 3'
 if opcode not in header_text:
     raise SystemExit('GeniSpi.h no longer defines GENI_M_CMD_TX_RX as 3; re-check the SPI opcode')
-geni_header.write_text(header_text.replace(opcode, '#define GENI_M_CMD_TX_RX 7'))
+geni_header.write_text(header_text)   # keep 3 = SPI_TX_ONLY|SPI_RX_ONLY (mainline SE/FIFO full duplex)
 geni_source.write_text(GENI.read_text())
-print('HummerTouch: GENI_M_CMD_TX_RX patched 3 -> 7 (real full-duplex SPI opcode)')
+print('HummerTouch: GENI_M_CMD_TX_RX = 3 (TX_ONLY|RX_ONLY, mainline SE/FIFO full-duplex)')
 
 c_command, c_dir = replay(C_RECORD, geni_source, OUT / 'GeniSpi.o')
 # GeniSpi.c is ENGINE code (drivers/NativeGeniSpi); compiling it with -Werror
