@@ -302,18 +302,13 @@ static int hgs_channels_start(struct hgs_dma *g) {
     // allocated by the bootloader, and deallocating a channel that was never allocated is
     // itself an error the engine logs (v95 showed ERROR_LOG already set before the first
     // real command, which then vetoed all four instances).
-    // Program the transfer rings BEFORE allocating, then allocate last and read the state
-    // back immediately. Rationale: v97 showed the event channel reporting CHSTATE = 1 while
-    // both transfer channels read 0 after the same sequence, and the only structural
-    // difference is that the transfer channels get CNTXT_0 rewritten *after* their
-    // ALLOCATE - a full-word write that clears bits 23:20. Ordering the program first makes
-    // ALLOCATE the last thing that touches the state field, and A0/A1 record what it became.
-    for (unsigned ch = 0; ch < 2; ++ch) {
-        hgs_program_chan(g, ch, ch == 0,
-                         ch == 0 ? g->rings.tx_virt : g->rings.rx_virt,
-                         ch == 0 ? g->rings.tx_phys : g->rings.rx_phys,
-                         ch == 0 ? g->rings.tx_len : g->rings.rx_len);
-    }
+    // Mainline order is ALLOCATE first, context second - and v98 showed why: with the order
+    // swapped, SCRATCH_0 read back 0 and CNTXT_0 lost its proto/dir bits, i.e. the ALLOCATE
+    // *initialises* the channel context, so anything written before it is discarded.
+    // What was probably wrong in v97 is the other half: writing CNTXT_0 as a whole word puts
+    // 0 into CHSTATE (bits 23:20), and this engine does report the state there. So keep the
+    // mainline order and make that write read-modify-write, then read the state back both
+    // right after ALLOCATE (A0/A2) and after the context write (A1/A3).
     for (unsigned ch = 0; ch < 2; ++ch) {
         hgs_wr(g, HGS_SRC_CH_IRQ_CLR(n), 1u << ch);
         hgs_chan_cmd(g, ch, HGS_CH_ALLOCATE);
@@ -325,13 +320,19 @@ static int hgs_channels_start(struct hgs_dma *g) {
             g->diag[HGS_D_E2] = hgs_rd(g, HGS_ERRL(n));
             g->diag[HGS_D_SRC] = hgs_rd(g, HGS_SRC_CH_IRQ(n));
         } else {
-            g->diag[HGS_D_A1] = hgs_rd(g, HGS_CH_CNTXT(n, 1));
+            g->diag[HGS_D_A2] = hgs_rd(g, HGS_CH_CNTXT(n, 1));
             g->diag[HGS_D_E3] = hgs_rd(g, HGS_ERRL(n));
         }
         if (rc) {
             g->diag[HGS_D_TRACE] = trace;
             return rc;
         }
+        hgs_program_chan(g, ch, ch == 0,
+                         ch == 0 ? g->rings.tx_virt : g->rings.rx_virt,
+                         ch == 0 ? g->rings.tx_phys : g->rings.rx_phys,
+                         ch == 0 ? g->rings.tx_len : g->rings.rx_len);
+        if (ch == 0) g->diag[HGS_D_A1] = hgs_rd(g, HGS_CH_CNTXT(n, 0));
+        else g->diag[HGS_D_A3] = hgs_rd(g, HGS_CH_CNTXT(n, 1));
     }
     // Did the ring length actually store? A zero length is a ring the engine cannot run.
     g->diag[HGS_D_RB] = hgs_rd(g, HGS_CH_CNTXT(n, 0) + HGS_C_R_LENGTH);
@@ -420,10 +421,12 @@ static int hgs_try(struct hgs_dma *g) {
 
     rc = hgs_channels_start(g);
     if (rc) return rc;
-    // Only a clean error log proves the engine accepted the *channel* commands: a set SRC
-    // bit can also mean "command rejected". The baseline is E1 (after the event-channel
-    // ALLOCATE), so an EV-only complaint does not veto an otherwise usable instance.
-    if (hgs_rd(g, HGS_ERRL(n)) != g->diag[HGS_D_E1]) return HGS_ERR_IO;
+    // Only a clean *allocate* phase proves the engine accepted the channel commands: a set
+    // SRC bit can also mean "command rejected". The baseline is now ERRL2 (right after the
+    // ALLOCATE pair) instead of E1, so an error that only a START logs no longer rejects an
+    // otherwise usable instance - that is what made v98 report ok=0 for all four GPIIs and
+    // hid the transfer result.
+    if (hgs_rd(g, HGS_ERRL(n)) != 0 && g->diag[HGS_D_ERRL2] != 0) return HGS_ERR_IO;
     g->diag[HGS_D_CH0] = hgs_rd(g, HGS_CH_CNTXT(n, 0));
     g->diag[HGS_D_CH1] = hgs_rd(g, HGS_CH_CNTXT(n, 1));
     g->diag[HGS_D_EV] = hgs_rd(g, HGS_EV_CNTXT(n));

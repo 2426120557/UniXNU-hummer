@@ -636,7 +636,7 @@ void panicReadout(const Session &s, const char *why) {
         "HUMTOUCH snap irq%08x st%08x txfs%08x rxfs%08x dmatx%08x dmarx%08x valid%u\n"
         "HUMTOUCH snap2 mcmd%08x clk%08x sel%08x dma%08x mirq%08x\n"
         "HUMTOUCH snap3 rcmd%08x rcfg%08x rdfs%08x rpcfg%08x s4cbcr%08x gpll%08x ifen%08x fifoif%08x\n"
-        "HUMTOUCH gsi gpii%u ee%05x irc%d rc%d ok%d pre%08x a0%08x a1%08x rb%08x tr%08x tirq%08x src%08x evsrc%08x\n"
+        "HUMTOUCH gsi gpii%u ee%05x irc%d rc%d ok%d pre%08x a0%08x a1%08x a2%08x a3%08x rb%08x tr%08x tirq%08x src%08x evsrc%08x\n"
         "HUMTOUCH gsich ch0%08x ch1%08x ev%08x evrp%08x evn%u poll%u idx%08x scr%08x\n"
         "HUMTOUCH gsiev %08x %08x %08x %08x irq%08x glob%08x errl%08x errl2%08x sdma%08x sgsi%08x\n"
         "HUMTOUCH gsierr e0%08x e1%08x e2%08x e3%08x e4%08x\n"
@@ -659,7 +659,7 @@ void panicReadout(const Session &s, const char *why) {
         s.dbg[0], s.dbg[1], s.dbg[2], s.dbg[3], s.dbg[4],
         s.dbg[6], s.dbg[7], s.dbg[8], s.dbg[9], s.dbg[10], s.dbg[11], s.dbg[12], s.dbg[13],
         d[HGS_D_GPII], d[HGS_D_EE], (int)d[HGS_D_INIT_RC], (int)d[HGS_D_RC], s.gsi.ready,
-        d[HGS_D_PRE], d[HGS_D_A0], d[HGS_D_A1],
+        d[HGS_D_PRE], d[HGS_D_A0], d[HGS_D_A1], d[HGS_D_A2], d[HGS_D_A3],
         d[HGS_D_RB], d[HGS_D_TRACE], d[HGS_D_TIRQ], d[HGS_D_SRC], d[HGS_D_EVSRC],
         d[HGS_D_CH0], d[HGS_D_CH1], d[HGS_D_EV], d[HGS_D_EV_RP], d[HGS_D_EVN], d[HGS_D_POLL],
         d[HGS_D_IDX], d[HGS_D_SCRATCH],
