@@ -377,7 +377,16 @@ bool snapshot(Session &s) {
 bool enable(Session &s) {
     // GPLL0 feeds the DFS levels: shared vote, then wait for lock.
     wr32(s.gccVote.va, TB_GCC_GPLL0_ENABLE & 0xfff, rd32(s.gccVote.va, TB_GCC_GPLL0_ENABLE & 0xfff) | 1u);
+    IODelay(200);
+    // TAYCAN_ELU alpha-PLL bring-up on PLL_MODE (offset 0x0): the 0x52020 vote only powers
+    // the GDSC; the PLL stays held in reset until we release BYPASSNL(bit0) -> RESET_N(bit1),
+    // wait for LOCK_DET(bit31), then OUTCTRL(bit2). Before this, PLL_MODE read 0x5
+    // (BYPASSNL|OUTCTRL set, RESET_N=0): GPLL0 never locked, every DFS level clocked from it
+    // delivered no SCLK, and the GenI SPI engine sat stalled (-110, RX FIFO never filled).
+    wr32(s.gccLow.va, TB_GCC_GPLL0_MODE, rd32(s.gccLow.va, TB_GCC_GPLL0_MODE) | (1u << 0));
+    wr32(s.gccLow.va, TB_GCC_GPLL0_MODE, rd32(s.gccLow.va, TB_GCC_GPLL0_MODE) | (1u << 0) | (1u << 1));
     for (unsigned i = 0; i < 10000 && !(rd32(s.gccLow.va, TB_GCC_GPLL0_MODE) & (1u << 31)); ++i) IODelay(10);
+    wr32(s.gccLow.va, TB_GCC_GPLL0_MODE, rd32(s.gccLow.va, TB_GCC_GPLL0_MODE) | (1u << 0) | (1u << 1) | (1u << 2));
     s.vals[6] = rd32(s.gccLow.va, TB_GCC_GPLL0_MODE);
     wr32(s.gccVote.va, TB_GCC_VOTE_ENABLE & 0xfff, rd32(s.gccVote.va, TB_GCC_VOTE_ENABLE & 0xfff) | TB_VOTE_ALL);
     // Branches with hardware clock gating (bit 1) show CLK_OFF while idle and wake on
@@ -430,11 +439,14 @@ bool enable(Session &s) {
 // switching back is one condition.
 bool openBus(Session &s) {
     s.spi.poll_limit = 400000;
-    // poll_only=1 makes geni_spi_init() clear SE_IRQ_EN, so the engine never drives
-    // its interrupt line. This board has no handler for the SE's GIC SPI (357 in the
-    // target DTB) and the ADT publishes no interrupt for it.
-    s.spi.poll_only = 1;
-    s.spi.allow_fifo_disabled = s.allowFifoDisabled;   // boot-arg controlled: FIFO even though FIFO_IF_DISABLE is set, or take the GPI DMA path
+    // poll_only=2 keeps SE_IRQ_EN on. The previous attempt cleared it (poll_only=1) and
+    // every polled transfer then timed out with SE_GENI_M_IRQ_STATUS untouched: the
+    // engine only maintains the M status bits while its interrupt output is enabled.
+    // Nothing acknowledges the SE's GIC SPI (357 - this board installs no handler and
+    // the ADT publishes no interrupt), but the poll loop clears M_IRQ_STATUS on every
+    // pass, so a level interrupt drops by itself.
+    s.spi.poll_only = 2;
+    s.spi.allow_fifo_disabled = 1;   // FIFO even though FIFO_IF_DISABLE is set
     if (s.spi.info.fifo_disabled && !s.spi.allow_fifo_disabled) {
         s.dmaMem = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(kernel_task,
             static_cast<IOOptionBits>(kIODirectionInOut) | static_cast<IOOptionBits>(kIOMemoryPhysicallyContiguous),
@@ -522,6 +534,11 @@ static void touchThread(void *, wait_result_t) {
     Session *s = static_cast<Session *>(IOMallocType(Session));
     if (!s) {fail(0, TCM_ENOMEM); return;}
     bzero(s, sizeof *s);
+    // bzero also erases the in-struct initialisers (max_write = 1024 among them), and
+    // tcmCommand() then rejects every command with -EMSGSIZE before a single byte goes
+    // out - which is exactly the -90 the panic screen reported while the real failure
+    // was the timed-out read before it. Restore the ones that must not be zero.
+    s->max_write = 1024;
     unsigned stage = native_htouch_stage_req, hz = TB_SPI_DEFAULT_HZ, pollMs = 8;
     int mirrorY = 1, flipX = 0, swapXY = 0;
     PE_parse_boot_argn("hummer-touch-hz", &hz, sizeof hz);
@@ -552,6 +569,9 @@ static void touchThread(void *, wait_result_t) {
         s->tx = static_cast<uint8_t *>(IOMalloc(S3910_MAX_PAYLOAD + 3));
         s->rx = static_cast<uint8_t *>(IOMalloc(S3910_MAX_PAYLOAD + 3));
         if (!s->tx || !s->rx) {fail(5, TCM_ENOMEM); checkpointFail(*s); break;}
+        // A read that times out leaves rx untouched; stale bytes must not parse as a
+        // protocol header with a huge length.
+        memset(s->rx, 0, S3910_MAX_PAYLOAD + 3);
         if (gPanicAfter == 7) panicReadout(*s, "buffers done");
         const int r = tcmResetAndIdentify(*s);
         s->idRc = static_cast<unsigned>(r);
