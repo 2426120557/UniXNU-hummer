@@ -477,14 +477,15 @@ bool configureClock(Session &s, unsigned hz) {
 
 // Panic readout: the panic screen is the only console this bring-up has.
 void panicReadout(const Session &s, const char *why) {
-    static char text[1024];
+    static char text[1200];
     const uint32_t *v = s.vals;
     snprintf(text, sizeof text,
         "HUMTOUCH %s s%u/%u st%u e%d\n"
         "HUMTOUCH vote%08x halt %08x %08x %08x %08x %08x gpll%08x pins %08x %08x %08x %08x\n"
         "HUMTOUCH qup%08x fw%08x if%08x hw%08x lvl%u div%u %uHz fd%u ud%u os%u dfs %08x %08x %08x %08x\n"
         "HUMTOUCH id rc%u via%u mode%u ver%d w%u mx%u my%u obj%u cfg%u fr%u ct%u agn%u oth%u bad%u feed%u rc%d n%u\n"
-        "HUMTOUCH x0 %02x%02x%02x%02x%02x%02x/%02x%02x%02x%02x%02x%02x x1 %02x%02x%02x%02x%02x%02x/%02x%02x%02x%02x%02x%02x",
+        "HUMTOUCH x0 %02x%02x%02x%02x%02x%02x/%02x%02x%02x%02x%02x%02x x1 %02x%02x%02x%02x%02x%02x/%02x%02x%02x%02x%02x%02x\n"
+        "HUMTOUCH snap irq%08x st%08x txfs%08x rxfs%08x dmatx%08x dmarx%08x valid%u",
         why, native_htouch_stage_done, native_htouch_stage_req, native_htouch_step, native_htouch_error,
         v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[9], v[10], v[11], v[12],
         v[19], v[20], v[21], v[22], s.level, s.div, static_cast<unsigned>(s.actualHz),
@@ -497,7 +498,9 @@ void panicReadout(const Session &s, const char *why) {
         s.traceTx[0][0], s.traceTx[0][1], s.traceTx[0][2], s.traceTx[0][3], s.traceTx[0][4], s.traceTx[0][5],
         s.traceRx[0][0], s.traceRx[0][1], s.traceRx[0][2], s.traceRx[0][3], s.traceRx[0][4], s.traceRx[0][5],
         s.traceTx[1][0], s.traceTx[1][1], s.traceTx[1][2], s.traceTx[1][3], s.traceTx[1][4], s.traceTx[1][5],
-        s.traceRx[1][0], s.traceRx[1][1], s.traceRx[1][2], s.traceRx[1][3], s.traceRx[1][4], s.traceRx[1][5]);
+        s.traceRx[1][0], s.traceRx[1][1], s.traceRx[1][2], s.traceRx[1][3], s.traceRx[1][4], s.traceRx[1][5],
+        s.spi.snap_irq, s.spi.snap_status, s.spi.snap_txfs, s.spi.snap_rxfs,
+        s.spi.snap_dma_tx, s.spi.snap_dma_rx, s.spi.snap_valid);
     panic("%s", text);
 }
 
