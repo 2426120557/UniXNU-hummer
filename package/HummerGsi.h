@@ -83,7 +83,11 @@ enum hgs_diag {
     HGS_D_SMR,           // stream-match register read back
     HGS_D_S2CR,          // stream-to-context register read back
     HGS_D_CBAR,          // context-bank attribute read back (0x10000 = S1_TRANS_S2_BYPASS)
-    HGS_D_SMMU_RC,       // 0 = stream registered, else the step that failed
+    HGS_D_SMMU_RC,       // 0 = stream registered, else the step code that refused
+    HGS_D_SMMU_IDR0,     // apps_smmu IDR0 (stream count in bits 7:0, EXIDS in bit 30)
+    HGS_D_SMMU_IDR1,     // apps_smmu IDR1 (bank count in bits 7:0, page shift in bits 30:28)
+    HGS_D_SMMU_BANK,     // context bank the scan settled on (0xffff = none free)
+    HGS_D_SMMU_CBA2R,    // CBA2R of that bank before we touched it (0 = idle)
     HGS_D_SE_DMA,        // SE_GENI_DMA_MODE_EN (1 = engine in DMA mode)
     HGS_D_SE_GSI,        // SE_GSI_EVENT_EN
     HGS_D_SCRATCH,       // CH0 SCRATCH_0 (pair/proto/seid)

@@ -469,48 +469,74 @@ static int hgs_try(struct hgs_dma *g) {
 #define HGS_SMMU_CBAR(b) (0x1000u + 4u * (b))
 #define HGS_SMMU_CBA2R(b) (0x1800u + 4u * (b))
 
-static int hgs_smmu_bypass(struct hgs_dma *g, uint32_t sid, unsigned bank_from_top) {
-    if (!g->smmu) return HGS_ERR_PARAM;
+static int hgs_smmu_bypass(struct hgs_dma *g, uint32_t sid) {
+    if (!g->smmu) return -1;                       // no window mapped
     volatile uint32_t *m = (volatile uint32_t *)g->smmu;
     const uint32_t idr0 = m[HGS_SMMU_IDR0 / 4u];
     const uint32_t idr1 = m[HGS_SMMU_IDR1 / 4u];
-    unsigned count = idr0 & 0xffu;
+    unsigned streams = idr0 & 0xffu;
     unsigned banks = idr1 & 0xffu;
     const unsigned pages = 1u << (((idr1 >> 28) & 7u) + 1u);
-    if (count > 128) count = 128;                 // firmware's reliably usable groups
-    if (!count || banks < 2 || banks > 128) return HGS_ERR_IO;
-    if (bank_from_top >= banks - 1u) return HGS_ERR_IO;
-    if ((pages + banks) * 4096u > 0xd0000u) return HGS_ERR_IO;
-    const unsigned bank = banks - 1u - bank_from_top;
-    // Never take a bank that is already in use: a bypass-quirk bank has CBA2R = 1 and
-    // CBAR = 0x10000, an idle one has both at their reset value.
-    if (m[HGS_SMMU_CBA2R(bank) / 4u] || m[HGS_SMMU_CBAR(bank) / 4u]) return HGS_ERR_IO;
-    // First free stream-match slot (bit 31 clear).
-    unsigned slot = count;
-    for (unsigned i = 0; i < count; ++i)
+    g->diag[HGS_D_SMMU_IDR0] = idr0;
+    g->diag[HGS_D_SMMU_IDR1] = idr1;
+    if (!streams || banks < 2 || banks > 128) return -2;
+    if ((pages + banks) * 4096u > 0xd0000u) return -2;
+    if (streams > 128) streams = 128;
+
+    // Pick a context bank that nobody has configured yet. Firmware may already own several,
+    // and UFS takes one with this same bypass quirk, so a fixed index is a guess; scanning
+    // for CBA2R = 0 and CBAR = 0 is the actual "free" condition (reset values).
+    unsigned bank = 0xffffu;
+    int reuse = 0;
+    for (unsigned b = banks; b-- > 0u;) {
+        if (!m[HGS_SMMU_CBA2R(b) / 4u] && !m[HGS_SMMU_CBAR(b) / 4u]) {bank = b; break;}
+    }
+    g->diag[HGS_D_SMMU_BANK] = bank;
+    if (bank == 0xffffu) {
+        // Every bank carries something. Several streams may share one bypass-quirk bank -
+        // S2CR simply points at the same context bank - so reuse a bank that already is
+        // "stage 1 off, stage 2 bypass" instead of failing.
+        for (unsigned b = banks; b-- > 0u;) {
+            const uint32_t cbOff = (pages + b) * 4096u;
+            if (m[HGS_SMMU_CBAR(b) / 4u] == 0x10000u && m[cbOff / 4u] == 0) {
+                bank = b; reuse = 1; break;
+            }
+        }
+        g->diag[HGS_D_SMMU_BANK] = bank;
+        if (bank == 0xffffu) return -3;
+    }
+    g->diag[HGS_D_SMMU_CBA2R] = m[HGS_SMMU_CBA2R(bank) / 4u];
+
+    // First stream-match slot that is not valid yet (bit 31 clear).
+    unsigned slot = streams;
+    for (unsigned i = 0; i < streams; ++i)
         if (!(m[HGS_SMMU_SMR(i) / 4u] & 0x80000000u)) {slot = i; break;}
-    if (slot == count) return HGS_ERR_IO;
+    if (slot == streams) return -4;
 
     const uint32_t cb = (pages + bank) * 4096u;
-    m[cb / 4u] = 0;                                // SCTLR = 0: stage 1 disabled
-    hgs_barrier();
-    if (m[cb / 4u] != 0) return HGS_ERR_IO;
-    m[HGS_SMMU_CBA2R(bank) / 4u] = 1u;             // VA64
-    hgs_barrier();
-    m[HGS_SMMU_CBAR(bank) / 4u] = 0x10000u;        // TYPE = S1_TRANS_S2_BYPASS
-    hgs_barrier();
-    if (m[HGS_SMMU_CBA2R(bank) / 4u] != 1u || m[HGS_SMMU_CBAR(bank) / 4u] != 0x10000u)
-        return HGS_ERR_IO;
+    if (!reuse) {
+        m[cb / 4u] = 0;                            // SCTLR = 0: stage 1 disabled
+        hgs_barrier();
+        if (m[cb / 4u] != 0) return -5;
+        m[HGS_SMMU_CBA2R(bank) / 4u] = 1u;         // VA64
+        hgs_barrier();
+        m[HGS_SMMU_CBAR(bank) / 4u] = 0x10000u;    // TYPE = S1_TRANS_S2_BYPASS
+        hgs_barrier();
+        if (m[HGS_SMMU_CBA2R(bank) / 4u] != 1u || m[HGS_SMMU_CBAR(bank) / 4u] != 0x10000u)
+            return -6;
+    } else if (m[HGS_SMMU_CBAR(bank) / 4u] != 0x10000u || m[cb / 4u] != 0) {
+        return -6;
+    }
     m[HGS_SMMU_S2CR(slot) / 4u] = bank;            // S2CR before SMR (arm_smmu_write_sme)
     hgs_barrier();
-    if (m[HGS_SMMU_S2CR(slot) / 4u] != bank) return HGS_ERR_IO;
+    if (m[HGS_SMMU_S2CR(slot) / 4u] != bank) return -7;
     m[HGS_SMMU_SMR(slot) / 4u] = 0x80000000u | (sid & 0xffffu);
     hgs_barrier();
     g->diag[HGS_D_SMMU] = slot | (bank << 16);
     g->diag[HGS_D_SMR] = m[HGS_SMMU_SMR(slot) / 4u];
     g->diag[HGS_D_S2CR] = m[HGS_SMMU_S2CR(slot) / 4u];
     g->diag[HGS_D_CBAR] = m[HGS_SMMU_CBAR(bank) / 4u];
-    if (g->diag[HGS_D_SMR] != (0x80000000u | (sid & 0xffffu))) return HGS_ERR_IO;
+    if (g->diag[HGS_D_SMR] != (0x80000000u | (sid & 0xffffu))) return -8;
     return HGS_OK;
 }
 
@@ -541,7 +567,7 @@ int hgs_init(struct hgs_dma *g, uintptr_t regs, uintptr_t se, const struct hgs_r
     // The engine's DMA has to be reachable before any command is issued: register the GPI
     // stream in apps_smmu first, otherwise START faults on its own ring (see hgs_smmu_bypass).
     g->diag[HGS_D_SMMU] = 0xffffffffu;
-    g->diag[HGS_D_SMMU_RC] = (uint32_t)hgs_smmu_bypass(g, HGS_GPI_STREAM_ID, 1u);
+    g->diag[HGS_D_SMMU_RC] = (uint32_t)hgs_smmu_bypass(g, HGS_GPI_STREAM_ID);
     hgs_se_gpi_mode(g);
 
     // dma-channel-mask in the DT is 0x1e: instances 1..4 exist and the block stops

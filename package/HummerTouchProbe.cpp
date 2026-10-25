@@ -637,7 +637,7 @@ bool openGsi(Session &s) {
 
 // Panic readout: the panic screen is the only console this bring-up has.
 void panicReadout(const Session &s, const char *why) {
-    static char text[2300];
+    static char text[2500];
     const uint32_t *v = s.vals;
     const uint32_t *d = s.gsi.diag;
     snprintf(text, sizeof text,
@@ -654,7 +654,7 @@ void panicReadout(const Session &s, const char *why) {
         "HUMTOUCH gsiev %08x %08x %08x %08x irq%08x glob%08x errl%08x errl2%08x sdma%08x sgsi%08x\n"
         "HUMTOUCH gsierr e0%08x e1%08x e2%08x e3%08x e4%08x\n"
         "HUMTOUCH gsiee st%08x sw%08x hw2%08x hw4%08x\n"
-        "HUMTOUCH smmu str%08x rc%d smr%08x s2cr%08x cbar%08x\n"
+        "HUMTOUCH smmu str%08x rc%d smr%08x s2cr%08x cbar%08x idr0%08x idr1%08x bank%u cba2%08x\n"
         "HUMTOUCH tpin g162c%08x irqb%08x irqa%08x g161%08x",
         why, native_htouch_stage_done, native_htouch_stage_req, native_htouch_step, native_htouch_error,
         v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[9], v[10], v[11], v[12],
@@ -685,6 +685,7 @@ void panicReadout(const Session &s, const char *why) {
         d[HGS_D_E0], d[HGS_D_E1], d[HGS_D_E2], d[HGS_D_E3], d[HGS_D_E4],
         d[HGS_D_STAT], d[HGS_D_SWVER], d[HGS_D_HWP2], d[HGS_D_HWP4],
         d[HGS_D_SMMU], (int)d[HGS_D_SMMU_RC], d[HGS_D_SMR], d[HGS_D_S2CR], d[HGS_D_CBAR],
+        d[HGS_D_SMMU_IDR0], d[HGS_D_SMMU_IDR1], d[HGS_D_SMMU_BANK], d[HGS_D_SMMU_CBA2R],
         s.dbg[14], s.dbg[15], s.dbg[16], v[13]);
     panic("%s", text);
 }
