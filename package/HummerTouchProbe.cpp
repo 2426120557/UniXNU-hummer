@@ -182,6 +182,7 @@ struct Session {
     int fwVersion = -1;
     unsigned fwMode = 0, idRc = 0;
     bool viaCommand = false;          // IDENTIFY arrived by command, not spontaneously
+    unsigned allowFifoDisabled = 1;   // hummer-touch-fifo=0 forces the GPI DMA path
 };
 
 void fail(unsigned step, int code) {
@@ -430,7 +431,7 @@ bool openBus(Session &s) {
     // its interrupt line. This board has no handler for the SE's GIC SPI (357 in the
     // target DTB) and the ADT publishes no interrupt for it.
     s.spi.poll_only = 1;
-    s.spi.allow_fifo_disabled = 1;   // FIFO even though FIFO_IF_DISABLE is set
+    s.spi.allow_fifo_disabled = s.allowFifoDisabled;   // boot-arg controlled: FIFO even though FIFO_IF_DISABLE is set, or take the GPI DMA path
     if (s.spi.info.fifo_disabled && !s.spi.allow_fifo_disabled) {
         s.dmaMem = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(kernel_task,
             static_cast<IOOptionBits>(kIODirectionInOut) | static_cast<IOOptionBits>(kIOMemoryPhysicallyContiguous),
@@ -524,6 +525,9 @@ static void touchThread(void *, wait_result_t) {
     PE_parse_boot_argn("hummer-touch-fy", &mirrorY, sizeof mirrorY);
     PE_parse_boot_argn("hummer-touch-fx", &flipX, sizeof flipX);
     PE_parse_boot_argn("hummer-touch-swap", &swapXY, sizeof swapXY);
+    unsigned fifoMode = 1;
+    PE_parse_boot_argn("hummer-touch-fifo", &fifoMode, sizeof fifoMode);
+    s->allowFifoDisabled = fifoMode ? 1 : 0;
     do {
         if (!snapshot(*s)) {checkpointFail(*s); break;}
         checkpoint(1, *s);

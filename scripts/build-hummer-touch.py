@@ -109,8 +109,15 @@ header_text = GENI_H.read_text()
 opcode = '#define GENI_M_CMD_TX_RX 3'
 if opcode not in header_text:
     raise SystemExit('GeniSpi.h no longer defines GENI_M_CMD_TX_RX as 3; re-check the SPI opcode')
-geni_header.write_text(header_text.replace(opcode, '#define GENI_M_CMD_TX_RX 7'))
+geni_header_text = header_text.replace(opcode, '#define GENI_M_CMD_TX_RX 7')
+# Hard-check: after the replacement the copy MUST read 7. If the engine header
+# later picks a different macro name or value, fail loudly instead of shipping a
+# kernel that times out every full-duplex read with -110.
+if '#define GENI_M_CMD_TX_RX 7' not in geni_header_text:
+    raise SystemExit('opcode patch failed: GENI_M_CMD_TX_RX is not 7 in the copy')
+geni_header.write_text(geni_header_text)
 geni_source.write_text(GENI.read_text())
+print('HummerTouch: GENI_M_CMD_TX_RX patched 3 -> 7 (verified in copied header)')
 
 c_command, c_dir = replay(C_RECORD, geni_source, OUT / 'GeniSpi.o')
 # GeniSpi.c is ENGINE code (drivers/NativeGeniSpi); compiling it with -Werror
