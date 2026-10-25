@@ -450,13 +450,19 @@ bool enable(Session &s) {
     // values before enabling OE: SCK low, MOSI/CS high.
     for (unsigned i = 0; i < 4; ++i) {
         wr32(s.tlmmSpi.va, i * TB_GPIO_STRIDE + 4, (i == 2) ? 0u : 2u);
-        uint32_t cfg = tb_pin_cfg(0, TB_DRIVE_6MA) | (i != 0 ? (1u << TB_OE_BIT) : 0u);
+        // v81: keep upper cfg bits (AP ownership bit12 etc, tycykp old&~0x3ff), only
+        // rewrite func=0(GPIO)/drive/oe/pull. MISO(i==0)=input+pull-up; others output.
+        uint32_t keep = rd32(s.tlmmSpi.va, i * TB_GPIO_STRIDE) & ~0x3ffu;
+        uint32_t cfg = keep | tb_pin_cfg(0, TB_DRIVE_6MA) |
+                       (i != 0 ? (1u << TB_OE_BIT) : 0u) | (i == 0 ? 3u : 0u);
         wr32(s.tlmmSpi.va, i * TB_GPIO_STRIDE, cfg);
     }
     // v80: power the panel via gpio108 (tycykp pin[4]): drive output high before reset.
     wr32(s.tlmmPwr.va, 4, tb_gpio_out_io(1));
     wr32(s.tlmmPwr.va, 0, tb_pin_cfg_out(TB_DRIVE_6MA));
+    IODelay(100);                                   // v81: let AVDD rail settle
     s.vals[14] = rd32(s.tlmmPwr.va, 0); s.vals[15] = rd32(s.tlmmPwr.va, 4);
+    s.vals[16] = rd32(s.tlmmSpi.va, 0 * TB_GPIO_STRIDE + 4);   // idle MISO level (bit0)
     for (unsigned i = 0; i < 4; ++i) s.vals[9 + i] = rd32(s.tlmmSpi.va, i * TB_GPIO_STRIDE);
     if (!mapRegion(TB_QUP_WRAPPER_BASE, 0x2000, s.wrapper) || !mapRegion(TB_SE_BASE, TB_SE_SIZE, s.se)) {
         fail(2, TCM_ENOMEM);
