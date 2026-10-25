@@ -636,9 +636,9 @@ void panicReadout(const Session &s, const char *why) {
         "HUMTOUCH snap irq%08x st%08x txfs%08x rxfs%08x dmatx%08x dmarx%08x valid%u\n"
         "HUMTOUCH snap2 mcmd%08x clk%08x sel%08x dma%08x mirq%08x\n"
         "HUMTOUCH snap3 rcmd%08x rcfg%08x rdfs%08x rpcfg%08x s4cbcr%08x gpll%08x ifen%08x fifoif%08x\n"
-        "HUMTOUCH gsi gpii%u ee%05x irc%d rc%d ok%d rb%08x tr%08x tirq%08x src%08x evsrc%08x\n"
+        "HUMTOUCH gsi gpii%u ee%05x irc%d rc%d ok%d pre%08x rb%08x tr%08x tirq%08x src%08x evsrc%08x\n"
         "HUMTOUCH gsich ch0%08x ch1%08x ev%08x evrp%08x evn%u poll%u idx%08x scr%08x\n"
-        "HUMTOUCH gsiev %08x %08x %08x %08x irq%08x glob%08x errl%08x sdma%08x sgsi%08x",
+        "HUMTOUCH gsiev %08x %08x %08x %08x irq%08x glob%08x errl%08x errl2%08x sdma%08x sgsi%08x",
         why, native_htouch_stage_done, native_htouch_stage_req, native_htouch_step, native_htouch_error,
         v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[9], v[10], v[11], v[12],
         v[19], v[20], v[21], v[22], s.level, s.div, static_cast<unsigned>(s.actualHz),
@@ -657,11 +657,12 @@ void panicReadout(const Session &s, const char *why) {
         s.dbg[0], s.dbg[1], s.dbg[2], s.dbg[3], s.dbg[4],
         s.dbg[6], s.dbg[7], s.dbg[8], s.dbg[9], s.dbg[10], s.dbg[11], s.dbg[12], s.dbg[13],
         d[HGS_D_GPII], d[HGS_D_EE], (int)d[HGS_D_INIT_RC], (int)d[HGS_D_RC], s.gsi.ready,
-        d[HGS_D_RB], d[HGS_D_TRACE], d[HGS_D_TIRQ], d[HGS_D_SRC], d[HGS_D_EVSRC],
+        d[HGS_D_PRE], d[HGS_D_RB], d[HGS_D_TRACE], d[HGS_D_TIRQ], d[HGS_D_SRC], d[HGS_D_EVSRC],
         d[HGS_D_CH0], d[HGS_D_CH1], d[HGS_D_EV], d[HGS_D_EV_RP], d[HGS_D_EVN], d[HGS_D_POLL],
         d[HGS_D_IDX], d[HGS_D_SCRATCH],
         d[HGS_D_EV0], d[HGS_D_EV1], d[HGS_D_EV2], d[HGS_D_EV3],
-        d[HGS_D_IRQ_STTS], d[HGS_D_GLOB], d[HGS_D_ERRL], d[HGS_D_SE_DMA], d[HGS_D_SE_GSI]);
+        d[HGS_D_IRQ_STTS], d[HGS_D_GLOB], d[HGS_D_ERRL], d[HGS_D_ERRL2],
+        d[HGS_D_SE_DMA], d[HGS_D_SE_GSI]);
     panic("%s", text);
 }
 

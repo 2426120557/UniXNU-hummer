@@ -78,6 +78,9 @@
 #define HGS_CH_START 1u
 #define HGS_CH_STOP 2u
 #define HGS_CH_RESET 9u
+#define HGS_CH_DE_ALLOC 10u
+#define HGS_EV_RESET 9u
+#define HGS_EV_DE_ALLOC 10u
 
 // TRE types and flag bits (gpi.c).
 #define HGS_TRE_TYPE_DMA 0x10u
@@ -249,9 +252,28 @@ static unsigned hgs_step_result(int rc) {
     return (rc == HGS_ERR_TIMEOUT) ? 1u : 2u;
 }
 
+// Force a channel back to "not allocated". The bootloader drives this same SE4 touch
+// controller over the same GSI before handing over (early boot UI, fastboot), so a
+// channel it left allocated would make our ALLOCATE a no-op and our START illegal -
+// which is exactly the v92 picture: ALLOCATE "reports" through SRC, CHSTATE stays 0,
+// START never reports, and ERROR_LOG records a fault. Best effort: the state readback is
+// unreliable on this GPI, so each command just gets time to settle.
+static void hgs_chan_clean(struct hgs_dma *g, unsigned ch) {
+    const unsigned n = g->gpii;
+    hgs_wr(g, HGS_SRC_CH_IRQ_CLR(n), 1u << ch);
+    hgs_chan_cmd(g, ch, HGS_CH_DE_ALLOC);
+    hgs_wait_us(2000);
+    hgs_chan_cmd(g, ch, HGS_CH_RESET);
+    hgs_wait_us(2000);
+}
+
 static int hgs_channels_start(struct hgs_dma *g) {
     const unsigned n = g->gpii;
     uint32_t trace = 0;
+    // Was the channel already owned before we touched it? State 1 here means the
+    // bootloader left it allocated and the clean-up below is what makes progress possible.
+    g->diag[HGS_D_PRE] = hgs_rd(g, HGS_CH_CNTXT(n, 0));
+    for (unsigned ch = 0; ch < 2; ++ch) hgs_chan_clean(g, ch);
     // Each command's completion flag must be dropped first: the SRC bit from ALLOCATE
     // would otherwise make the following START look complete the instant it is polled.
     for (unsigned ch = 0; ch < 2; ++ch) {
@@ -272,6 +294,7 @@ static int hgs_channels_start(struct hgs_dma *g) {
     }
     // Did the ring length actually store? A zero length is a ring the engine cannot run.
     g->diag[HGS_D_RB] = hgs_rd(g, HGS_CH_CNTXT(n, 0) + HGS_C_R_LENGTH);
+    g->diag[HGS_D_ERRL2] = hgs_rd(g, HGS_ERRL(n));
     for (unsigned ch = 0; ch < 2; ++ch) {
         hgs_wr(g, HGS_SRC_CH_IRQ_CLR(n), 1u << ch);
         hgs_chan_cmd(g, ch, HGS_CH_START);
@@ -312,6 +335,13 @@ static int hgs_try(struct hgs_dma *g) {
     hgs_wr(g, HGS_SRC_CH_IRQ_CLR(n), 0x3u);
     hgs_wr(g, HGS_SRC_IEOB_IRQ_CLR(n), 0x1u);
     hgs_wr(g, HGS_ERRL(n), 0);          // mainline clears it with gpi_update_reg(.., U32_MAX, 0)
+
+    // Same clean slate for the event channel.
+    hgs_wr(g, HGS_EV_CMD(n), (HGS_EV_DE_ALLOC << 24) | 0u);
+    hgs_wait_us(2000);
+    hgs_wr(g, HGS_SRC_EV_CH_IRQ_CLR(n), 1u);
+    hgs_wr(g, HGS_EV_CMD(n), (HGS_EV_RESET << 24) | 0u);
+    hgs_wait_us(2000);
 
     hgs_wr(g, HGS_SRC_EV_CH_IRQ_CLR(n), 1u);
     hgs_wr(g, HGS_EV_CMD(n), (HGS_CH_ALLOCATE << 24) | 0u);
