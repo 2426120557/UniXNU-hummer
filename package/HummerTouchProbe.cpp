@@ -206,9 +206,37 @@ int busTrace(Session &s, int rc, size_t len, const uint8_t *tx, const uint8_t *r
     if (firstFailure) {s.lastRc = rc; s.lastLen = static_cast<uint32_t>(len);}
     return rc;
 }
+// v78: this SE reports FIFO_IF_DISABLE (if_disable bit0=1) -> GPI-only instance, the
+// serial engine is not wired to the pins. Drive SPI by GPIO bit-bang on gpio48..51.
+// tlmmSpi maps [0]=gpio48 MISO(in), [1]=gpio49 MOSI, [2]=gpio50 SCK, [3]=gpio51 CS.
+// Mode 0 (SCK idle low, latch rising), MSB first, active-low CS (per tycykp giulia_touch).
+static void bbSet(Session &s, unsigned i, unsigned v) {
+    uint32_t off = i * TB_GPIO_STRIDE + 4;
+    wr32(s.tlmmSpi.va, off, (rd32(s.tlmmSpi.va, off) & ~2u) | (v ? 2u : 0u));
+}
+static unsigned bbSample(Session &s) { return rd32(s.tlmmSpi.va, 0 * TB_GPIO_STRIDE + 4) & 1u; }
+
 int busXfer(Session &s, const uint8_t *tx, uint8_t *rx, size_t len) {
-    int rc = geni_spi_transfer(&s.spi, tx, rx, len, 0);
-    return busTrace(s, rc, len, tx, rx);
+    if (!len) return busTrace(s, TCM_EINVAL, len, tx, rx);
+    bbSet(s, 2, 0);                       // SCK idle low
+    bbSet(s, 3, 0);                       // CS low
+    ioDelayUs(nullptr, 2);
+    for (size_t i = 0; i < len; ++i) {
+        uint8_t send = tx ? tx[i] : 0xff, recv = 0;
+        for (unsigned bit = 0; bit < 8; ++bit) {
+            bbSet(s, 1, (send >> (7 - bit)) & 1u);   // MOSI out
+            ioDelayUs(nullptr, 1);
+            bbSet(s, 2, 1);                           // SCK rising: slave samples
+            ioDelayUs(nullptr, 1);
+            recv = static_cast<uint8_t>((recv << 1) | bbSample(s));
+            bbSet(s, 2, 0);                           // SCK falling
+        }
+        if (rx) rx[i] = recv;
+    }
+    ioDelayUs(nullptr, 2);
+    bbSet(s, 3, 1);                       // CS high
+    ioDelayUs(nullptr, 2);
+    return busTrace(s, 0, len, tx, rx);
 }
 // One full-duplex read: clock `length` dummy 0xff bytes out, capture the response.
 // rx is pre-filled with 0xAA so the panic trace can tell "transfer never started"
@@ -409,8 +437,14 @@ bool enable(Session &s) {
     if (!ok) {fail(2, TCM_ETIMEDOUT); return false;}   // never touch the engine without running clocks
     // One function value for all four pins: the target kernel's pinctrl-sm8750.c puts
     // qup1_se4 at funcs[1] for gpio48..51 alike (see HummerTouchBoard.h).
-    const uint32_t cfg = tb_pin_cfg(TB_FUNC_QUP1_SE4, TB_DRIVE_6MA);
-    for (unsigned i = 0; i < 4; ++i) wr32(s.tlmmSpi.va, i * TB_GPIO_STRIDE, cfg);
+    // v78: GPI-only -> mux the four pins to plain GPIO and bit-bang (func 0).
+    // pin0 gpio48=MISO input; pin1/2/3 gpio49/50/51=MOSI/SCK/CS outputs. Drive idle
+    // values before enabling OE: SCK low, MOSI/CS high.
+    for (unsigned i = 0; i < 4; ++i) {
+        wr32(s.tlmmSpi.va, i * TB_GPIO_STRIDE + 4, (i == 2) ? 0u : 2u);
+        uint32_t cfg = tb_pin_cfg(0, TB_DRIVE_6MA) | (i != 0 ? (1u << TB_OE_BIT) : 0u);
+        wr32(s.tlmmSpi.va, i * TB_GPIO_STRIDE, cfg);
+    }
     for (unsigned i = 0; i < 4; ++i) s.vals[9 + i] = rd32(s.tlmmSpi.va, i * TB_GPIO_STRIDE);
     if (!mapRegion(TB_QUP_WRAPPER_BASE, 0x2000, s.wrapper) || !mapRegion(TB_SE_BASE, TB_SE_SIZE, s.se)) {
         fail(2, TCM_ENOMEM);
