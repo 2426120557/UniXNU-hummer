@@ -107,6 +107,15 @@ static inline uint64_t tb_src_hz(unsigned sel) {return sel==0?19200000ULL:sel==1
 #define TB_GICD_SIZE 0x10000ULL
 #define TB_GICR_BASE 0x16080000ULL
 #define TB_GICR_SIZE 0x200000ULL
+// hummer.dts: redistributor-stride = <0x00 0x40000>. This GIC does not use the
+// architectural 0x20000, so two consecutive redistributors are 0x40000 apart and the
+// 0x200000 window holds exactly eight of them. Reading at the standard stride lands on
+// unmapped memory and takes a synchronous external abort (esr 0x96000010).
+#define TB_GICR_STRIDE 0x40000ULL
+#define TB_GICR_RD_BASE 0x0000ULL      // redistributor frame inside a stride
+#define TB_GICR_RD_WAKER 0x0014ULL
+#define TB_GICR_SGI_BASE 0x10000ULL    // SGI/PPI frame is still at +0x10000
+
 #define TB_SPMI_CORE_BASE 0x0c400000ULL      // reg-names "core",  0x3000
 #define TB_SPMI_CORE_SIZE 0x3000ULL
 #define TB_SPMI_CHNLS_BASE 0x0c500000ULL     // reg-names "chnls", 0x400000
