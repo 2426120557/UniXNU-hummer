@@ -143,6 +143,9 @@ kernel_args = [
   "sheng-smp=1", "sheng-smp-gic=1",
   "hummer-touch=4", "hummer-touch-panic=0", "hummer-touch-fifo=1",
   "hummer-touch-fy=0",
+  # v122 按键引脚发现：只读扫描所有焊盘的输入位，12 秒后开始监视，
+  # 哪个脚被拉低并保持 ~240 ms 就 panic 报它的编号。按住音量键两秒即可。
+  "hummer-keyscan=1",
   # v120 实测（带 hummer-cpu=1 的延迟诊断屏）：
   #   HUMTOUCH cpu processor_count=6 avail=6 max=5 cpus_arg=6
   # 六核全部注册，SMP 通了，所以这里不再带诊断参数。需要再量一次就把

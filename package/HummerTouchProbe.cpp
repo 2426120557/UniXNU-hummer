@@ -910,12 +910,65 @@ static void cpuReportThread(void *, wait_result_t) {
           processor_avail_count, ml_get_max_cpu_number(), requested);
 }
 
+// ---- key pin discovery ---------------------------------------------------------------
+// Nothing in the tree records which TLMM pads carry the volume keys: hummer's bring-up DT
+// only has the PMIC PON power key, and the vendor DT is not part of this repo. Instead of
+// guessing (and instead of reconfiguring pins, which could take the running system down),
+// this samples every pad's input bit - the IO register bit 0 is the pad slice whatever the
+// mux is - and reports the first pad that goes high->low and STAYS low. A finger on the
+// volume key holds it low for hundreds of milliseconds; bus traffic and the touch IRQ
+// toggle for microseconds, so a 240 ms persistence test separates them.
+//
+//   hummer-keyscan=1   wait 12 s for the UI, snapshot, then panic on the first held key
+static void keyScanThread(void *, wait_result_t) {
+    Region tlmm;
+    if (!mapRegion(TB_TLMM_BASE, 0x102000, tlmm)) { panic("HUMTOUCH key: TLMM map failed"); return; }
+    enum { kPins = 224, kWords = (kPins + 31) / 32 };
+    static uint32_t snap[kWords], now[kWords];
+    static uint8_t lowRun[kPins];
+    auto readAll = [&](uint32_t *bitmap) {
+        for (unsigned w = 0; w < kWords; ++w) bitmap[w] = 0;
+        for (unsigned pin = 0; pin < kPins; ++pin) {
+            // Skip the four SPI4 pads and the touch reset/IRQ: they are ours and they toggle.
+            if (pin >= TB_GPIO_SPI_MISO && pin <= TB_GPIO_SPI_CS) continue;
+            if (pin == TB_GPIO_RESET || pin == TB_GPIO_IRQ) continue;
+            if (rd32(tlmm.va, pin * TB_GPIO_STRIDE + 4) & 1u) bitmap[pin / 32] |= 1u << (pin % 32);
+        }
+    };
+    IOSleep(12000);
+    readAll(snap);
+    for (;;) {
+        readAll(now);
+        for (unsigned pin = 0; pin < kPins; ++pin) {
+            const bool wasHigh = (snap[pin / 32] >> (pin % 32)) & 1u;
+            const bool isHigh = (now[pin / 32] >> (pin % 32)) & 1u;
+            if (wasHigh && !isHigh) {
+                if (lowRun[pin] < 255) ++lowRun[pin];
+                if (lowRun[pin] == 12) {          // ~240 ms: held, not traffic
+                    panic("HUMTOUCH key pin=%u\nHUMTOUCH key snap %08x %08x %08x %08x %08x %08x %08x\n"
+                          "HUMTOUCH key now  %08x %08x %08x %08x %08x %08x %08x",
+                          pin, snap[0], snap[1], snap[2], snap[3], snap[4], snap[5], snap[6],
+                          now[0], now[1], now[2], now[3], now[4], now[5], now[6]);
+                }
+            } else {
+                lowRun[pin] = 0;
+            }
+        }
+        IOSleep(20);
+    }
+}
+
 extern "C" void native_touch_probe(void) {
     unsigned stage = 0;
     int cpuReport = 0;
     if (PE_parse_boot_argn("hummer-cpu", &cpuReport, sizeof cpuReport) && cpuReport) {
         thread_t thread = nullptr;
         if (kernel_thread_start(cpuReportThread, nullptr, &thread) == KERN_SUCCESS) thread_deallocate(thread);
+    }
+    int keyscan = 0;
+    if (PE_parse_boot_argn("hummer-keyscan", &keyscan, sizeof keyscan) && keyscan) {
+        thread_t scan = nullptr;
+        if (kernel_thread_start(keyScanThread, nullptr, &scan) == KERN_SUCCESS) thread_deallocate(scan);
     }
     if (!PE_parse_boot_argn("hummer-touch", &stage, sizeof stage) || stage < 1 || native_htouch_stage_req) return;
     if (stage > 4) stage = 4;
