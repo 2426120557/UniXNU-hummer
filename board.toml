@@ -109,8 +109,17 @@ kernel_args = [
   "offline-legacy-register=1", "offline-legacy-phase=4", "offline-legacy-gop=1",
   "offline-legacy-pm=1", "offline-legacy-validate=1", "offline-legacy-transfer=1",
   "offline-legacy-cpu-present=1", "offline-key-events=1", "sheng-aks=1",
-  # 多核：保留 6 核 ADT + /psci，走 XNU 标准 PSCI 起从核。
-  # （不再用 sheng-smp/armcpu-spi-ipi：那条路径在异常向量就绪前就触发早期 fatal。）
+  # 多核：ADT 有 6 个 cpu 节点 + /psci，但 ArmCpu::probe 对从核 nub 直接返回 nullptr，
+  # 除非给了 sheng-smp=1（drivers/ArmCpu/ArmCpu.cpp 的 probe）。v115 实测
+  #   HUMTOUCH cpu processor_count=1 avail=1 cpus_arg=6
+  # 所以不是 PSCI 失败，是从核根本没注册。v116 打开：
+  #   sheng-smp=1      注册从核，startCPU 里发 PSCI 0.2 CPU_ON
+  #   sheng-smp-gic=1  CPU_ON 之前由 boot CPU 唤醒目标核的 GICR（GICv3 必需，
+  #                    否则新核在自己的 redistributor 上 wfe 死等）
+  # 两个 Oryon prime 核在 MPIDR Affinity2（0x10000/0x10100），而 XNU 的
+  # ml_parse_cpu_topology 只用 MPIDR_CLUSTER_ID / MPIDR_CPU_ID（Affinity1/0）
+  # 算拓扑，两个核会塌到 logical 0（历史上 AppleS8000CPU 就是这么 panic 的）。
+  # 所以这一轮只跑 6 个 Affinity1 核；要 8 核得改引擎侧的亲和性映射。
   # 触屏上报链路（对齐 13T 的四个开关，缺一个都收不到触摸）：
   #   offline-hid-input=1  HummerHidInput 启动（加载 IOHIDFamily/IOHIDEventDriver、
   #                        创建 owned IOHIDDevice）
@@ -131,6 +140,7 @@ kernel_args = [
   # v113: 第一次真机触摸的结果是"左右对、上下反"——sheng 那块面板要的 Y 镜像在
   #   hummer 上是多余的，默认关掉（hummer-touch-fy=1 可再打开）。
   "offline-hid-input=1", "offline-hid-home=1", "sheng-touch-hid=1",
+  "sheng-smp=1", "sheng-smp-gic=1",
   "hummer-touch=4", "hummer-touch-panic=0", "hummer-touch-fifo=1",
   "hummer-touch-fy=0",
   # v115 诊断：起来就 panic 打出 processor_count / processor_avail_count / cpus 参数，
