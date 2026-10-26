@@ -143,9 +143,10 @@ kernel_args = [
   "sheng-smp=1", "sheng-smp-gic=1",
   "hummer-touch=4", "hummer-touch-panic=0", "hummer-touch-fifo=1",
   "hummer-touch-fy=0",
-  # v115 诊断：起来就 panic 打出 processor_count / processor_avail_count / cpus 参数，
-  #   确认到底几个核注册成功（桌面很卡，怀疑从核没起来）。看完就删掉这一行。
-  "hummer-cpu=1",
+  # v120 实测（带 hummer-cpu=1 的延迟诊断屏）：
+  #   HUMTOUCH cpu processor_count=6 avail=6 max=5 cpus_arg=6
+  # 六核全部注册，SMP 通了，所以这里不再带诊断参数。需要再量一次就把
+  # "hummer-cpu=1" 加回来（15 秒后 panic 报告核数，hummer-cpu-delay 可调毫秒）。
 ]
 trust_cache_sha256 = ["7416ca4f8377146626bb284e2133c76bee6cb4e3ee0af5d648b186235a7323a7"]
 
