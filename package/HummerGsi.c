@@ -477,7 +477,7 @@ static int hgs_try(struct hgs_dma *g) {
 // old (pages + bank) * 4096 arithmetic) because 0x2000..0x7FFF is an unimplemented hole.
 #define HGS_SMMU_GR1 0x8000u
 
-static int hgs_smmu_bypass(struct hgs_dma *g, uint32_t sid) {
+static int __attribute__((unused)) hgs_smmu_bypass(struct hgs_dma *g, uint32_t sid) {
     if (!g->smmu) return -1;                       // no window mapped
     volatile uint32_t *m = (volatile uint32_t *)g->smmu;
     const uint32_t idr0 = m[HGS_SMMU_IDR0 / 4u];
@@ -575,10 +575,15 @@ int hgs_init(struct hgs_dma *g, uintptr_t regs, uintptr_t se, const struct hgs_r
         (r->rx_phys & (r->rx_len - 1u)))
         return hgs_setrc(g, HGS_ERR_PARAM);
 
-    // The engine's DMA has to be reachable before any command is issued: register the GPI
-    // stream in apps_smmu first, otherwise START faults on its own ring (see hgs_smmu_bypass).
+    // apps_smmu stream registration is NOT attempted. v104 proved it is not what blocks
+    // START: sGFSR (cleared beforehand) was still zero after the failed transfer, so the
+    // engine never reached memory at all. Attempts to program it anyway took the kernel down
+    // twice - writes to the context-bank pages bus-error at both 0x2000 (v105) and 0x5a000
+    // (v106) while reads of the same block return values, i.e. the write access has some
+    // constraint this port has not established. It goes back on the list only if a transfer
+    // ever starts and then faults on memory.
     g->diag[HGS_D_SMMU] = 0xffffffffu;
-    g->diag[HGS_D_SMMU_RC] = (uint32_t)hgs_smmu_bypass(g, HGS_GPI_STREAM_ID);
+    g->diag[HGS_D_SMMU_RC] = 0;
     hgs_se_gpi_mode(g);
 
     // dma-channel-mask in the DT is 0x1e: instances 1..4 exist and the block stops
