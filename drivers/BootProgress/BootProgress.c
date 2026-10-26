@@ -478,14 +478,34 @@ void boot_progress_init(void)
 }
 
 // The assembly fatal path re-enters with physical addresses and MMU/cache off.
+//
+// One row only. On hummer's panel this path can draw exactly one row before the rest of
+// the console falls outside the visible area - the old multi-line dump showed nothing but
+// the title, clipped around character 33 - so the four numbers that identify the fault go
+// on a single ~29 character line: checkpoint, ESR, ELR and FAR. ESR is 32 bits by
+// definition; ELR/FAR are cut to their low 32 bits, which is enough to separate a kernel
+// virtual address (0xfff0xxxx..0xffffxxxx) from a device window (0x16080000 = GICR).
+static void hex_fixed(uint64_t n, unsigned digits)
+{
+    for (int shift = (int)(digits * 4) - 4; shift >= 0; shift -= 4) {
+        unsigned digit = (unsigned)(n >> shift) & 15;
+        putc_raw((char)(digit < 10 ? '0' + digit : 'a' + digit - 10));
+    }
+}
+
 void early_boot_progress_fatal(boot_args *args, uint64_t esr, uint64_t elr, uint64_t far, uint64_t spsr, uint64_t stage)
 {
+    (void)spsr;
     early_boot_progress_init(args);
-    if (framebuffer) panic_open("OnePlus Ace 5 Pro / EARLY EXCEPTION");
-    value_raw("last checkpoint", stage);
-    value_raw("ESR_EL1", esr); value_raw("ELR_EL1", elr);
-    value_raw("FAR_EL1", far); value_raw("SPSR_EL1", spsr);
-    if (framebuffer) panic_footer("HALTED: no software reboot");
+    if (!framebuffer) panic_halt();
+    panic_state = 1; busy = 1; panic_clipped = 0;
+    panic_limit = height / LINE - 2;
+    row = 1; column = 0;
+    clear_line(row * LINE);
+    text_raw("E"); hex_fixed(stage, 2);
+    text_raw(" "); hex_fixed(esr, 8);
+    text_raw(" "); hex_fixed(elr, 8);
+    text_raw(" "); hex_fixed(far, 8);
     panic_halt();
 }
 
