@@ -150,6 +150,7 @@ kernel_args = [
   #   没有任何节点引用，所以这台机器只有一个音量键。
   # HummerSpmi.c 读那个寄存器，60 ms 去抖，经报告 4 发 consumer usage 0xEA（音量减）。
   #   1 = 启用；2 = 启用并按第一次键时 panic 打印 SPMI/HID 返回码（排错用）；0 = 关。
+  # 音量上键不在这份 DTB 里（key_vol_up_default 定义了却无人引用），本版只做音量减。
   "hummer-keyscan=1",
   # v120 实测（带 hummer-cpu=1 的延迟诊断屏）：
   #   HUMTOUCH cpu processor_count=6 avail=6 max=5 cpus_arg=6
