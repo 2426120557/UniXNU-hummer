@@ -19,7 +19,10 @@ def prepare(device=DEVICE, source=None):
     patch = device / 'patches/unixnu-source-kernel.patch'
     driver_patches = [(device / 'patches' / name, module) for name, module in (
         ('native-ufs-sm8750.patch', 'NativeUfs'),
-        ('native-mobile-display-stage7.patch', 'NativeMobileDisplay'))]
+        ('native-mobile-display-stage7.patch', 'NativeMobileDisplay'),
+        # The volume key needs a consumer usage the engine's keyboard report cannot carry,
+        # so report 4 and its board entry point live in the NativeHidInput submodule.
+        ('native-hid-media.patch', 'NativeHidInput'))]
     fingerprint = hashlib.sha256(patch.read_bytes() + b''.join(
         path.read_bytes() for path, _ in driver_patches if path.is_file())).hexdigest()
     cache = device / '.cache'

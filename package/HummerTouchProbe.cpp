@@ -22,6 +22,7 @@
 #include <kern/thread.h>
 #include <arm/machine_routines.h>        // ml_get_max_cpu_number() (osfmk/arm, not the machine/ link)
 #include <pexpert/pexpert.h>
+extern "C" int native_hid_media_key(unsigned usage, unsigned down) __attribute__((weak_import));
 extern "C" {
 #include "GeniSpi.h"
 #include "HummerGsi.h"
@@ -912,23 +913,34 @@ static void cpuReportThread(void *, wait_result_t) {
 }
 
 // ---- volume key -----------------------------------------------------------------------
-// The key is not on TLMM at all. hummer.dts - the copy that lives in the UEFI tree, i.e.
-// the exact file this kernel boots from - has a single gpio-keys child:
+// The key is not on TLMM. hummer.dts - the copy that lives in the UEFI tree, i.e. the exact
+// file this kernel boots from - has a single gpio-keys child:
 //     gpio_keys { pinctrl-0 = <&key_vol_down_default>;
 //                 vol_down { gpios = <&pm8550_gpios 6 GPIO_ACTIVE_LOW>;
 //                            linux,code = <0x72>;            /* KEY_VOLUMEDOWN */
 //                            debounce-interval = <0x20>; }; };
-// with pinconf "gpio6" / function normal / input-enable / bias-pull-up / power-source 1,
-// and key_vol_up_default is referenced by nothing, so this board has one volume key.
-// PM8550 is SPMI USID 1; pinctrl-spmi-gpio puts pad n at 0x8800 + (n-1)*0x100 with the
-// real-time status at +0x10, and of_xlate subtracts PMIC_GPIO_PHYSICAL_OFFSET (1) from the
-// cell's 6 -> pad 5 -> 0x8D10. Pull-up plus active-low: released reads 1, pressed reads 0.
-// This replaces the earlier all-pads TLMM sweep, which could never have found this key -
-// but the pad itself is the useful part of the answer: read it, and the HID side only has
-// to carry a KEY_VOLUMEDOWN report.
-//   hummer-keyscan=1   wait 12 s for the UI, then poll every 20 ms and panic on the third
-//                      consecutive low sample (~60 ms, comfortably past the DTS' 32 ms
-//                      debounce), printing the SPMI diagnostics needed to read the result.
+// with pinconf "gpio6" / function normal / input-enable / bias-pull-up / power-source 1, and
+// key_vol_up_default referenced by nothing. PM8550 is SPMI USID 1; pinctrl-spmi-gpio puts pad
+// n at 0x8800 + (n-1)*0x100 with the real-time status at +0x10, and of_xlate subtracts
+// PMIC_GPIO_PHYSICAL_OFFSET (1) from the cell's 6 -> pad 5 -> 0x8D10. Pull-up plus
+// active-low: released reads 1, pressed reads 0.
+//
+// The key is delivered as HID consumer usage 0xEA (Volume Decrement) through
+// native_hid_media_key() - report 4 of the offline HID device, added by
+// patches/native-hid-media.patch. UEFI's ButtonsDxe is a prebuilt .efi with no source in that
+// tree, so what there is to reuse is the hardware definition above, not its code.
+//   hummer-keyscan=1   enable the key: poll every 20 ms, 60 ms debounce both ways, and panic
+//                      only after a full second of unreadable samples (a bus fault, not a press)
+//   hummer-keyscan=2   same, but also panic on the first press with the SPMI + HID return codes
+static unsigned gKeyDetail;
+
+enum { kConsumerVolDown = 0xea };   // HID usage page 0x0C
+
+static int keySend(unsigned usage, unsigned down) {
+    if (!&native_hid_media_key) return -1;
+    return native_hid_media_key(usage, down);
+}
+
 static void keyScanThread(void *, wait_result_t) {
     Region core, chnls, obs;
     if (!mapRegion(TB_SPMI_CORE_BASE, TB_SPMI_CORE_SIZE, core) ||
@@ -941,38 +953,48 @@ static void keyScanThread(void *, wait_result_t) {
     hspmi_init(&spmi, reinterpret_cast<void *>(core.va),
                reinterpret_cast<void *>(chnls.va), reinterpret_cast<void *>(obs.va));
 
-    // One read before the sleep: it warms the APID lookup and preserves what the very
-    // first transfer said, which is what separates "no APID for this ppid" from "the bus
-    // timed out" when the screen is all we have.
-    const uint32_t first = hspmi_read8(&spmi, TB_PM8550_SID, TB_PM8550_VOLKEY);
-    const int firstRc = static_cast<int>(spmi.err);
-    const uint32_t firstStatus = spmi.last_status;
-    const uint32_t apid = spmi.last_apid;
-    const uint32_t map = spmi.last_map;
-    const uint32_t ppid = spmi.last_ppid;
-
+    // 12 s is the HID device's own settle time (report descriptor parsed, event driver
+    // attached); the key must not be sent into a mailbox nobody is listening to yet.
     IOSleep(12000);
 
-    unsigned lowRun = 0;
-    uint32_t last = first;
+    unsigned held = 0;
+    unsigned lowRun = 0, highRun = 0, errRun = 0;
     for (;;) {
         const uint32_t v = hspmi_read8(&spmi, TB_PM8550_SID, TB_PM8550_VOLKEY);
-        const uint32_t status = spmi.last_status;
-        if (v != 0xffffffffu) last = v;
-        if (v != 0xffffffffu && (v & 1u) == 0) {
-            if (++lowRun == 3) {
-                const uint32_t cntl = hspmi_read8(&spmi, TB_PM8550_SID, TB_PM8550_GPIO6_CNTL);
+        if (v == 0xffffffffu) {
+            // 50 samples at 20 ms = a full second of failures. That is the bus, not a key, and
+            // it is the only condition worth stopping the boot for: with this line we learn
+            // which of version / APID / channel status went wrong.
+            if (++errRun == 50) {
                 panic("HUMTOUCH key ver%08x k%u pp%03x ap%u\n"
                       "HUMTOUCH key map %08x rc%d st%08x\n"
-                      "HUMTOUCH key rt %02x/%02x low%u\n"
-                      "HUMTOUCH key cntl %02x err%d",
-                      spmi.version, spmi.kind, ppid, apid,
-                      map, firstRc, status,
-                      first, last, lowRun,
-                      cntl, static_cast<int>(spmi.err));
+                      "HUMTOUCH key err%d hid%d",
+                      spmi.version, spmi.kind, spmi.last_ppid, spmi.last_apid,
+                      spmi.last_map, static_cast<int>(spmi.map_rc), spmi.last_status,
+                      static_cast<int>(spmi.err), keySend(kConsumerVolDown, 0));
+            }
+            IOSleep(20);
+            continue;
+        }
+        errRun = 0;
+        const int pressed = (v & 1u) == 0;
+        if (pressed) {
+            highRun = 0;
+            if (++lowRun >= 3 && !held) {
+                held = 1;
+                const int rc = keySend(kConsumerVolDown, 1);
+                if (gKeyDetail) {
+                    panic("HUMTOUCH key down rt%02x rc%d\n"
+                          "HUMTOUCH key ver%08x k%u ap%u st%08x",
+                          v, rc, spmi.version, spmi.kind, spmi.last_apid, spmi.last_status);
+                }
             }
         } else {
             lowRun = 0;
+            if (++highRun >= 3 && held) {
+                held = 0;
+                keySend(kConsumerVolDown, 0);
+            }
         }
         IOSleep(20);
     }
@@ -987,6 +1009,7 @@ extern "C" void native_touch_probe(void) {
     }
     int keyscan = 0;
     if (PE_parse_boot_argn("hummer-keyscan", &keyscan, sizeof keyscan) && keyscan) {
+        gKeyDetail = keyscan >= 2 ? 1 : 0;
         thread_t scan = nullptr;
         if (kernel_thread_start(keyScanThread, nullptr, &scan) == KERN_SUCCESS) thread_deallocate(scan);
     }

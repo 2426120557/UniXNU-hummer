@@ -1,0 +1,94 @@
+diff --git a/NativeHidInput.cpp b/NativeHidInput.cpp
+index 5bdce1c..8cf7f27 100644
+--- a/NativeHidInput.cpp
++++ b/NativeHidInput.cpp
+@@ -30,6 +30,15 @@ static const unsigned char descriptor[]={
+     0x75,0x01,0x95,0x01,0x81,0x02,
+     0x75,0x07,0x95,0x01,0x81,0x03,0xc0
+ };
++// Report 4: Consumer Control as a 16-bit usage array. The keyboard collection above declares
++// usage min/max 0x00..0x65, so the volume usages (0xE9 / 0xEA) have nowhere to go, and report 2
++// carries a single Menu bit. This collection takes any consumer usage the board driver names,
++// which is how the PMIC volume key reaches the system: 0xE9 up, 0xEA down, 0x30 power.
++static const unsigned char mediaDescriptor[]={
++    0x05,0x0c,0x09,0x01,0xa1,0x01,0x85,0x04,
++    0x15,0x00,0x26,0xff,0x03,0x19,0x00,0x2a,0xff,0x03,
++    0x75,0x10,0x95,0x01,0x81,0x00,0xc0
++};
+ // Report 3: ten-finger Touch Screen collection (Tip Switch, Untouch (set when the tip is up), Contact Identifier, X, Y per finger, then Contact Count).
+ // Coordinates are normalised to 0..32767 on both axes by the producer.
+ #define FINGER_DESC \
+@@ -115,6 +124,14 @@ static void install(IORegistryEntry *driver) {
+     native_touch_edge_stats[0]=1;
+ }
+ }  // namespace edge
++class NativeHidInput;
++// Board driver entry point (package/HummerTouchProbe.cpp). The volume key is PM8550 GPIO6, read
++// over SPMI there; this is the one function it needs from here. handleReport must run on the
++// device's work loop, so the request is a plain word handed to runAction - the poller never
++// touches an IOKit object from its own thread.
++extern "C" int native_hid_media_key(unsigned usage,unsigned down);
++static NativeHidInput *g_mediaDevice;
++
+ class NativeHidInput : public IOHIDDevice {
+     OSDeclareDefaultStructors(NativeHidInput)
+     IOWorkLoop *inputLoop=nullptr;
+@@ -231,16 +248,26 @@ class NativeHidInput : public IOHIDDevice {
+     }
+ public:
+     void setTouchOnly() {touchOnly=true;}
++    // usage == 0 releases. Report 4 is two bytes, little endian, no report-ID prefix.
++    IOReturn sendMedia(unsigned usage) {
++        unsigned char report[]={4,(unsigned char)(usage&0xff),(unsigned char)(usage>>8)};
++        IOBufferMemoryDescriptor *buffer=IOBufferMemoryDescriptor::withBytes(report,sizeof(report),kIODirectionNone);
++        if(!buffer)return kIOReturnNoMemory;
++        IOReturn result=handleReport(buffer,0,0);
++        OSSafeReleaseNULL(buffer);
++        return result;
++    }
+     IOWorkLoop *getWorkLoop() const override {return inputLoop;}
+     OSString *newTransportString() const override {return OSString::withCString(touchOnly?"SPI":"Virtual");}
+     OSString *newProductString() const override {return OSString::withCString(touchOnly?"Offline touch digitizer":"Offline HID input probe");}
+     IOReturn newReportDescriptor(IOMemoryDescriptor **out) const override {
+         if(!out)return kIOReturnBadArgument;
+-        unsigned char combined[sizeof(descriptor)+sizeof(touchDescriptor)];
++        unsigned char combined[sizeof(descriptor)+sizeof(mediaDescriptor)+sizeof(touchDescriptor)];
+         size_t size;
+         if(touchOnly){size=sizeof(touchDescriptor);memcpy(combined,touchDescriptor,size);}
+         else{
+             size=sizeof(descriptor);memcpy(combined,descriptor,size);
++            memcpy(combined+size,mediaDescriptor,sizeof(mediaDescriptor));size+=sizeof(mediaDescriptor);
+             // Default: one device, keyboard collection first, digitizer second (the arrangement whose event driver
+             // and user client attach on hardware); the separate digitizer device is the opt-in sheng-touch-split.
+             if(touchEnabled){memcpy(combined+size,touchDescriptor,sizeof(touchDescriptor));size+=sizeof(touchDescriptor);}
+@@ -266,9 +293,11 @@ public:
+         }
+         setProperty("OfflineInputProbe",true);
+         native_hid_input_observed(2,0);
++        if(!touchOnly)g_mediaDevice=this;
+         timer->setTimeoutMS(1000);return true;
+     }
+     void stop(IOService *provider) override {
++        if(g_mediaDevice==this)g_mediaDevice=nullptr;
+         if((touchOnly||touchEnabled) && &native_touch_set_sink)native_touch_set_sink(nullptr,nullptr);
+         if(timer){timer->cancelTimeout();inputLoop->removeEventSource(timer);OSSafeReleaseNULL(timer);}
+         IOHIDDevice::stop(provider);
+@@ -278,3 +307,18 @@ public:
+ OSDefineMetaClassAndStructors(NativeHidInput,IOHIDDevice)
+ extern "C" IOService *native_hid_input_allocate(void) {return new NativeHidInput;}
+ extern "C" IOService *native_hid_touch_allocate(void) {NativeHidInput *device=new NativeHidInput;if(device)device->setTouchOnly();return device;}
++// arg0 carries (down << 16) | usage, so one word is enough for press and release.
++static IOReturn mediaAction(OSObject *target,void *arg0,void *,void *,void *) {
++    NativeHidInput *self=OSDynamicCast(NativeHidInput,target);
++    if(!self)return kIOReturnBadArgument;
++    unsigned request=(unsigned)(uintptr_t)arg0;
++    return self->sendMedia((request>>16)?(request&0xffffu):0u);
++}
++extern "C" int native_hid_media_key(unsigned usage,unsigned down) {
++    NativeHidInput *device=g_mediaDevice;
++    if(!device || !usage)return -1;
++    IOWorkLoop *loop=device->getWorkLoop();
++    if(!loop)return -1;
++    unsigned request=((down?1u:0u)<<16)|(usage&0xffffu);
++    return loop->runAction(&mediaAction,device,(void *)(uintptr_t)request);
++}
