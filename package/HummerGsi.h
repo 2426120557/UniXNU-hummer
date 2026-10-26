@@ -118,6 +118,7 @@ struct hgs_spi_cfg {
 };
 
 #define HGS_GPI_STREAM_ID 0xb6u     // sm8750.dtsi gpi_dma1: iommus = <&apps_smmu 0xb6 0x0>
+#define HGS_QUP_STREAM_ID 0xa3u     // sm8750.dtsi qupv3_1: iommus = <&apps_smmu 0xa3 0x0>
 #define HGS_SMMU_BANK_USED 0xfffffffeu  // HGS_D_SMMU sentinel: no free bypass bank
 
 struct hgs_dma {

@@ -84,7 +84,11 @@
 #define HGS_C0_CHSTATE(v) (((v) >> 20) & 0xfu)
 #define HGS_C0_CHSTATE_MASK 0x00f00000u
 #define HGS_C0_DIR_OUT 0x8u          // GPI_CHTYPE_DIR_OUT (bit 3)
-#define HGS_C0_PROTO_GPI 0x2u
+#define HGS_C0_PROTO_GPI 0x2u       // CNTXT_0 chtype: GPI_CHTYPE_PROTO_GPI
+// SCRATCH_0 carries the *SE* protocol, not the chtype: DT binding qcom-gpi.h defines
+// QCOM_GPI_SPI = 1, QCOM_GPI_UART = 2, QCOM_GPI_I2C = 3. Writing 2 here (the chtype value)
+// made the channel claim UART while the engine is SPI, which is why every START was refused.
+#define HGS_C0_SE_PROTO_SPI 0x1u
 #define HGS_EV_C0_INTTYPE_IRQ (1u << 16)
 #define HGS_EV_C0_CHTYPE_GPI_EV 0x2u
 
@@ -187,16 +191,21 @@ static int hgs_setrc(struct hgs_dma *g, int rc) {
 // sets whether or not the interrupt is masked).
 static int hgs_wait_state(struct hgs_dma *g, uint32_t cntxt, uint32_t want,
                           uint32_t src_off, uint32_t src_bit, unsigned tries) {
+    // Only CHSTATE counts, exactly like the reference driver (pandora_touch.c): it polls
+    // (CNTXT_0 >> 20) & 0xf until it equals the expected state and gives up on 0xf. Accepting
+    // a set SRC bit as "done" made every command look successful here while the channel state
+    // never moved, which is what hid the real failure for so many builds.
+    (void)src_off;
+    (void)src_bit;
     for (unsigned i = 0; i < tries; ++i) {
-        uint32_t raw = hgs_rd(g, cntxt + HGS_C_CONFIG);
-        uint32_t st = HGS_C0_CHSTATE(raw);
+        uint32_t st = HGS_C0_CHSTATE(hgs_rd(g, cntxt + HGS_C_CONFIG));
         if (st == want) return HGS_OK;
         if (st == HGS_ST_ERROR) return HGS_ERR_IO;
-        if (src_off && src_bit && (hgs_rd(g, src_off) & src_bit)) return HGS_OK;
         hgs_wait_us(100);
     }
     return HGS_ERR_TIMEOUT;
 }
+
 
 static int hgs_chan_cmd(struct hgs_dma *g, unsigned ch, unsigned opcode) {
     hgs_wr(g, HGS_CH_CMD(g->gpii), ((uint32_t)opcode << 24) | (ch & 0xffu));
@@ -220,8 +229,9 @@ static void hgs_program_chan(struct hgs_dma *g, unsigned ch, unsigned dir_out,
     // tidiness, i.e. it was the single field where our channel context differed from a
     // configuration known to work. Follow mainline exactly: EL_SIZE | PROTO, nothing else
     // (plus whatever CHSTATE the engine left there).
-    (void)dir_out;
-    hgs_wr(g, base + HGS_C_CONFIG, keep | HGS_C0_EL_SIZE(HGS_TRE_BYTES) | HGS_C0_PROTO_GPI);
+    hgs_wr(g, base + HGS_C_CONFIG,
+           keep | HGS_C0_EL_SIZE(HGS_TRE_BYTES) | (dir_out ? HGS_C0_DIR_OUT : 0u) |
+               HGS_C0_PROTO_GPI);
     hgs_wr(g, base + HGS_C_R_LENGTH, len);
     hgs_wr(g, base + HGS_C_RING_BASE_LSB, (uint32_t)phys);
     hgs_wr(g, base + HGS_C_RING_BASE_MSB, (uint32_t)(phys >> 32));
@@ -232,7 +242,7 @@ static void hgs_program_chan(struct hgs_dma *g, unsigned ch, unsigned dir_out,
     // SCRATCH_0 = pair<<16 | proto<<4 | seid. The pair is the other channel of the
     // instance; the GSI uses it to route a GO TRE with LINK set to the RX ring.
     hgs_wr(g, HGS_CH_SCRATCH(n, ch),
-           ((uint32_t)(ch ? 0u : 1u) << 16) | (HGS_C0_PROTO_GPI << 4) | (g->seid & 0x7u));
+           ((uint32_t)(ch ? 0u : 1u) << 16) | (HGS_C0_SE_PROTO_SPI << 4) | (g->seid & 0x7u));
     hgs_wr(g, HGS_CH_SCRATCH(n, ch) + 0x4u, 0);
     hgs_wr(g, HGS_CH_SCRATCH(n, ch) + 0x8u, 0);
     hgs_wr(g, HGS_CH_SCRATCH(n, ch) + 0xCu, 0);
@@ -386,11 +396,13 @@ static void hgs_put_tre(void *ring, unsigned idx, uint32_t d0, uint32_t d1, uint
 // engine never asserts. Everything else is written exactly as mainline does.
 static void hgs_ee_setup(struct hgs_dma *g) {
     const unsigned n = g->gpii;
-    hgs_wr(g, HGS_TYPE_IRQ_MSK(n), 0);
+    // Reference (pandora_touch.c on the same SoC family) programs 0x4f here and gets
+    // command completion, so enable all types like mainline instead of masking.
+    hgs_wr(g, HGS_TYPE_IRQ_MSK(n), 0x4fu);
     hgs_wr(g, HGS_SRC_IEOB_IRQ_MSK(n), 0x1u);
     hgs_wr(g, HGS_SRC_CH_IRQ_MSK(n), 0x3u);
     hgs_wr(g, HGS_SRC_EV_CH_IRQ_MSK(n), 0x1u);
-    hgs_wr(g, HGS_GLOB_IRQ_EN(n), 0xfu);
+    hgs_wr(g, HGS_GLOB_IRQ_EN(n), 1u);
     hgs_wr(g, HGS_GPII_IRQ_EN(n), 0xfu);
     hgs_wr(g, HGS_MSI_BASE_LSB(n), 0);
     hgs_wr(g, HGS_MSI_BASE_MSB(n), 0);
@@ -451,103 +463,64 @@ static int hgs_try(struct hgs_dma *g) {
 }
 
 // ---------------------------------------------------------------------------
-// apps_smmu: register the GPI's stream before the engine is allowed to touch memory.
+// apps_smmu: give the GPI and the QUP wrapper a stream match.
 //
-// On this board the SMMU is left by the bootloader in the state UFS documented on
-// 2026-10-17 (drivers/NativeUfs/NativeUfs.cpp): sCR0 = 0x002f0406, i.e. USFCFG = 1 -
-// every stream that has no stream-match entry FAULTS. The GPI is behind stream 0xb6
-// (`iommus = <&apps_smmu 0xb6 0x0>` in sm8750.dtsi) and nothing ever registered it, so
-// the engine's own DMA faults the moment it touches a ring: ALLOCATE only writes
-// registers and succeeds, START needs the ring and is therefore rejected with the channel
-// pushed back to NOT_ALLOCATED - which is exactly the symptom chain v97..v101 recorded.
-//
-// The sequence is the one that already works for UFS (drivers/NativeUfs/SmmuTakeover.h,
-// configureUfsSmmu), which is itself Linux's bypass_quirk: reserve a context bank, put
-// SCTLR = 0 (stage 1 off) and CBAR.TYPE = S1_TRANS_S2_BYPASS in it, then map the stream to
-// that bank with S2CR (written before SMR). Stage 2 bypass means physical addresses are
-// used untranslated, which is why the rings can stay ordinary physical addresses.
+// Taken verbatim in spirit from pandora_touch.c (the working XNU S3910P driver on the same
+// SoC family): the GPI and QUP streams have no stream-match entry, the bootloader leaves
+// apps_smmu with USFCFG = 1 so unmatched streams fault, and UFS already owns a context bank
+// with "stage 1 off" (bypass) for its own stream 0x60. There is therefore nothing to program:
+// copy UFS's S2CR into a free SMR slot for each of our SIDs. Only GR0 (SMR/S2CR, offsets
+// 0x800/0xc00) is touched - the context-bank pages are never written, which is what took the
+// kernel down twice when this code tried to build its own bypass bank.
 #define HGS_SMMU_IDR0 0x020u
-#define HGS_SMMU_IDR1 0x024u
 #define HGS_SMMU_SMR(i) (0x800u + 4u * (i))
 #define HGS_SMMU_S2CR(i) (0xc00u + 4u * (i))
-#define HGS_SMMU_CBAR(b) (0x1000u + 4u * (b))
-#define HGS_SMMU_CBA2R(b) (0x1800u + 4u * (b))
-// Context bank registers live in GR1 at 0x8000, one page each - NOT right after CBAR/CBA2R.
-// v105 crashed with a synchronous external abort (FAR = smmu + 0x2000, i.e. bank 1 under the
-// old (pages + bank) * 4096 arithmetic) because 0x2000..0x7FFF is an unimplemented hole.
-#define HGS_SMMU_GR1 0x8000u
 
-static int __attribute__((unused)) hgs_smmu_bypass(struct hgs_dma *g, uint32_t sid) {
-    if (!g->smmu) return -1;                       // no window mapped
+static int __attribute__((unused)) hgs_smmu_share(struct hgs_dma *g, const uint16_t *sids,
+                                                  unsigned count) {
+    if (!g->smmu) return -1;
     volatile uint32_t *m = (volatile uint32_t *)g->smmu;
-    const uint32_t idr0 = m[HGS_SMMU_IDR0 / 4u];
-    const uint32_t idr1 = m[HGS_SMMU_IDR1 / 4u];
-    unsigned streams = idr0 & 0xffu;
-    unsigned banks = idr1 & 0xffu;
-    // Context-bank page size, Linux's rule (arm-smmu.c): IDR1 bit31 set means 64 KiB banks,
-    // otherwise 4 KiB. UFS's planner used 1 << (((idr1 >> 28) & 7) + 1), which on this part
-    // (idr1 = 0x60000053) yields 128 pages and makes the window check fail for no reason.
-    const unsigned pages = (idr1 >> 31) & 1u ? 16u : 1u;
-    g->diag[HGS_D_SMMU_IDR0] = idr0;
-    g->diag[HGS_D_SMMU_IDR1] = idr1;
-    if (!streams || banks < 2 || banks > 128) return -2;
-    if ((pages + banks) * 4096u > 0xd0000u) return -2;
-    if (streams > 128) streams = 128;
-
-    // Pick a context bank that nobody has configured yet. Firmware may already own several,
-    // and UFS takes one with this same bypass quirk, so a fixed index is a guess; scanning
-    // for CBA2R = 0 and CBAR = 0 is the actual "free" condition (reset values).
-    unsigned bank = 0xffffu;
-    int reuse = 0;
-    for (unsigned b = banks; b-- > 0u;) {
-        if (!m[HGS_SMMU_CBA2R(b) / 4u] && !m[HGS_SMMU_CBAR(b) / 4u]) {bank = b; break;}
-    }
-    g->diag[HGS_D_SMMU_BANK] = bank;
-    if (bank == 0xffffu) {
-        // Every bank carries something. Several streams may share one bypass-quirk bank -
-        // S2CR simply points at the same context bank - so reuse a bank that already is
-        // "stage 1 off, stage 2 bypass" instead of failing.
-        for (unsigned b = banks; b-- > 0u;) {
-            const uint32_t cbOff = HGS_SMMU_GR1 + b * pages * 4096u;
-            if (m[HGS_SMMU_CBAR(b) / 4u] == 0x10000u && m[cbOff / 4u] == 0) {
-                bank = b; reuse = 1; break;
-            }
+    const unsigned nsmr = m[HGS_SMMU_IDR0 / 4u] & 0xffu;
+    if (!nsmr) return -2;
+    uint32_t s2cr = 0;
+    int found = 0;
+    for (unsigned i = 0; i < nsmr; ++i) {
+        const uint32_t smr = m[HGS_SMMU_SMR(i) / 4u];
+        // Same match test the reference driver uses: SID low 16 bits, mask in bits 30:16.
+        if ((smr & 0x80000000u) && ((0x60u ^ smr) & ~(smr >> 16) & 0x7fffu) == 0) {
+            s2cr = m[HGS_SMMU_S2CR(i) / 4u];
+            found = 1;
+            break;
         }
-        g->diag[HGS_D_SMMU_BANK] = bank;
-        if (bank == 0xffffu) return -3;
     }
-    g->diag[HGS_D_SMMU_CBA2R] = m[HGS_SMMU_CBA2R(bank) / 4u];
-
-    // First stream-match slot that is not valid yet (bit 31 clear).
-    unsigned slot = streams;
-    for (unsigned i = 0; i < streams; ++i)
-        if (!(m[HGS_SMMU_SMR(i) / 4u] & 0x80000000u)) {slot = i; break;}
-    if (slot == streams) return -4;
-
-    const uint32_t cb = HGS_SMMU_GR1 + bank * pages * 4096u;
-    if (!reuse) {
-        m[cb / 4u] = 0;                            // SCTLR = 0: stage 1 disabled
+    // TYPE must be TRANSLATE (0) - a bypass or faulting entry would not carry our traffic.
+    if (!found || ((s2cr >> 16) & 3u) != 0) return -3;
+    g->diag[HGS_D_S2CR] = s2cr;
+    g->diag[HGS_D_CBAR] = (s2cr >> 16) & 3u;
+    unsigned firstSlot = 0xffffu;
+    for (unsigned j = 0; j < count; ++j) {
+        unsigned i, freeSlot = 0xffffu;
+        for (i = 0; i < nsmr; ++i) {
+            const uint32_t smr = m[HGS_SMMU_SMR(i) / 4u];
+            if (!(smr & 0x80000000u)) {
+                if (freeSlot == 0xffffu) freeSlot = i;
+                continue;
+            }
+            if (((sids[j] ^ smr) & ~(smr >> 16) & 0x7fffu) == 0) break;   // already matched
+        }
+        if (i < nsmr) continue;
+        if (freeSlot == 0xffffu) return -4;
+        m[HGS_SMMU_S2CR(freeSlot) / 4u] = s2cr;
         hgs_barrier();
-        if (m[cb / 4u] != 0) return -5;
-        m[HGS_SMMU_CBA2R(bank) / 4u] = 1u;         // VA64
+        m[HGS_SMMU_SMR(freeSlot) / 4u] = 0x80000000u | sids[j];
         hgs_barrier();
-        m[HGS_SMMU_CBAR(bank) / 4u] = 0x10000u;    // TYPE = S1_TRANS_S2_BYPASS
-        hgs_barrier();
-        if (m[HGS_SMMU_CBA2R(bank) / 4u] != 1u || m[HGS_SMMU_CBAR(bank) / 4u] != 0x10000u)
-            return -6;
-    } else if (m[HGS_SMMU_CBAR(bank) / 4u] != 0x10000u || m[cb / 4u] != 0) {
-        return -6;
+        if (m[HGS_SMMU_SMR(freeSlot) / 4u] != (0x80000000u | sids[j])) return -5;
+        if (firstSlot == 0xffffu) {
+            firstSlot = freeSlot;
+            g->diag[HGS_D_SMR] = m[HGS_SMMU_SMR(freeSlot) / 4u];
+        }
     }
-    m[HGS_SMMU_S2CR(slot) / 4u] = bank;            // S2CR before SMR (arm_smmu_write_sme)
-    hgs_barrier();
-    if (m[HGS_SMMU_S2CR(slot) / 4u] != bank) return -7;
-    m[HGS_SMMU_SMR(slot) / 4u] = 0x80000000u | (sid & 0xffffu);
-    hgs_barrier();
-    g->diag[HGS_D_SMMU] = slot | (bank << 16);
-    g->diag[HGS_D_SMR] = m[HGS_SMMU_SMR(slot) / 4u];
-    g->diag[HGS_D_S2CR] = m[HGS_SMMU_S2CR(slot) / 4u];
-    g->diag[HGS_D_CBAR] = m[HGS_SMMU_CBAR(bank) / 4u];
-    if (g->diag[HGS_D_SMR] != (0x80000000u | (sid & 0xffffu))) return -8;
+    g->diag[HGS_D_SMMU] = (nsmr << 16) | (firstSlot & 0xffffu);
     return HGS_OK;
 }
 
@@ -575,16 +548,14 @@ int hgs_init(struct hgs_dma *g, uintptr_t regs, uintptr_t se, const struct hgs_r
         (r->rx_phys & (r->rx_len - 1u)))
         return hgs_setrc(g, HGS_ERR_PARAM);
 
-    // apps_smmu stream registration is NOT attempted. v104 proved it is not what blocks
-    // START: sGFSR (cleared beforehand) was still zero after the failed transfer, so the
-    // engine never reached memory at all. Attempts to program it anyway took the kernel down
-    // twice - writes to the context-bank pages bus-error at both 0x2000 (v105) and 0x5a000
-    // (v106) while reads of the same block return values, i.e. the write access has some
-    // constraint this port has not established. It goes back on the list only if a transfer
-    // ever starts and then faults on memory.
+    // Give the GPI and the QUP wrapper a stream match by reusing UFS's bypass context (see
+    // hgs_smmu_share). v104 proved this is not what blocks START, but it *is* required the
+    // moment a transfer really reaches memory, and the reference driver does the same two
+    // streams, so it is done here - GR0 only, no context-bank writes, non-fatal on failure.
+    static const uint16_t smmuSids[2] = {HGS_GPI_STREAM_ID, HGS_QUP_STREAM_ID};
     g->diag[HGS_D_SMMU] = 0xffffffffu;
-    g->diag[HGS_D_SMMU_RC] = 0;
-    hgs_se_gpi_mode(g);
+    g->diag[HGS_D_SMMU_RC] = (uint32_t)hgs_smmu_share(g, smmuSids, 2u);
+hgs_se_gpi_mode(g);
 
     // dma-channel-mask in the DT is 0x1e: instances 1..4 exist and the block stops
     // decoding above them (see HGS_EE_OFF). Linux picks the first free instance, which on
