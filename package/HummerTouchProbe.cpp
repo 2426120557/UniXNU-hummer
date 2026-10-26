@@ -889,8 +889,23 @@ static void touchThread(void *, wait_result_t) {
     } while (0);
 }
 
+// CPU bring-up readout. processor_count is XNU's count of processors that actually
+// registered (kern/processor.c, bumped from processor_init as each one comes up); the ADT
+// declares six, so a value below six means PSCI never started the secondaries and every
+// other symptom - a SpringBoard that feels like one core - follows from that. `cpus` is
+// the boot argument's requested limit, printed for comparison.
+extern "C" int processor_count;
+extern "C" int processor_avail_count;
+
 extern "C" void native_touch_probe(void) {
     unsigned stage = 0;
+    int cpuReport = 0;
+    if (PE_parse_boot_argn("hummer-cpu", &cpuReport, sizeof cpuReport) && cpuReport) {
+        unsigned requested = 0;
+        PE_parse_boot_argn("cpus", &requested, sizeof requested);
+        panic("HUMTOUCH cpu processor_count=%d avail=%d cpus_arg=%u", processor_count,
+              processor_avail_count, requested);
+    }
     if (!PE_parse_boot_argn("hummer-touch", &stage, sizeof stage) || stage < 1 || native_htouch_stage_req) return;
     if (stage > 4) stage = 4;
     native_htouch_stage_req = stage;
