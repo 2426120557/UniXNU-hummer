@@ -111,13 +111,21 @@ static int hr_find(struct hrpmh *h, const char *res, uint32_t *address) {
     unsigned walked = 0, best = 0;
     // A layout that already produced a hit is reused for the second rail.
     if (h->sbase) {
-        if (hr_walk(h, key, h->sbase, h->hbase, address, &walked)) return 0;
+        if (hr_walk(h, key, h->sbase, h->hbase, address, &walked)) {
+            h->diag.address = *address;
+            h->diag.walk = walked;
+            return 0;
+        }
     }
     for (unsigned s = 0; s < 2; ++s) {
         for (unsigned b = 0; b < 2; ++b) {
             if (hr_walk(h, key, hr_sbase[s], hr_hbase[b], address, &walked)) {
                 h->sbase = hr_sbase[s];
                 h->hbase = hr_hbase[b];
+                h->diag.sbase = h->sbase;
+                h->diag.hbase = h->hbase;
+                h->diag.address = *address;
+                h->diag.walk = walked;
                 return 0;
             }
             if (walked > best) best = walked;
