@@ -1,0 +1,128 @@
+// SPDX-License-Identifier: BSD-2-Clause-Patent
+// Power and volume buttons of the hummer board, reported as report 2 bits of the offline HID
+// device (bit 1 Power, bit 2 Volume Increment, bit 3 Volume Decrement - the layout
+// ShengHidInput defines, and the one drivers/NativeHidInput now carries).
+//
+// Follows UniXNU-sheng's package/ButtonProbe.cpp; only the board constants differ:
+//   hummer.dts  gpio_keys/vol_down  = <&pm8550_gpios 6 GPIO_ACTIVE_LOW>, code 0x72
+//               pinctrl@8800 "gpio6" input-enable / bias-pull-up / power-source 1
+//               pon_hlos@1300 "qcom,pmk8350-pwrkey" (PON pwrkey) and a resin node
+// PM8550 is SPMI USID 1, pad 5 = 0x8800 + 5*0x100, real-time status at +0x10 -> 0x8D10,
+// ppid = 0x18D. The PMK8550 PON peripheral is USID 0, periph 0x13 -> RT_STS 0x1310,
+// ppid = 0x013, with bit 7 "pwrkey" and bit 6 "resin".
+//
+// This version polls instead of taking the PMIC interrupt (arbiter -> PDC pin 1 -> SPI 746 on
+// this board, 481 on sheng): the levels are what matters first, and an interrupt handler that
+// is armed wrongly hides the reason a key does nothing. 20 ms sampling with a 3-sample
+// debounce is well inside the DTS' 32 ms.
+#include <IOKit/IOLib.h>
+#include <IOKit/IODeviceMemory.h>
+#include <kern/thread.h>
+#include <pexpert/pexpert.h>
+extern "C" {
+#include "BootResetCore.h"
+#include "HummerTouchBoard.h"
+}
+
+namespace {
+constexpr uint32_t kPonPpid = 0x013, kGpioPpid = 0x18d;
+constexpr uint8_t kPowerBit = 1u << 7, kResinBit = 1u << 6, kGpioBit = 1u << 0;
+constexpr uint8_t kRtSts = 0x10;
+constexpr uint32_t kReportPower = 1u << 1, kReportVolumeUp = 1u << 2, kReportVolumeDown = 1u << 3;
+
+struct Window { IOMemoryMap *map; volatile uint32_t *va; };
+Window gCore, gCnfg, gObs;
+br_arbiter gArb;
+int gPon = -1, gGpio = -1;
+uint32_t gApids;
+void (*volatile gSink)(void *, uint32_t);
+void *volatile gSinkContext;
+
+bool mapWindow(Window &w, uint64_t base, uint64_t size) {
+    IODeviceMemory *memory = IODeviceMemory::withRange(base, size);
+    w.map = memory ? memory->map(kIOMapAnywhere | kIOMapInhibitCache) : nullptr;
+    if (memory) memory->release();
+    w.va = w.map ? reinterpret_cast<volatile uint32_t *>(w.map->getVirtualAddress()) : nullptr;
+    return w.va != nullptr;
+}
+
+// The APID serving `ppid`, as the mainline driver picks it: first match, replaced by one this
+// execution environment owns. Reads only - nothing here can move a rail.
+int findApid(uint32_t ppid) {
+    int found = -1;
+    for (uint32_t i = 0; i < gApids; ++i) {
+        const uint32_t map = gCore.va[(BR_APID_MAP + 4 * i) / 4];
+        if (!map || ((map >> 8) & 0xfff) != ppid) continue;
+        if (found < 0 || (gCnfg.va[(BR_CNFG_OWNER + 4 * i) / 4] & 7u) == gArb.ee) found = (int)i;
+    }
+    return found;
+}
+
+// Report-2 bits for the keys currently held.
+uint32_t pressed() {
+    uint8_t pon = 0, gpio = 0xff;
+    uint32_t mask = 0;
+    if (gPon >= 0 && !br_read8(gObs.va, &gArb, gPon, kRtSts, &pon)) {
+        if (pon & kPowerBit) mask |= kReportPower;
+        // hummer.dts names only one gpio-keys child (volume down on PM8550 GPIO6), so the
+        // second volume key can only be RESIN. If the pairing turns out swapped on hardware,
+        // these two lines are the whole change.
+        if (pon & kResinBit) mask |= kReportVolumeUp;
+    }
+    if (gGpio >= 0 && !br_read8(gObs.va, &gArb, gGpio, kRtSts, &gpio) && !(gpio & kGpioBit)) {
+        mask |= kReportVolumeDown;
+    }
+    return mask;
+}
+
+bool setup() {
+    gArb.ee = 0;
+    if (!mapWindow(gCore, TB_SPMI_CORE_BASE, 0x3000) ||
+        !mapWindow(gCnfg, 0xc42d000ULL, 0x4000)) return false;
+    gArb.core = gCore.va;
+    gArb.cnfg = gCnfg.va;
+    const uint32_t version = gCore.va[0];
+    gApids = gCore.va[BR_FEATURES / 4] & BR_FEATURES_APIDS_MASK;
+    if (version < BR_VERSION_V7_MIN || version >= BR_VERSION_V8_MIN || !gApids || gApids > 1024) return false;
+    if (!mapWindow(gObs, TB_SPMI_OBS_BASE,
+                   ((uint64_t)BR_OBS_APID_STRIDE * gApids + 0xfff) & ~0xfffull)) return false;
+    gPon = findApid(kPonPpid);
+    gGpio = findApid(kGpioPpid);
+    return gPon >= 0 || gGpio >= 0;
+}
+
+void buttonsThread(void *, wait_result_t) {
+    if (!setup()) return;
+    uint32_t last = 0;
+    unsigned settled = 0;
+    uint32_t candidate = 0;
+    for (;;) {
+        const uint32_t mask = pressed();
+        if (mask == candidate) {
+            if (++settled >= 3 && mask != last) {
+                last = mask;
+                void (*sink)(void *, uint32_t) = __atomic_load_n(&gSink, __ATOMIC_ACQUIRE);
+                if (sink) sink(gSinkContext, mask);
+            }
+        } else {
+            candidate = mask;
+            settled = 0;
+        }
+        IOSleep(20);
+    }
+}
+}  // namespace
+
+// Called by drivers/NativeHidInput once its device is started (weak import there, so a build
+// without this file still links).
+extern "C" void native_buttons_set_sink(void (*sink)(void *, uint32_t), void *context) {
+    gSinkContext = context;
+    __atomic_store_n(&gSink, sink, __ATOMIC_RELEASE);
+}
+
+extern "C" void hummer_buttons_probe(void) {
+    unsigned enabled = 0;
+    if (!PE_parse_boot_argn("hummer-keyscan", &enabled, sizeof enabled) || !enabled) return;
+    thread_t thread = nullptr;
+    if (kernel_thread_start(buttonsThread, nullptr, &thread) == KERN_SUCCESS) thread_deallocate(thread);
+}

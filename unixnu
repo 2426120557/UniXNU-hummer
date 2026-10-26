@@ -22,7 +22,7 @@ def prepare(device=DEVICE, source=None):
         ('native-mobile-display-stage7.patch', 'NativeMobileDisplay'),
         # The volume key needs a consumer usage the engine's keyboard report cannot carry,
         # so report 4 and its board entry point live in the NativeHidInput submodule.
-        ('native-hid-media.patch', 'NativeHidInput'))]
+        ('native-keys.patch', 'NativeHidInput'))]
     # Everything that ends up inside the built kernel decides this fingerprint. `package/`
     # becomes kits/<board.kit> and `scripts/` holds the recipes that compile it, so a change
     # to either one produces a different payload. Leaving them out meant "only edit a driver"
