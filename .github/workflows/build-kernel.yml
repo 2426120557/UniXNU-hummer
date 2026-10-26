@@ -8,6 +8,11 @@ on:
   workflow_dispatch:
   push:
     branches: [ main, master ]
+    # 只改文档不该烧一轮 40 分钟的 macOS 构建；代码 / 补丁 / board.toml 仍然自动编。
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - '.gitignore'
 
 concurrency:
   group: hummer-xnu-${{ github.ref }}
