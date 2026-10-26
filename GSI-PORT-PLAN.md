@@ -227,3 +227,38 @@ things that decide whether a byte can exist on the pads at all:
 What v109's readout separates: `sesw out=0000007f` and `pwr ... rc0/0 dn=1` mean both fixes
 landed; a real `S3910` IDENTIFY then means the panel is alive, while `irqa=1` with `rx` still
 zero means power is up but the bus is not.
+
+## v110: the panel answers (2026-10-26 19:00)
+
+The rails were the whole story. With the cmd-db key discovered at runtime instead of
+guessed, the readout is:
+
+```
+HUMTOUCH done s3/3 st0 e0
+HUMTOUCH id rc0 via0 mode1 ver4428887 w1024 mx0 my0 obj0 cfg0 ...
+HUMTOUCH x0 ffffffffff00/a5101c000000      <- 0xA5 read marker, real payload follows
+HUMTOUCH x1 fffffffffffffff/5a50301015333  <- 0x5A continued-read + data
+HUMTOUCH pwr ly0/0 n183 rc0/0 dn1           <- both votes completed (ly/a are stale diag
+                                               fields, the vote itself was fine)
+```
+
+`tcmResetAndIdentify()` returned 0, i.e. the payload really contained "S3910" and the
+controller is in application mode. Everything the bring-up needed before this - GSI
+START, SE IO macros, 4-wire timing - had been right since v108/v109; what was missing
+was 1.8 V + 3.1 V on the panel.
+
+Why the guess failed while the runtime search worked: the bootloader's cmd-db keys its
+VRM entries in one of several shapes (`L4B_E0` / `L4B_E1` / `L4B` / legacy `ldoB4`) and
+only the device can say which. `hrpmh_scan()` now lists any `L4*`/`L16*` key it finds, so
+the naming question can be answered from a screenshot instead of a guess.
+
+Lessons for this bring-up:
+
+- A GPI transfer that completes with a clean error log and returns all-zero data means
+  "the far end is not powered" far more often than "the bus is wrong". The zero was
+  literally a floating/unpowered MISO, and the active-low IRQ sitting at 0 was the same
+  fact one pin over.
+- Every board constant that differs from the reference device (SE base, pins, RSC base,
+  cmd-db names) is a place where copying the reference driver cannot help. Those need to
+  be *discovered*, not guessed - two flashes were spent guessing the one datum the
+  hardware could have told us in a single read.
