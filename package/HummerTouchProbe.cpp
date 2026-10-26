@@ -24,6 +24,7 @@
 extern "C" {
 #include "GeniSpi.h"
 #include "HummerGsi.h"
+#include "HummerRpmh.h"
 #include "HummerTouchBoard.h"
 }
 
@@ -166,6 +167,8 @@ void ioDelayUs(void *, unsigned us) {
 struct Session {
     Region gccLow, gccHalt, gccVote, gccS4, tlmmSpi, tlmmReset, wrapper, se, smmu;
     Region gpi;                       // GPI/GSI register window (0xa00000)
+    Region rsc, cmddb;                // apps RSC drv-2 (0x16520000) + aop cmd-db (0x81c60000)
+    struct hrpmh rpmh;
     IOBufferMemoryDescriptor *dmaMem;
     uint64_t dmaPhys;
     IOBufferMemoryDescriptor *gsiMem; // event ring + TX ring + RX ring (one contiguous block)
@@ -187,6 +190,9 @@ struct Session {
     uint32_t lastLen = 0;
     int fwVersion = -1;
     unsigned fwMode = 0, idRc = 0;
+    uint32_t pwrRc[2] = {0xffffffffu, 0xffffffffu};   // RSC votes: L4B_E0, L16B_E0
+    uint32_t pwrAddr[2] = {0, 0};                     // VRM addresses cmd-db returned
+    bool powerVote = true;            // hummer-touch-pwr=0 skips the RPMh vote
     bool viaCommand = false;          // IDENTIFY arrived by command, not spontaneously
     unsigned allowFifoDisabled = 1;   // hummer-touch-fifo=0 forces the GPI DMA path
     int gsiEnable = 1;                // hummer-touch-gsi=0 keeps the SE/FIFO path (dead on this engine)
@@ -318,6 +324,35 @@ int tcmCommand(Session &s, uint8_t command, const void *payload, size_t length) 
     }
     return TCM_ETIMEDOUT;
 }
+// ---- Panel rails -------------------------------------------------------------------
+// sm8750-oneplus-hummer-bringup.dtsi touchscreen@0:
+//     vddio-supply = <&vreg_l4b_1p8>;      PM8550B LDO4, 1.8 V
+//     avdd-supply  = <&vreg_l16b_2p8>;     PM8550B LDO16, 3.104 V
+// Neither has an enable GPIO, so there is nothing in the SoC to poke: both rails are
+// RPMh regulators and only a vote in the apps RSC switches them on. v108 and everything
+// before it never voted, which is the simplest explanation for a link that finishes
+// transfers with no error while every byte reads back 0x00 and GPIO162 (the controller's
+// active-low IRQ) never leaves 0 - an unpowered Synaptics part cannot answer at all.
+// Never aborts the stage: the panic readout has to appear either way, and the RSC diag
+// fields say whether the vote itself was what failed.
+void powerRails(Session &s) {
+    if (!mapRegion(TB_RSC_BASE, TB_RSC_SIZE, s.rsc) ||
+        !mapRegion(TB_CMDDB_BASE, TB_CMDDB_SIZE, s.cmddb)) {
+        s.pwrRc[0] = s.pwrRc[1] = static_cast<uint32_t>(TCM_ENOMEM);
+        return;
+    }
+    const int init = hrpmh_init(&s.rpmh, reinterpret_cast<void *>(s.rsc.va),
+                                reinterpret_cast<void *>(s.cmddb.va));
+    s.pwrRc[0] = s.pwrRc[1] = static_cast<uint32_t>(init);
+    if (init) return;                  // unknown RSC layout: report, do not touch
+    // IO rail first, then the analog rail, the order the DT lists them in.
+    s.pwrRc[0] = static_cast<uint32_t>(hrpmh_vote(&s.rpmh, "L4B_E0", 1800));
+    s.pwrAddr[0] = s.rpmh.diag.address;
+    s.pwrRc[1] = static_cast<uint32_t>(hrpmh_vote(&s.rpmh, "L16B_E0", 3104));
+    s.pwrAddr[1] = s.rpmh.diag.address;
+    IOSleep(20);
+}
+
 // Reset pulse (active-low GPIO 161): assert 10 ms, release 200 ms; the controller
 // then volunteers its IDENTIFY report (Linux: gpiod 1 -> physical low, 10 ms,
 // gpiod 0 -> physical high, 200 ms, then receive).
@@ -645,7 +680,7 @@ bool openGsi(Session &s) {
 
 // Panic readout: the panic screen is the only console this bring-up has.
 void panicReadout(const Session &s, const char *why) {
-    static char text[2800];
+    static char text[3200];
     const uint32_t *v = s.vals;
     const uint32_t *d = s.gsi.diag;
     snprintf(text, sizeof text,
@@ -662,11 +697,12 @@ void panicReadout(const Session &s, const char *why) {
         "HUMTOUCH gsiev %08x %08x %08x %08x irq%08x glob%08x errl%08x errl2%08x sdma%08x sgsi%08x\n"
         "HUMTOUCH gsierr e0%08x e1%08x e2%08x e3%08x e4%08x\n"
         "HUMTOUCH gsiee st%08x sw%08x hw2%08x hw4%08x\n"
+        "HUMTOUCH sesw out%08x cgc%08x dma%08x gsi%08x\n"
+        "HUMTOUCH pwr id%08x cfg%08x mgc%08x tcs%u dn%u rc%d/%d a%08x/%08x\n"
         "HUMTOUCH smmu str%08x rc%d b%u cb2%08x\n"
         "HUMTOUCH smr  %08x s2cr%08x cbar%08x\n"
         "HUMTOUCH smid idr0%08x idr1%08x\n"
         "HUMTOUCH smgf pre%08x clr%08x post%08x\n"
-        "HUMTOUCH smgy yn0%08x yn1%08x\n"
         "HUMTOUCH tpin g162c%08x irqb%08x irqa%08x g161%08x",
         why, native_htouch_stage_done, native_htouch_stage_req, native_htouch_step, native_htouch_error,
         v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[9], v[10], v[11], v[12],
@@ -696,10 +732,13 @@ void panicReadout(const Session &s, const char *why) {
         d[HGS_D_SE_DMA], d[HGS_D_SE_GSI],
         d[HGS_D_E0], d[HGS_D_E1], d[HGS_D_E2], d[HGS_D_E3], d[HGS_D_E4],
         d[HGS_D_STAT], d[HGS_D_SWVER], d[HGS_D_HWP2], d[HGS_D_HWP4],
+        d[HGS_D_SE_OUT], d[HGS_D_SE_CGC], d[HGS_D_SE_DMA], d[HGS_D_SE_GSI],
+        s.rpmh.diag.id, s.rpmh.diag.config, s.rpmh.diag.magic, s.rpmh.diag.tcs,
+        s.rpmh.diag.done, (int)s.pwrRc[0], (int)s.pwrRc[1], s.pwrAddr[0], s.pwrAddr[1],
         d[HGS_D_SMMU], (int)d[HGS_D_SMMU_RC], d[HGS_D_SMMU_BANK], d[HGS_D_SMMU_CBA2R],
         d[HGS_D_SMR], d[HGS_D_S2CR], d[HGS_D_CBAR],
         d[HGS_D_SMMU_IDR0], d[HGS_D_SMMU_IDR1],
-        s.dbg[17], s.dbg[18], s.dbg[19], s.dbg[20], s.dbg[21],
+        s.dbg[17], s.dbg[18], s.dbg[19],
         s.dbg[14], s.dbg[15], s.dbg[16], v[13]);
     panic("%s", text);
 }
@@ -742,6 +781,9 @@ static void touchThread(void *, wait_result_t) {
     int gsiMode = 1;
     PE_parse_boot_argn("hummer-touch-gsi", &gsiMode, sizeof gsiMode);
     s->gsiEnable = gsiMode ? 1 : 0;
+    int pwrMode = 1;
+    PE_parse_boot_argn("hummer-touch-pwr", &pwrMode, sizeof pwrMode);
+    s->powerVote = pwrMode ? true : false;
     do {
         if (!snapshot(*s)) {checkpointFail(*s); break;}
         checkpoint(1, *s);
@@ -766,6 +808,9 @@ static void touchThread(void *, wait_result_t) {
         // protocol header with a huge length.
         memset(s->rx, 0, S3910_MAX_PAYLOAD + 3);
         if (gPanicAfter == 7) panicReadout(*s, "buffers done");
+        // Rails before reset: the controller can only answer a reset pulse once its
+        // supplies are up, and both of this board's supplies are RPMh regulators.
+        if (s->powerVote) powerRails(*s);
         const int r = tcmResetAndIdentify(*s);
         s->idRc = static_cast<unsigned>(r);
         if (r) {

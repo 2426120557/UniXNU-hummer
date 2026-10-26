@@ -91,6 +91,8 @@ enum hgs_diag {
     HGS_D_SMMU_CBA2R,    // CBA2R of that bank before we touched it (0 = idle)
     HGS_D_SE_DMA,        // SE_GENI_DMA_MODE_EN (1 = engine in DMA mode)
     HGS_D_SE_GSI,        // SE_GSI_EVENT_EN
+    HGS_D_SE_OUT,        // SE_GENI_OUTPUT_CTRL (0x7f = the IO macros are enabled)
+    HGS_D_SE_CGC,        // SE_GENI_CGC_CTRL
     HGS_D_SCRATCH,       // CH0 SCRATCH_0 (pair/proto/seid)
     HGS_D_IDX,           // tx ring write index << 16 | rx ring write index
     HGS_D_POLL,          // poll iterations the last transfer needed

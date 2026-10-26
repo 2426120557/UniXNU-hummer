@@ -194,3 +194,36 @@ DMA TRE:
 - M1: GSI channel ALLOCATE + EV ring + START for spi4 (no data), confirm CHSTATE goes STARTED.
 - M2: minimal SPI_DUPLEX transfer of 4 bytes (T0x00 ff) with TX+RX rings, read event.
 - M3: wire into tcmRead/tcmCommand (replace geni_spi_transfer FIFO).
+
+## v108 on the wire (2026-10-26)
+
+First flash where the GPI accepted everything:
+
+- `tr=00000000` — both ALLOCATEs and both STARTs reported done (every 2-bit step 0). The
+  v108 fix (SCRATCH_0 = pair<<16 | **1**<<4 | seid, i.e. the SE protocol SPI rather than the
+  CNTXT_0 chtype value 2) was the whole blocker: START is only accepted once the channel's
+  scratch word names the protocol the engine has to drive.
+- `scr=00010014` reads back, `gsierr e0..e4 = 0`, `smmu post=0`, `gsiee st=1 sw=20070000`.
+- `gsiev ... evn=2` — two transfer-complete events per 4-byte read, so the TRE rings run.
+- The transfer itself brings nothing back: `rx = 00 00 00 00` (marker miss, -71 TCM_EPROTO),
+  `txfs/rxfs = 0`, and GPIO162 (active-low IRQ) reads 0 before and after the reset pulse.
+
+The engine is now proven end to end, so the failure has moved off the GSI and onto the two
+things that decide whether a byte can exist on the pads at all:
+
+1. **`geni_se_init()` was never called.** mainline's `geni_se_init()` writes
+   `SE_GENI_OUTPUT_CTRL = 0x7f` (the seven IO macros), `SE_GENI_FORCE_DEFAULT = 1`,
+   `SE_GENI_CGC_CTRL |= 0x7f`, clears bit 0 of 0x644 and only then selects the DMA mode.
+   Without those the GPI completes a transfer while the pads stay in their idle high-Z state
+   — a completion event plus steady zeros on MISO is exactly what v108 shows. v109 adds the
+   sequence (`hgs_se_gpi_mode`, copied from the proven reference driver) and prints `out/cgc`.
+2. **The panel had no power at all.** `touchscreen@0` names
+   `vddio-supply = <&vreg_l4b_1p8>` (PM8550B LDO4, 1.8 V) and
+   `avdd-supply = <&vreg_l16b_2p8>` (LDO16, 3.104 V); both are RPMh regulators, so no TLMM
+   register can switch them on. v109 adds `package/HummerRpmh.c` (apps RSC drv-2 @0x16520000,
+   cmd-db @0x81c60000, one ACTIVE TCS, voltage/mode/enable) and votes `L4B_E0` 1800 mV plus
+   `L16B_E0` 3104 mV before the reset pulse.
+
+What v109's readout separates: `sesw out=0000007f` and `pwr ... rc0/0 dn=1` mean both fixes
+landed; a real `S3910` IDENTIFY then means the panel is alive, while `irqa=1` with `rx` still
+zero means power is up but the bus is not.

@@ -26,6 +26,7 @@ C_RECORD = ROOT / 'build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/osfmk/DEVELOPMENT
 PROBE = ROOT / 'kits/hummer/HummerTouchProbe.cpp'
 GSI = ROOT / 'kits/hummer/HummerGsi.c'
 GSI_H = ROOT / 'kits/hummer/HummerGsi.h'
+RPMH = ROOT / 'kits/hummer/HummerRpmh.c'
 GENI = ROOT / 'drivers/NativeGeniSpi/GeniSpi.c'
 GENI_H = ROOT / 'drivers/NativeGeniSpi/GeniSpi.h'
 
@@ -139,8 +140,21 @@ if gsi_command and gsi_command[0] in ('clang', 'cc', 'clang++'):
 run(gsi_command, gsi_dir)
 audit(OUT / 'HummerGsi.o')
 
+# apps RSC (RPMh) vote for the two PM8550B rails (package/HummerRpmh.c): same kernel C
+# flags, same record. Pure register/busy-wait code, no IOKit.
+rpmh_command, rpmh_dir = replay(C_RECORD, RPMH, OUT / 'HummerRpmh.o')
+rpmh_command += ['-Wall', '-Wextra', '-mgeneral-regs-only',
+                 '-I', str(ROOT / '.cache/xnu-work/osfmk'),
+                 '-I', str(ROOT / 'kits/hummer')]
+if rpmh_command and rpmh_command[0] in ('clang', 'cc', 'clang++'):
+    rpmh_command = ['xcrun', '--sdk', 'iphoneos', rpmh_command[0]] + rpmh_command[1:]
+(OUT / 'compile-command-rpmh.json').write_text(json.dumps(rpmh_command, indent=2) + '
+')
+run(rpmh_command, rpmh_dir)
+audit(OUT / 'HummerRpmh.o')
+
 archive = OUT / 'libHummerTouch.a'
 archive.unlink(missing_ok=True)
 subprocess.run(['xcrun', 'ar', 'rcs', archive, OUT / 'HummerTouchProbe.o', OUT / 'GeniSpi.o',
-                OUT / 'HummerGsi.o'], check=True)
-print('HummerTouch: ARM64/iOS 17 object audit passed (probe + GeniSpi + GSI)')
+                OUT / 'HummerGsi.o', OUT / 'HummerRpmh.o'], check=True)
+print('HummerTouch: ARM64/iOS 17 object audit passed (probe + GeniSpi + GSI + RPMh)')

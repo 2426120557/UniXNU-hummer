@@ -16,6 +16,15 @@
 #define TB_APPS_SMMU_BASE 0x15000000ULL
 #define TB_APPS_SMMU_SIZE 0x100000ULL
 
+// apps RSC (rpmh-rsc) on sm8750: reg-names "drv-2" = 0x16520000, qcom,drv-id = <2>,
+// qcom,tcs-offset = <0xd00>, and the aop cmd-db reserved region is 0x81c60000 (+64 KiB).
+// The touch node's two supplies (vreg_l4b_1p8 / vreg_l16b_2p8) are RPMh regulators, so
+// this is the only window that can switch the panel on.
+#define TB_RSC_BASE 0x16520000ULL
+#define TB_RSC_SIZE 0x10000ULL
+#define TB_CMDDB_BASE 0x81c60000ULL
+#define TB_CMDDB_SIZE 0x20000ULL
+
 // sm8750.dtsi: gpi_dma1 = dma-controller@a00000, reg size 0x60000, compatible
 // qcom,sm6350-gpi-dma (ee_offset 0x10000), dma-channel-mask 0x1e (instances 1..4).
 // spi4 lists dmas = <&gpi_dma1 0 4 QCOM_GPI_SPI>, <&gpi_dma1 1 4 QCOM_GPI_SPI>, i.e.

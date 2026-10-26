@@ -133,6 +133,11 @@
 #define HGS_SE_M_IRQ_EN 0x614u
 #define HGS_SE_M_IRQ_CLEAR 0x618u
 #define HGS_SE_S_IRQ_CLEAR 0x648u
+#define HGS_SE_FORCE_DEFAULT 0x020u
+#define HGS_SE_OUTPUT_CTRL 0x024u
+#define HGS_SE_CGC_CTRL 0x028u
+#define HGS_SE_M_CFG_0644 0x644u
+#define HGS_SE_WRAP_0E30 0xE30u
 #define HGS_SE_DMA_TX_IRQ_CLR 0xC44u
 #define HGS_SE_DMA_RX_IRQ_CLR 0xD44u
 #define HGS_SE_GENI_DMA_MODE_EN 0x258u
@@ -267,19 +272,38 @@ static void hgs_program_ev(struct hgs_dma *g) {
     hgs_wr(g, base + HGS_C_RING_RP_UPDATE_MSB, 0);
 }
 
-// geni_se_select_gpi_mode(): keep the engine's interrupt outputs silent and put it in
-// DMA mode with the GSI event sources enabled.
+// geni_se_init() + geni_se_select_gpi_mode(), in the order the proven reference driver on
+// this SoC family uses (pandora_touch.c pt_se_init).
+//
+// The three writes this file used to skip are the ones that connect the engine to the
+// pads: SE_GENI_OUTPUT_CTRL = 0x7f enables the seven IO macros, SE_GENI_FORCE_DEFAULT = 1
+// forces them out of their default (idle) state, and SE_GENI_CGC_CTRL |= 0x7f keeps the
+// engine's own clock gating from parking them between transfers. Without them the GPI can
+// run a whole transfer to completion - TREs consumed, completion event posted - while
+// nothing at all appears on CLK/MOSI/CS, and MISO reads back as steady zeros. That is
+// exactly the v108 signature (tr=0, no error log, rx all 0x00, panel IRQ low), so the
+// missing geni_se_init() is the first thing to rule out before blaming the panel's rails.
 static void hgs_se_gpi_mode(struct hgs_dma *g) {
-    hgs_se_wr(g, HGS_SE_IRQ_EN, 0);
+    hgs_se_wr(g, HGS_SE_GSI_EVENT_EN, 0);
     hgs_se_wr(g, HGS_SE_M_IRQ_CLEAR, 0xffffffffu);
     hgs_se_wr(g, HGS_SE_S_IRQ_CLEAR, 0xffffffffu);
     hgs_se_wr(g, HGS_SE_DMA_TX_IRQ_CLR, 0xffffffffu);
     hgs_se_wr(g, HGS_SE_DMA_RX_IRQ_CLR, 0xffffffffu);
+    hgs_se_wr(g, HGS_SE_CGC_CTRL, hgs_se_rd(g, HGS_SE_CGC_CTRL) | 0x7fu);
+    hgs_se_wr(g, HGS_SE_WRAP_0E30, hgs_se_rd(g, HGS_SE_WRAP_0E30) | 0xfu);
+    hgs_se_wr(g, HGS_SE_OUTPUT_CTRL, 0x7fu);
+    hgs_se_wr(g, HGS_SE_FORCE_DEFAULT, 1u);
+    hgs_se_wr(g, HGS_SE_IRQ_EN, 0);
     uint32_t v = hgs_se_rd(g, HGS_SE_M_IRQ_EN);
     v &= ~(HGS_SE_M_CMD_DONE | HGS_SE_M_TX_FIFO_WM | HGS_SE_M_RX_FIFO_WM | HGS_SE_M_RX_FIFO_LAST);
     hgs_se_wr(g, HGS_SE_M_IRQ_EN, v);
+    // 0x644: bit 0 clear is what the reference leaves behind; the register has no name in
+    // geni-se.h that matches this part, so it is copied verbatim rather than invented.
+    hgs_se_wr(g, HGS_SE_M_CFG_0644, hgs_se_rd(g, HGS_SE_M_CFG_0644) & ~1u);
     hgs_se_wr(g, HGS_SE_GENI_DMA_MODE_EN, hgs_se_rd(g, HGS_SE_GENI_DMA_MODE_EN) | 1u);
     hgs_se_wr(g, HGS_SE_GSI_EVENT_EN, hgs_se_rd(g, HGS_SE_GSI_EVENT_EN) | 0xfu);
+    g->diag[HGS_D_SE_OUT] = hgs_se_rd(g, HGS_SE_OUTPUT_CTRL);
+    g->diag[HGS_D_SE_CGC] = hgs_se_rd(g, HGS_SE_CGC_CTRL);
     g->diag[HGS_D_SE_DMA] = hgs_se_rd(g, HGS_SE_GENI_DMA_MODE_EN);
     g->diag[HGS_D_SE_GSI] = hgs_se_rd(g, HGS_SE_GSI_EVENT_EN);
 }
