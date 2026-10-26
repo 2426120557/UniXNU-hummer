@@ -166,10 +166,11 @@ kernel_args = [
   #   所以 v134 起按键走**自己的 Consumer Control 设备**（primary usage 0x000C/0x0001，
   #   和耳机线控音量键同一种形状），触屏那台键盘/数字化仪设备完全不动。
   #   20 ms 轮询 + 3 次去抖（60 ms，越过 DTS 的 32 ms）。
-  #   0 = 关；1 = 启用；2 = 观察模式：启动 25 秒后 panic，一次打出所有出现过的位
-  #   （PON 的或集、GPIO 的与集）、发出去的 mask、以及 HID 侧"是否被打开 + 上次
-  #   handleReport 返回码"，这样按下去能不能锁屏/调音量在被 panic 覆盖之前就能看到。
-  #   现在用 2：v133 已证明 SPMI→mask→sink→handleReport 全通，要确认的是下游。
+  #   0 = 关；1 = 启用；2 = 观察模式：扫描 PON 状态页（0x10..0x1f）与两颗 PMIC 各 12 个
+  #   GPIO 焊盘的实时状态，报告哪一个真的动过；有东西动过就在最后一次动作 30 秒后 panic，
+  #   什么都没动就等 120 秒（桌面大约 40 秒才起来，25 秒那种窗口太早，v134 就是这么白等的）。
+  #   同时打出 sent mask、按下次数、HID 侧状态（是否被打开 / 是否挂上 event driver / 返回码）。
+  #   现在用 2：v133 已证明 SPMI→mask→sink→handleReport 全通，缺的是电源键从哪读。
   "hummer-keyscan=2",
   # v120 实测（带 hummer-cpu=1 的延迟诊断屏）：
   #   HUMTOUCH cpu processor_count=6 avail=6 max=5 cpus_arg=6

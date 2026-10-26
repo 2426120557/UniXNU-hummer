@@ -34,6 +34,16 @@ constexpr uint32_t kPonPpid = 0x013, kGpioPpid = 0x18d;
 constexpr uint8_t kPowerBit = 1u << 7, kResinBit = 1u << 6, kGpioBit = 1u << 0;
 constexpr uint8_t kRtSts = 0x10;
 constexpr uint32_t kReportPower = 1u << 1, kReportVolumeUp = 1u << 2, kReportVolumeDown = 1u << 3;
+// Where a power key can hide, all read-only. hummer.dts puts pwrkey on interrupt 7 and resin on
+// interrupt 6 of PON peripheral 0x13 (SID 0), so PON_INT_RT_STS at 0x1310 carries one bit per
+// interrupt - but bit 7 stayed clear through v134, and that build never actually got a key press
+// (it panicked mid-boot). Rather than trust the bit positions, read the whole PON status page
+// and the real-time status of all twelve GPIO pads on both PMICs, and report what moved.
+constexpr unsigned kPonProbes = 16;             // PON peripheral offsets 0x10..0x1f
+constexpr unsigned kPads = 12;                  // PMIC GPIO1..12
+constexpr uint8_t kPonFirstOffset = 0x10;
+constexpr uint32_t kPadsPm8550 = 0x188;         // SID 1, pad 1 page (pad n = periph 0x88+n-1)
+constexpr uint32_t kPadsPmk8550 = 0x0b8;        // SID 0, pad 1 page
 
 struct Window { IOMemoryMap *map; volatile uint32_t *va; };
 Window gCore, gCnfg, gObs;
@@ -68,6 +78,10 @@ int findApid(uint32_t ppid) {
 
 uint8_t gPonLast, gGpioLast;
 uint32_t gSent;
+int gPadApid[2][kPads];          // [0] PM8550 (SID 1), [1] PMK8550 (SID 0)
+uint8_t gPonFirst[kPonProbes], gPadFirst[2][kPads];
+uint16_t gPonChanged, gPadChanged[2], gPadLow[2];
+bool gSwept;
 
 // Report-2 bits for the keys currently held.
 uint32_t pressed() {
@@ -101,7 +115,42 @@ bool setup() {
                    ((uint64_t)BR_OBS_APID_STRIDE * gApids + 0xfff) & ~0xfffull)) return false;
     gPon = findApid(kPonPpid);
     gGpio = findApid(kGpioPpid);
+    for (unsigned s = 0; s < 2; ++s) {
+        const uint32_t base = s == 0 ? kPadsPm8550 : kPadsPmk8550;
+        for (unsigned n = 0; n < kPads; ++n) gPadApid[s][n] = findApid(base + n);
+    }
     return gPon >= 0 || gGpio >= 0;
+}
+
+// One read-only pass over every candidate. The first pass records baselines; later passes only
+// compare, so the returned flag means "something changed since the baseline", i.e. a key moved.
+bool sweep() {
+    bool moved = false;
+    uint8_t v;
+    for (unsigned i = 0; i < kPonProbes; ++i) {
+        if (gPon < 0 || br_read8(gObs.va, &gArb, gPon, static_cast<uint8_t>(kPonFirstOffset + i), &v)) continue;
+        if (!gSwept) gPonFirst[i] = v;
+        else if (v != gPonFirst[i]) {
+            gPonChanged = static_cast<uint16_t>(gPonChanged | (1u << i));
+            moved = true;
+        }
+    }
+    for (unsigned s = 0; s < 2; ++s) {
+        for (unsigned n = 0; n < kPads; ++n) {
+            const int apid = gPadApid[s][n];
+            if (apid < 0 || br_read8(gObs.va, &gArb, apid, kRtSts, &v)) continue;
+            if (!gSwept) gPadFirst[s][n] = v;
+            else {
+                if (v != gPadFirst[s][n]) {
+                    gPadChanged[s] = static_cast<uint16_t>(gPadChanged[s] | (1u << n));
+                    moved = true;
+                }
+                if (!(v & 1u)) gPadLow[s] = static_cast<uint16_t>(gPadLow[s] | (1u << n));
+            }
+        }
+    }
+    gSwept = true;
+    return moved;
 }
 
 void buttonsThread(void *, wait_result_t) {
@@ -114,15 +163,14 @@ void buttonsThread(void *, wait_result_t) {
         return;
     }
     uint32_t last = 0, candidate = 0, masks = 0;
-    unsigned settled = 0, ticks = 0, presses = 0;
-    // OR of every PON status byte and AND of every GPIO status byte seen: the first shows the
-    // bits that were ever asserted (so a key whose bit we guessed wrong still shows up), the
-    // second the bits that were ever pulled low on the active-low pad.
-    uint8_t ponOr = 0, gpioAnd = 0xff;
+    unsigned settled = 0, ticks = 0, presses = 0, lastMove = 0;
+    bool everMoved = false;
     for (;;) {
         const uint32_t mask = pressed();
-        ponOr |= gPonLast;
-        gpioAnd &= gGpioLast;
+        if (sweep()) {
+            everMoved = true;
+            lastMove = ticks;
+        }
         if (mask == candidate) {
             if (++settled >= 3 && mask != last) {
                 last = mask;
@@ -138,14 +186,21 @@ void buttonsThread(void *, wait_result_t) {
             candidate = mask;
             settled = 0;
         }
-        // hummer-keyscan=2: one screen, 25 s in. Pressing a key before that still reaches the
-        // system, so a lock/wake or a volume change is observable instead of being preempted.
-        if (gVerbose && ++ticks >= 1250) {
+        // hummer-keyscan=2: the desktop is up roughly 40 s in, so wait 120 s before forcing the
+        // readout - or 30 s after the last probe moved, so the effect of a press is visible
+        // before the panic covers the screen.
+        if (gVerbose && ((everMoved && ticks - lastMove >= 1500) || ticks >= 6000)) {
             const uint32_t st = (&native_buttons_status) ? native_buttons_status() : 0xffffffffu;
-            panic("HUMTOUCH btn p%u m%08x st%04x\n"
-                  "HUMTOUCH btn pon|%02x %02x gpio&%02x %02x",
-                  presses, masks, st, ponOr, gPonLast, gpioAnd, gGpioLast);
+            panic("HUMTOUCH btn2 p%u m%08x st%04x\n"
+                  "HUMTOUCH btn2 pon chg%04x v%02x\n"
+                  "HUMTOUCH btn2 p1 chg%04x low%04x\n"
+                  "HUMTOUCH btn2 p0 chg%04x low%04x",
+                  presses, masks, st,
+                  gPonChanged, gPonFirst[0],
+                  gPadChanged[0], gPadLow[0],
+                  gPadChanged[1], gPadLow[1]);
         }
+        ++ticks;
         IOSleep(20);
     }
 }
