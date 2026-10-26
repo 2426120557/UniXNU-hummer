@@ -55,6 +55,7 @@ void *volatile gSinkContext;
 
 uint32_t gVersion;
 int gVerbose;
+int gMenuProbe;                 // hummer-key-menu=1: report every key as Consumer Menu (Home)
 
 bool mapWindow(Window &w, uint64_t base, uint64_t size) {
     IODeviceMemory *memory = IODeviceMemory::withRange(base, size);
@@ -174,12 +175,16 @@ void buttonsThread(void *, wait_result_t) {
         if (mask == candidate) {
             if (++settled >= 3 && mask != last) {
                 last = mask;
+                // hummer-key-menu=1 replaces whatever the key means with Consumer Menu, so a
+                // single press tells us whether Consumer events from this device reach iOS at
+                // all - Home works without an audio route, "Power 0x30" and volume do not.
+                const uint32_t send = (gMenuProbe && mask) ? 1u : mask;
                 void (*sink)(void *, uint32_t) = __atomic_load_n(&gSink, __ATOMIC_ACQUIRE);
-                if (sink) sink(gSinkContext, mask);
+                if (sink) sink(gSinkContext, send);
                 if (sink) ++gSent;
-                if (mask) {
+                if (send) {
                     ++presses;
-                    masks |= mask;
+                    masks |= send;
                 }
             }
         } else {
@@ -218,6 +223,8 @@ extern "C" void hummer_buttons_probe(void) {
     unsigned enabled = 0;
     if (!PE_parse_boot_argn("hummer-keyscan", &enabled, sizeof enabled) || !enabled) return;
     gVerbose = enabled >= 2 ? 1 : 0;
+    unsigned menu = 0;
+    if (PE_parse_boot_argn("hummer-key-menu", &menu, sizeof menu) && menu) gMenuProbe = 1;
     thread_t thread = nullptr;
     if (kernel_thread_start(buttonsThread, nullptr, &thread) == KERN_SUCCESS) thread_deallocate(thread);
 }

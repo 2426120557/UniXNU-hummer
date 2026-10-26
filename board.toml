@@ -170,8 +170,15 @@ kernel_args = [
   #   GPIO 焊盘的实时状态，报告哪一个真的动过；有东西动过就在最后一次动作 30 秒后 panic，
   #   什么都没动就等 120 秒（桌面大约 40 秒才起来，25 秒那种窗口太早，v134 就是这么白等的）。
   #   同时打出 sent mask、按下次数、HID 侧状态（是否被打开 / 是否挂上 event driver / 返回码）。
-  #   现在用 2：v133 已证明 SPMI→mask→sink→handleReport 全通，缺的是电源键从哪读。
-  "hummer-keyscan=2",
+  #   v135 屏已经把"读"这一半彻底证实：p4 m0000000e st0002 —— 电源键（PON bit7）、
+  #   RESIN（bit6）、GPIO6 三个都读到了，三个报告位都发过，且 IOHIDEventDriver 确实挂在
+  #   新的 Consumer Control 设备下面。剩下唯一的问题是 iOS 认不认这些 Consumer usage。
+  #   所以这一版回到 1（不 panic，可以正常玩），并打开下面那个 Menu 探针。
+  "hummer-keyscan=1",
+  # hummer-key-menu=1：把任何按键都报成 Consumer Menu（= iOS 的 Home）。
+  # 目的：一次按键就能分开"Consumer 事件根本没到"和"到了但 iOS 不认 Power 0x30 / 没有音频
+  # 所以音量无声"。按一下音量键回到桌面 = Consumer 通路是好的。
+  "hummer-key-menu=1",
   # v120 实测（带 hummer-cpu=1 的延迟诊断屏）：
   #   HUMTOUCH cpu processor_count=6 avail=6 max=5 cpus_arg=6
   # 六核全部注册，SMP 通了，所以这里不再带诊断参数。需要再量一次就把
