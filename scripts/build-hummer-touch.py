@@ -148,8 +148,7 @@ rpmh_command += ['-Wall', '-Wextra', '-mgeneral-regs-only',
                  '-I', str(ROOT / 'kits/hummer')]
 if rpmh_command and rpmh_command[0] in ('clang', 'cc', 'clang++'):
     rpmh_command = ['xcrun', '--sdk', 'iphoneos', rpmh_command[0]] + rpmh_command[1:]
-(OUT / 'compile-command-rpmh.json').write_text(json.dumps(rpmh_command, indent=2) + '
-')
+(OUT / 'compile-command-rpmh.json').write_text(json.dumps(rpmh_command, indent=2) + '\n')
 run(rpmh_command, rpmh_dir)
 audit(OUT / 'HummerRpmh.o')
 
