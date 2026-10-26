@@ -27,6 +27,7 @@ PROBE = ROOT / 'kits/hummer/HummerTouchProbe.cpp'
 GSI = ROOT / 'kits/hummer/HummerGsi.c'
 GSI_H = ROOT / 'kits/hummer/HummerGsi.h'
 RPMH = ROOT / 'kits/hummer/HummerRpmh.c'
+SPMI = ROOT / 'kits/hummer/HummerSpmi.c'
 GENI = ROOT / 'drivers/NativeGeniSpi/GeniSpi.c'
 GENI_H = ROOT / 'drivers/NativeGeniSpi/GeniSpi.h'
 
@@ -152,8 +153,19 @@ if rpmh_command and rpmh_command[0] in ('clang', 'cc', 'clang++'):
 run(rpmh_command, rpmh_dir)
 audit(OUT / 'HummerRpmh.o')
 
+# SPMI PMIC-arbiter read path (package/HummerSpmi.c): the volume key is PM8550 GPIO6, so
+# the key probe needs one SPMI register read. Same kernel C flags and record as RPMh.
+spmi_command, spmi_dir = replay(C_RECORD, SPMI, OUT / 'HummerSpmi.o')
+spmi_command += ['-Wall', '-Wextra', '-mgeneral-regs-only',
+                 '-I', str(ROOT / 'kits/hummer')]
+if spmi_command and spmi_command[0] in ('clang', 'cc', 'clang++'):
+    spmi_command = ['xcrun', '--sdk', 'iphoneos', spmi_command[0]] + spmi_command[1:]
+(OUT / 'compile-command-spmi.json').write_text(json.dumps(spmi_command, indent=2) + '\n')
+run(spmi_command, spmi_dir)
+audit(OUT / 'HummerSpmi.o')
+
 archive = OUT / 'libHummerTouch.a'
 archive.unlink(missing_ok=True)
 subprocess.run(['xcrun', 'ar', 'rcs', archive, OUT / 'HummerTouchProbe.o', OUT / 'GeniSpi.o',
-                OUT / 'HummerGsi.o', OUT / 'HummerRpmh.o'], check=True)
-print('HummerTouch: ARM64/iOS 17 object audit passed (probe + GeniSpi + GSI + RPMh)')
+                OUT / 'HummerGsi.o', OUT / 'HummerRpmh.o', OUT / 'HummerSpmi.o'], check=True)
+print('HummerTouch: ARM64/iOS 17 object audit passed (probe + GeniSpi + GSI + RPMh + SPMI)')

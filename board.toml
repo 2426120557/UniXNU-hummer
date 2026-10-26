@@ -143,8 +143,13 @@ kernel_args = [
   "sheng-smp=1", "sheng-smp-gic=1",
   "hummer-touch=4", "hummer-touch-panic=0", "hummer-touch-fifo=1",
   "hummer-touch-fy=0",
-  # v122 按键引脚发现：只读扫描所有焊盘的输入位，12 秒后开始监视，
-  # 哪个脚被拉低并保持 ~240 ms 就 panic 报它的编号。按住音量键两秒即可。
+  # v124 音量键：UEFI 树里的 Resources/DTBs/hummer.dts（就是本内核启动用的那份 DTB）
+  #   写着 gpio_keys/vol_down = <&pm8550_gpios 6 GPIO_ACTIVE_LOW>、code = 0x72
+  #   (KEY_VOLUMEDOWN)、pinctrl "gpio6" 上拉输入。也就是说它不在 TLMM 上，而在
+  #   PM8550 GPIO6（SPMI USID 1，pad 实时状态 0x8D10）。key_vol_up_default 无人引用，
+  #   这台机器只有一个音量键。
+  # 这一版用新增的 HummerSpmi.c 读那个寄存器：12 秒后每 20 ms 采样，连续三次低电平
+  #   （~60 ms，越过 DTS 的 32 ms 去抖）就 panic 打印 SPMI 诊断（版本/APID/状态）。
   "hummer-keyscan=1",
   # v120 实测（带 hummer-cpu=1 的延迟诊断屏）：
   #   HUMTOUCH cpu processor_count=6 avail=6 max=5 cpus_arg=6

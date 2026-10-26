@@ -89,6 +89,28 @@ static inline uint64_t tb_src_hz(unsigned sel) {return sel==0?19200000ULL:sel==1
 #define TB_GPIO_SPI_CS 51
 #define TB_GPIO_RESET 161                    // reset-gpios = <&tlmm 161 GPIO_ACTIVE_LOW>
 #define TB_GPIO_IRQ 162                      // interrupts = <162 IRQ_TYPE_LEVEL_LOW>; bring-up polls instead
+
+// The volume key is NOT on TLMM. hummer.dts (the copy in the UEFI tree, same file this
+// kernel boots with) has exactly one gpio-keys child:
+//     gpio_keys { pinctrl-0 = <&key_vol_down_default>;
+//                 vol_down { gpios = <&pm8550_gpios 6 GPIO_ACTIVE_LOW>;
+//                            linux,code = <0x72>;  /* KEY_VOLUMEDOWN */
+//                            debounce-interval = <0x20>; }; };
+// with pinctrl  "gpio6" / function normal / input-enable / bias-pull-up / power-source 1.
+// key_vol_up_default exists but nothing references it, so this board has one volume key.
+// PM8550 is SPMI USID 1; pinctrl-spmi-gpio places pad n at 0x8800 + (n-1)*0x100 and the
+// real-time status (bit 0 = level) at +0x10, and of_xlate subtracts PMIC_GPIO_PHYSICAL_OFFSET
+// (1) from the cell value 6 -> pad index 5 -> 0x8D10. Pull-up + active-low means released
+// reads 1 and pressed reads 0.
+#define TB_SPMI_CORE_BASE 0x0c400000ULL      // reg-names "core",  0x3000
+#define TB_SPMI_CORE_SIZE 0x3000ULL
+#define TB_SPMI_CHNLS_BASE 0x0c500000ULL     // reg-names "chnls", 0x400000
+#define TB_SPMI_CHNLS_SIZE 0x400000ULL
+#define TB_SPMI_OBS_BASE 0x0c440000ULL       // reg-names "obsrvr", 0x80000
+#define TB_SPMI_OBS_SIZE 0x80000ULL
+#define TB_PM8550_SID 1
+#define TB_PM8550_VOLKEY 0x8d10ULL           // GPIO6 real-time status
+#define TB_PM8550_GPIO6_CNTL 0x8d00ULL       // same pad, control register (for the diag row)
 // pinctrl-msm.c writes the GROUP-LOCAL function index (position in the PINGROUP funcs
 // array), not the global pinctrl enum value, and pinctrl-msm.h hard-codes msm_mux_gpio
 // at funcs[0]. The target kernel's own table (drivers/pinctrl/qcom/pinctrl-sm8750.c in

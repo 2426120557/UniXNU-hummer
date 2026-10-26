@@ -26,6 +26,7 @@ extern "C" {
 #include "GeniSpi.h"
 #include "HummerGsi.h"
 #include "HummerRpmh.h"
+#include "HummerSpmi.h"
 #include "HummerTouchBoard.h"
 }
 
@@ -910,49 +911,68 @@ static void cpuReportThread(void *, wait_result_t) {
           processor_avail_count, ml_get_max_cpu_number(), requested);
 }
 
-// ---- key pin discovery ---------------------------------------------------------------
-// Nothing in the tree records which TLMM pads carry the volume keys: hummer's bring-up DT
-// only has the PMIC PON power key, and the vendor DT is not part of this repo. Instead of
-// guessing (and instead of reconfiguring pins, which could take the running system down),
-// this samples every pad's input bit - the IO register bit 0 is the pad slice whatever the
-// mux is - and reports the first pad that goes high->low and STAYS low. A finger on the
-// volume key holds it low for hundreds of milliseconds; bus traffic and the touch IRQ
-// toggle for microseconds, so a 240 ms persistence test separates them.
-//
-//   hummer-keyscan=1   wait 12 s for the UI, snapshot, then panic on the first held key
+// ---- volume key -----------------------------------------------------------------------
+// The key is not on TLMM at all. hummer.dts - the copy that lives in the UEFI tree, i.e.
+// the exact file this kernel boots from - has a single gpio-keys child:
+//     gpio_keys { pinctrl-0 = <&key_vol_down_default>;
+//                 vol_down { gpios = <&pm8550_gpios 6 GPIO_ACTIVE_LOW>;
+//                            linux,code = <0x72>;            /* KEY_VOLUMEDOWN */
+//                            debounce-interval = <0x20>; }; };
+// with pinconf "gpio6" / function normal / input-enable / bias-pull-up / power-source 1,
+// and key_vol_up_default is referenced by nothing, so this board has one volume key.
+// PM8550 is SPMI USID 1; pinctrl-spmi-gpio puts pad n at 0x8800 + (n-1)*0x100 with the
+// real-time status at +0x10, and of_xlate subtracts PMIC_GPIO_PHYSICAL_OFFSET (1) from the
+// cell's 6 -> pad 5 -> 0x8D10. Pull-up plus active-low: released reads 1, pressed reads 0.
+// This replaces the earlier all-pads TLMM sweep, which could never have found this key -
+// but the pad itself is the useful part of the answer: read it, and the HID side only has
+// to carry a KEY_VOLUMEDOWN report.
+//   hummer-keyscan=1   wait 12 s for the UI, then poll every 20 ms and panic on the third
+//                      consecutive low sample (~60 ms, comfortably past the DTS' 32 ms
+//                      debounce), printing the SPMI diagnostics needed to read the result.
 static void keyScanThread(void *, wait_result_t) {
-    Region tlmm;
-    if (!mapRegion(TB_TLMM_BASE, 0x102000, tlmm)) { panic("HUMTOUCH key: TLMM map failed"); return; }
-    enum { kPins = 224, kWords = (kPins + 31) / 32 };
-    static uint32_t snap[kWords], now[kWords];
-    static uint8_t lowRun[kPins];
-    auto readAll = [&](uint32_t *bitmap) {
-        for (unsigned w = 0; w < kWords; ++w) bitmap[w] = 0;
-        for (unsigned pin = 0; pin < kPins; ++pin) {
-            // Skip the four SPI4 pads and the touch reset/IRQ: they are ours and they toggle.
-            if (pin >= TB_GPIO_SPI_MISO && pin <= TB_GPIO_SPI_CS) continue;
-            if (pin == TB_GPIO_RESET || pin == TB_GPIO_IRQ) continue;
-            if (rd32(tlmm.va, pin * TB_GPIO_STRIDE + 4) & 1u) bitmap[pin / 32] |= 1u << (pin % 32);
-        }
-    };
+    Region core, chnls, obs;
+    if (!mapRegion(TB_SPMI_CORE_BASE, TB_SPMI_CORE_SIZE, core) ||
+        !mapRegion(TB_SPMI_CHNLS_BASE, TB_SPMI_CHNLS_SIZE, chnls) ||
+        !mapRegion(TB_SPMI_OBS_BASE, TB_SPMI_OBS_SIZE, obs)) {
+        panic("HUMTOUCH key: SPMI window map failed");
+        return;
+    }
+    struct hspmi spmi;
+    hspmi_init(&spmi, reinterpret_cast<void *>(core.va),
+               reinterpret_cast<void *>(chnls.va), reinterpret_cast<void *>(obs.va));
+
+    // One read before the sleep: it warms the APID lookup and preserves what the very
+    // first transfer said, which is what separates "no APID for this ppid" from "the bus
+    // timed out" when the screen is all we have.
+    const uint32_t first = hspmi_read8(&spmi, TB_PM8550_SID, TB_PM8550_VOLKEY);
+    const int firstRc = static_cast<int>(spmi.err);
+    const uint32_t firstStatus = spmi.last_status;
+    const uint32_t apid = spmi.last_apid;
+    const uint32_t map = spmi.last_map;
+    const uint32_t ppid = spmi.last_ppid;
+
     IOSleep(12000);
-    readAll(snap);
+
+    unsigned lowRun = 0;
+    uint32_t last = first;
     for (;;) {
-        readAll(now);
-        for (unsigned pin = 0; pin < kPins; ++pin) {
-            const bool wasHigh = (snap[pin / 32] >> (pin % 32)) & 1u;
-            const bool isHigh = (now[pin / 32] >> (pin % 32)) & 1u;
-            if (wasHigh && !isHigh) {
-                if (lowRun[pin] < 255) ++lowRun[pin];
-                if (lowRun[pin] == 12) {          // ~240 ms: held, not traffic
-                    panic("HUMTOUCH key pin=%u\nHUMTOUCH key snap %08x %08x %08x %08x %08x %08x %08x\n"
-                          "HUMTOUCH key now  %08x %08x %08x %08x %08x %08x %08x",
-                          pin, snap[0], snap[1], snap[2], snap[3], snap[4], snap[5], snap[6],
-                          now[0], now[1], now[2], now[3], now[4], now[5], now[6]);
-                }
-            } else {
-                lowRun[pin] = 0;
+        const uint32_t v = hspmi_read8(&spmi, TB_PM8550_SID, TB_PM8550_VOLKEY);
+        const uint32_t status = spmi.last_status;
+        if (v != 0xffffffffu) last = v;
+        if (v != 0xffffffffu && (v & 1u) == 0) {
+            if (++lowRun == 3) {
+                const uint32_t cntl = hspmi_read8(&spmi, TB_PM8550_SID, TB_PM8550_GPIO6_CNTL);
+                panic("HUMTOUCH key ver%08x k%u pp%03x ap%u\n"
+                      "HUMTOUCH key map %08x rc%d st%08x\n"
+                      "HUMTOUCH key rt %02x/%02x low%u\n"
+                      "HUMTOUCH key cntl %02x err%d",
+                      spmi.version, spmi.kind, ppid, apid,
+                      map, firstRc, status,
+                      first, last, lowRun,
+                      cntl, static_cast<int>(spmi.err));
             }
+        } else {
+            lowRun = 0;
         }
         IOSleep(20);
     }
