@@ -162,6 +162,10 @@ kernel_args = [
   #   1 = 启用；2 = 启用并按第一次键时 panic 打印 SPMI/HID 返回码（排错用）；0 = 关。
   # 音量上键不在这份 DTB 里（key_vol_up_default 定义了却无人引用），本版只做音量减。
   "hummer-keyscan=1",
+  # v127 IPI 诊断：12 秒后读 GICD_TYPER（1008 这个 INTID 存不存在）、1008 的使能/组/
+  #   优先级/路由、软件 pend 能否挂上，以及 ArmCpu 自己的 sent/rcvd 计数和一次自检。
+  #   一屏定死"没发出去"还是"发了没送到"。看完删掉。
+  "hummer-ipidiag=1",
   # v120 实测（带 hummer-cpu=1 的延迟诊断屏）：
   #   HUMTOUCH cpu processor_count=6 avail=6 max=5 cpus_arg=6
   # 六核全部注册，SMP 通了，所以这里不再带诊断参数。需要再量一次就把

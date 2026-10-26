@@ -102,6 +102,11 @@ static inline uint64_t tb_src_hz(unsigned sel) {return sel==0?19200000ULL:sel==1
 // real-time status (bit 0 = level) at +0x10, and of_xlate subtracts PMIC_GPIO_PHYSICAL_OFFSET
 // (1) from the cell value 6 -> pad index 5 -> 0x8D10. Pull-up + active-low means released
 // reads 1 and pressed reads 0.
+// GICv3, from sm8750.dtsi: intc@16000000 (GICD) and its redistributors at 0x16080000.
+#define TB_GICD_BASE 0x16000000ULL
+#define TB_GICD_SIZE 0x10000ULL
+#define TB_GICR_BASE 0x16080000ULL
+#define TB_GICR_SIZE 0x200000ULL
 #define TB_SPMI_CORE_BASE 0x0c400000ULL      // reg-names "core",  0x3000
 #define TB_SPMI_CORE_SIZE 0x3000ULL
 #define TB_SPMI_CHNLS_BASE 0x0c500000ULL     // reg-names "chnls", 0x400000

@@ -1000,12 +1000,85 @@ static void keyScanThread(void *, wait_result_t) {
     }
 }
 
+// ---- IPI diagnosis ---------------------------------------------------------------------
+// The restartable panic only tells us an ACK never came. These four things decide whether an
+// inter-core signal can arrive at all, and none of them is visible from the panic screen:
+//   - the distributor's implemented-interrupt count: GICD_TYPER.ITLinesNumber * 32 is the
+//     highest INTID the hardware has. ArmCpu hardcodes its software IPI at INTID 1008.
+//   - whether 1008 is enabled, in which group, at what priority and routed where;
+//   - whether writing ISPENDR makes it pend. The GIC only keeps that bit for an INTID it
+//     actually implements, so this answers "does this line exist" without guessing;
+//   - ArmCpu's own sent / received counters, plus one self-test signal, which separates
+//     "never sent" from "sent but never delivered".
+//   hummer-ipidiag=1
+extern "C" unsigned int gFastIPI;
+extern "C" volatile uint64_t armcpu_ipi_sent;
+extern "C" volatile uint64_t armcpu_ipi_interrupts;
+extern "C" void armcpu_ipi_selftest(uint64_t aff);
+
+static void ipiDiagThread(void *, wait_result_t) {
+    Region gd, gr;
+    if (!mapRegion(TB_GICD_BASE, TB_GICD_SIZE, gd) ||
+        !mapRegion(TB_GICR_BASE, TB_GICR_SIZE, gr)) {
+        panic("HUMTOUCH ipi: GIC map failed");
+        return;
+    }
+    IOSleep(12000);
+
+    const uint32_t typer = rd32(gd.va, 0x0004);
+    const uint32_t iidr = rd32(gd.va, 0x0018);
+    const uint32_t lines = (typer & 0x1fu) + 1u;     // implemented INTIDs = 32 * lines
+
+    const uint32_t id = 1008;
+    const uint32_t en = rd32(gd.va, 0x0100 + (id / 32) * 4);
+    const uint32_t grp = rd32(gd.va, 0x0080 + (id / 32) * 4);
+    const uint32_t prio = rd32(gd.va, 0x0400 + (id / 4) * 4);
+    const uint64_t route = *reinterpret_cast<volatile uint64_t *>(gd.va + 0x6000 + 8ull * id);
+
+    // Software pend, read back, then clear: a line the hardware does not have reads 0.
+    wr32(gd.va, 0x0200 + (id / 32) * 4, 1u << (id % 32));
+    __asm__ __volatile__("dsb sy" ::: "memory");
+    const uint32_t pend = rd32(gd.va, 0x0200 + (id / 32) * 4);
+    wr32(gd.va, 0x0280 + (id / 32) * 4, 1u << (id % 32));
+    __asm__ __volatile__("dsb sy" ::: "memory");
+
+    const uint64_t rd0typer = *reinterpret_cast<volatile uint64_t *>(gr.va + 0x0008);
+    const uint32_t rd0waker = rd32(gr.va, 0x0014);
+    const uint64_t rd1typer = *reinterpret_cast<volatile uint64_t *>(gr.va + 0x20008);
+    const uint32_t rd1waker = rd32(gr.va, 0x20014);
+
+    const uint64_t sent0 = armcpu_ipi_sent, rcvd0 = armcpu_ipi_interrupts;
+    if (&armcpu_ipi_selftest) armcpu_ipi_selftest(0x100);
+    IOSleep(200);
+    const uint64_t sent1 = armcpu_ipi_sent, rcvd1 = armcpu_ipi_interrupts;
+
+    panic("HUMTOUCH ipi typer%08x iidr%08x lines%u\n"
+          "HUMTOUCH ipi en%08x grp%08x prio%08x pend%08x\n"
+          "HUMTOUCH ipi route%016llx fast%u\n"
+          "HUMTOUCH ipi rd0 %016llx w%08x rd1 %016llx w%08x\n"
+          "HUMTOUCH ipi sent %llu->%llu rcvd %llu->%llu",
+          typer, iidr, lines,
+          en, grp, prio, pend,
+          static_cast<unsigned long long>(route), gFastIPI,
+          static_cast<unsigned long long>(rd0typer), rd0waker,
+          static_cast<unsigned long long>(rd1typer), rd1waker,
+          static_cast<unsigned long long>(sent0), static_cast<unsigned long long>(sent1),
+          static_cast<unsigned long long>(rcvd0), static_cast<unsigned long long>(rcvd1));
+}
+
 extern "C" void native_touch_probe(void) {
     unsigned stage = 0;
     int cpuReport = 0;
     if (PE_parse_boot_argn("hummer-cpu", &cpuReport, sizeof cpuReport) && cpuReport) {
         thread_t thread = nullptr;
         if (kernel_thread_start(cpuReportThread, nullptr, &thread) == KERN_SUCCESS) thread_deallocate(thread);
+    }
+    int ipiDiag = 0;
+    if (PE_parse_boot_argn("hummer-ipidiag", &ipiDiag, sizeof ipiDiag) && ipiDiag) {
+        thread_t diagThread = nullptr;
+        if (kernel_thread_start(ipiDiagThread, nullptr, &diagThread) == KERN_SUCCESS) {
+            thread_deallocate(diagThread);
+        }
     }
     int keyscan = 0;
     if (PE_parse_boot_argn("hummer-keyscan", &keyscan, sizeof keyscan) && keyscan) {
