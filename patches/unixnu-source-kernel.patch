@@ -1889,7 +1889,7 @@ new file mode 100644
 index 0000000..9747910
 --- /dev/null
 +++ b/patches/xnu/zzzz-early-boot-progress.patch
-@@ -0,0 +1,218 @@
+@@ -0,0 +1,234 @@
 +--- a/osfmk/arm64/start.s
 ++++ b/osfmk/arm64/start.s
 +@@ -224,7 +224,11 @@
@@ -1961,12 +1961,27 @@ index 0000000..9747910
 + 1:
 + 	MSR_VBAR_EL1_X0
 + 
-+@@ -771,6 +805,18 @@
++@@ -771,6 +805,34 @@
 + 	cmp		x0, x1
 + 	bne		.
 + #endif /* !VMAPPLE */
 ++
 ++#if XNU_EARLY_BOOT_PROGRESS
+++	// x21 is the cpu_data pointer: zero on the boot CPU, set on a secondary.
+++	// The early vector table belongs to BootProgress and turns every exception
+++	// into a fatal stop; only the boot CPU ever calls
+++	// early_boot_progress_vectors_done(), so a secondary that kept using it died
+++	// on its first timer interrupt. Secondaries take the kernel's own vectors
+++	// here instead, immediately after the MMU is on.
+++	cbz	x21, 3f
+++	adrp x0, EXT(ExceptionVectorsBase)@page
+++	add x0, x0, EXT(ExceptionVectorsBase)@pageoff
+++	add x0, x0, x22
+++	sub x0, x0, x23
+++	msr VBAR_EL1, x0
+++	isb
+++	b	4f
+++3:
 ++	adrp x0, EXT(early_boot_progress_vectors)@page
 ++	add x0, x0, EXT(early_boot_progress_vectors)@pageoff
 ++	add x0, x0, x22
@@ -1976,6 +1991,7 @@ index 0000000..9747910
 ++	mov x28, lr
 ++	bl EXT(early_boot_progress_mmu_on)
 ++	mov lr, x28
+++4:
 ++#endif
 + 
 + #if (!CONFIG_KERNEL_INTEGRITY || (CONFIG_KERNEL_INTEGRITY && !defined(KERNEL_INTEGRITY_WT)))
@@ -2108,6 +2124,7 @@ index 0000000..9747910
 ++#define boot_progress_kernel_exception(...) ((void)0)
 ++#endif
 ++#endif
+
 diff --git a/patches/xnu/zzzzz-root-panic-progress.patch b/patches/xnu/zzzzz-root-panic-progress.patch
 new file mode 100644
 index 0000000..0cce1f6
