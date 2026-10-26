@@ -179,7 +179,7 @@ struct Session {
     unsigned level = 0, div = 0;
     uint64_t actualHz = 0;
     uint32_t vals[24];                // live register snapshot for the panic readout
-    uint32_t dbg[17];                 // SE + S4 RCG config read right after a failed transfer (bring-up diagnostics)
+    uint32_t dbg[22];                 // SE + S4 RCG config read right after a failed transfer (bring-up diagnostics)
     unsigned traceN;                  // first successful transfers on the wire
     uint32_t traceLen[8];
     uint8_t traceTx[8][6], traceRx[8][6];
@@ -602,6 +602,11 @@ bool openGsi(Session &s) {
     // every context bank). The GPI's stream must be registered here or its DMA faults.
     if (!mapRegion(TB_APPS_SMMU_BASE, 0xd0000ull, s.smmu)) {fail(4, TCM_EIO); return false;}
     s.gsi.smmu = s.smmu.va;
+    // Clear any stale global fault, then remember the state so the readout after the failed
+    // transfer can prove whether the SMMU actually blocked the GPI. sGFSR is W1C.
+    s.dbg[17] = rd32(s.smmu.va, 0x48);            // sGFSR before
+    wr32(s.smmu.va, 0x48, s.dbg[17]);
+    s.dbg[18] = rd32(s.smmu.va, 0x48);            // should read 0 now
     // One physically contiguous block holds the event ring, the TX ring and the RX
     // ring. Rings must be aligned to their length (4096 / 1024 / 1024), so the block is
     // page aligned first; the spare page absorbs whatever the allocator hands out.
@@ -637,7 +642,7 @@ bool openGsi(Session &s) {
 
 // Panic readout: the panic screen is the only console this bring-up has.
 void panicReadout(const Session &s, const char *why) {
-    static char text[2500];
+    static char text[2800];
     const uint32_t *v = s.vals;
     const uint32_t *d = s.gsi.diag;
     snprintf(text, sizeof text,
@@ -654,7 +659,11 @@ void panicReadout(const Session &s, const char *why) {
         "HUMTOUCH gsiev %08x %08x %08x %08x irq%08x glob%08x errl%08x errl2%08x sdma%08x sgsi%08x\n"
         "HUMTOUCH gsierr e0%08x e1%08x e2%08x e3%08x e4%08x\n"
         "HUMTOUCH gsiee st%08x sw%08x hw2%08x hw4%08x\n"
-        "HUMTOUCH smmu str%08x rc%d smr%08x s2cr%08x cbar%08x idr0%08x idr1%08x bank%u cba2%08x\n"
+        "HUMTOUCH smmu str%08x rc%d b%u cb2%08x\n"
+        "HUMTOUCH smr  %08x s2cr%08x cbar%08x\n"
+        "HUMTOUCH smid idr0%08x idr1%08x\n"
+        "HUMTOUCH smgf pre%08x clr%08x post%08x\n"
+        "HUMTOUCH smgy yn0%08x yn1%08x\n"
         "HUMTOUCH tpin g162c%08x irqb%08x irqa%08x g161%08x",
         why, native_htouch_stage_done, native_htouch_stage_req, native_htouch_step, native_htouch_error,
         v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[9], v[10], v[11], v[12],
@@ -684,8 +693,10 @@ void panicReadout(const Session &s, const char *why) {
         d[HGS_D_SE_DMA], d[HGS_D_SE_GSI],
         d[HGS_D_E0], d[HGS_D_E1], d[HGS_D_E2], d[HGS_D_E3], d[HGS_D_E4],
         d[HGS_D_STAT], d[HGS_D_SWVER], d[HGS_D_HWP2], d[HGS_D_HWP4],
-        d[HGS_D_SMMU], (int)d[HGS_D_SMMU_RC], d[HGS_D_SMR], d[HGS_D_S2CR], d[HGS_D_CBAR],
-        d[HGS_D_SMMU_IDR0], d[HGS_D_SMMU_IDR1], d[HGS_D_SMMU_BANK], d[HGS_D_SMMU_CBA2R],
+        d[HGS_D_SMMU], (int)d[HGS_D_SMMU_RC], d[HGS_D_SMMU_BANK], d[HGS_D_SMMU_CBA2R],
+        d[HGS_D_SMR], d[HGS_D_S2CR], d[HGS_D_CBAR],
+        d[HGS_D_SMMU_IDR0], d[HGS_D_SMMU_IDR1],
+        s.dbg[17], s.dbg[18], s.dbg[19], s.dbg[20], s.dbg[21],
         s.dbg[14], s.dbg[15], s.dbg[16], v[13]);
     panic("%s", text);
 }
@@ -754,7 +765,14 @@ static void touchThread(void *, wait_result_t) {
         if (gPanicAfter == 7) panicReadout(*s, "buffers done");
         const int r = tcmResetAndIdentify(*s);
         s->idRc = static_cast<unsigned>(r);
-        if (r) {snapSe(*s); fail(5, r); checkpointFail(*s); break;}
+        if (r) {
+            // Did the SMMU block the engine? sGFSR records any global fault (W1C, cleared
+            // before the attempt) and sGFSYNR1 carries the SID that caused it.
+            s->dbg[19] = rd32(s->smmu.va, 0x48);   // sGFSR after
+            s->dbg[20] = rd32(s->smmu.va, 0x58);   // sGFSYNR0
+            s->dbg[21] = rd32(s->smmu.va, 0x5c);   // sGFSYNR1 (SID)
+            snapSe(*s); fail(5, r); checkpointFail(*s); break;
+        }
         checkpoint(3, *s);
         if (stage < 4) break;
         // GET_APP_INFO (payload at rx+2, s.lastLength set by the accepted receive):
