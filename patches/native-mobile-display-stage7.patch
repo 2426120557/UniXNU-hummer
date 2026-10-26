@@ -1,7 +1,8 @@
 diff --git a/NativeLegacyDisplay.cpp b/NativeLegacyDisplay.cpp
+index 09f8e4d..95f891d 100644
 --- a/NativeLegacyDisplay.cpp
 +++ b/NativeLegacyDisplay.cpp
-@@ -6,6 +6,8 @@
+@@ -6,11 +6,16 @@
  #include <IOKit/IOLib.h>
  #include <IOKit/IOMemoryDescriptor.h>
  #include <IOKit/IOWorkLoop.h>
@@ -10,7 +11,15 @@ diff --git a/NativeLegacyDisplay.cpp b/NativeLegacyDisplay.cpp
  #include <IOKit/pwr_mgt/IOPM.h>
  #include <IOKit/pwr_mgt/IOPMpowerState.h>
  #include <libkern/c++/OSData.h>
-@@ -35,6 +37,16 @@
+ #include <pexpert/pexpert.h>
+ extern "C" __attribute__((noreturn)) void native_legacy_backend_guard(unsigned,void *,void *);
++// Slots the system calls but this backend does not implement: record and return instead of
++// stopping the boot (they all return void).
++extern "C" void native_legacy_backend_ignore(unsigned,void *,void *);
+ extern "C" IOService *native_legacy_display_allocate(void);
+ extern "C" bool native_legacy_gop_mapping_observed(IOService *,IOMemoryMap *,uint32_t,uint32_t);
+ extern "C" void native_legacy_registration_observed(IOService *);
+@@ -35,6 +40,16 @@ extern "C" void native_legacy_retirement_observed(IOService *);
  // client reports the GPU copy done (native_legacy_gpu_complete). A refused offer or a failed copy uses the CPU copy below and is counted.
  extern "C" bool native_legacy_gpu_offer(void *display,IOMemoryDescriptor *,uint64_t stride,uint32_t width,uint32_t height);
  extern "C" void native_legacy_gpu_fallback_observed(int status);
@@ -27,7 +36,7 @@ diff --git a/NativeLegacyDisplay.cpp b/NativeLegacyDisplay.cpp
  // 32-bit BGRA, plain ('BGRA') or in Apple's lossless-compressed spelling ('&BGA', one plane): the GPU that renders the surface here writes plain rows
  // either way (no compression is implemented), so the bytes are the same.
  static inline bool nativeBgra(uint32_t format,uint32_t planes) {
-@@ -66,6 +78,55 @@
+@@ -66,6 +81,55 @@ class NativeLegacyDisplay : public IOMobileFramebufferLegacy {
      const OriginalLegacySwapRequest *gpuRequest=nullptr;
      uint64_t gpuLength=0;
      bool gpuBypass=false;
@@ -83,7 +92,7 @@ diff --git a/NativeLegacyDisplay.cpp b/NativeLegacyDisplay.cpp
  public:
      // Called by the GPU client's completion (any thread): the swap is finished on the framebuffer's work loop.
      void gpuComplete(int status) {
-@@ -76,8 +137,9 @@
+@@ -76,8 +140,9 @@ public:
          };
          if(loop)loop->runAction(action,this,&args);else finishGpuSwap(status);
      }
@@ -94,7 +103,7 @@ diff --git a/NativeLegacyDisplay.cpp b/NativeLegacyDisplay.cpp
          transferred=false;for(auto &entry: validated)entry=nullptr;gpuRequest=nullptr;
          if(logicalPM){PMstop();logicalPM=false;}
          primary=false;IOMobileFramebufferLegacy::stop(provider);OSSafeReleaseNULL(bootMapping);
-@@ -93,6 +155,10 @@
+@@ -93,6 +158,10 @@ public:
          setter(this,&request,false);
      }
      bool start(IOService *provider) override {
@@ -105,7 +114,7 @@ diff --git a/NativeLegacyDisplay.cpp b/NativeLegacyDisplay.cpp
          if(!IOMobileFramebufferLegacy::start(provider))return false;
          if(primary && bootMapping)announcePoweredByFirmware();
          unsigned enabled=0;PE_parse_boot_argn("offline-legacy-pm",&enabled,sizeof(enabled));
-@@ -127,14 +193,29 @@
+@@ -127,14 +196,29 @@ public:
      void registerService(IOOptionBits options=0) override {
          unsigned enabled=0;PE_parse_boot_argn("offline-legacy-register",&enabled,sizeof(enabled));
          if(enabled!=1)native_legacy_backend_guard(84,this,__builtin_return_address(0));
@@ -135,3 +144,12 @@ diff --git a/NativeLegacyDisplay.cpp b/NativeLegacyDisplay.cpp
          if(kicking){rekick=true;return;}
          kicking=true;
          do {
+@@ -402,7 +486,7 @@ public:
+         }
+         OSSafeReleaseNULL(mapping);return valid;
+     }
+-#define LEAF(n) __attribute__((noreturn,noinline)) void opaque##n() override { native_legacy_backend_guard(n,this,__builtin_return_address(0)); }
++#define LEAF(n) __attribute__((noinline)) void opaque##n() override { native_legacy_backend_ignore(n,this,__builtin_return_address(0)); }
+     LEAF(211)
+     LEAF(245)
+     LEAF(246)

@@ -40,6 +40,14 @@ extern "C" {
 __attribute__((noreturn)) void native_legacy_backend_guard(unsigned slot,void *object,void *caller) {
     panic("SM8750 unsupported display slot %u object %p caller %p",slot,object,caller);
 }
+// The engine stubs every IOMobileFramebufferLegacy virtual it does not implement with a
+// panic. That is right for a slot the system needs and wrong for one it merely calls: they all
+// return void, so doing nothing is a legal answer, and stopping the boot only hides the rest of
+// the bring-up. Slots reached this way are recorded in the boot progress line instead.
+void native_legacy_backend_ignore(unsigned slot,void *object,void *caller) {
+    (void)object;(void)caller;
+    progress("display slot ignored",slot);
+}
 bool native_legacy_gop_mapping_observed(IOService *,IOMemoryMap *mapping,uint32_t width,uint32_t height) {
     progress("GOP mapping ready",((uint64_t)width<<32)|height);
     return mapping && mapping->getVirtualAddress();
