@@ -61,6 +61,9 @@ int findApid(uint32_t ppid) {
     return found;
 }
 
+uint8_t gPonLast, gGpioLast;
+uint32_t gSent;
+
 // Report-2 bits for the keys currently held.
 uint32_t pressed() {
     uint8_t pon = 0, gpio = 0xff;
@@ -75,6 +78,8 @@ uint32_t pressed() {
     if (gGpio >= 0 && !br_read8(gObs.va, &gArb, gGpio, kRtSts, &gpio) && !(gpio & kGpioBit)) {
         mask |= kReportVolumeDown;
     }
+    gPonLast = pon;
+    gGpioLast = gpio;
     return mask;
 }
 
@@ -96,21 +101,17 @@ bool setup() {
 
 void buttonsThread(void *, wait_result_t) {
     const bool ready = setup();
-    // hummer-keyscan=2: one deliberate panic five seconds in, carrying everything needed to
-    // tell "the PMIC read never worked" from "the read works but nothing was registered".
-    if (gVerbose) {
-        IOSleep(5000);
-        uint8_t pon = 0, gpio = 0;
-        int rcPon = -9, rcGpio = -9;
-        if (gObs.va && gPon >= 0) rcPon = br_read8(gObs.va, &gArb, gPon, kRtSts, &pon);
-        if (gObs.va && gGpio >= 0) rcGpio = br_read8(gObs.va, &gArb, gGpio, kRtSts, &gpio);
-        panic("HUMTOUCH btn ver%08x apids%u pon%d gpio%d sink%u\n"
-              "HUMTOUCH btn pon %02x rc%d gpio %02x rc%d ready%u",
-              gVersion, gApids, gPon, gGpio, gSink != nullptr ? 1u : 0u,
-              pon, rcPon, gpio, rcGpio, ready ? 1u : 0u);
+    // hummer-keyscan=2: the quiet state was already verified (arbiter v7, 896 APIDs, PON on
+    // APID 581, GPIO on 610, both reads rc0, sink registered). What is missing is the press
+    // itself, so this panics on the first one and prints what the mask became, whether the
+    // callback ran, and the raw levels behind it.
+    if (!ready) {
+        if (gVerbose) {
+            panic("HUMTOUCH btn setup failed ver%08x apids%u pon%d gpio%d",
+                  gVersion, gApids, gPon, gGpio);
+        }
         return;
     }
-    if (!ready) return;
     uint32_t last = 0;
     unsigned settled = 0;
     uint32_t candidate = 0;
@@ -121,6 +122,12 @@ void buttonsThread(void *, wait_result_t) {
                 last = mask;
                 void (*sink)(void *, uint32_t) = __atomic_load_n(&gSink, __ATOMIC_ACQUIRE);
                 if (sink) sink(gSinkContext, mask);
+                if (sink) ++gSent;
+                if (gVerbose && mask) {
+                    panic("HUMTOUCH btn press mask%08x sent%u sink%u\n"
+                          "HUMTOUCH btn raw pon %02x gpio %02x",
+                          mask, gSent, sink ? 1u : 0u, gPonLast, gGpioLast);
+                }
             }
         } else {
             candidate = mask;
