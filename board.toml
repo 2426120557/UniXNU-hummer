@@ -114,12 +114,13 @@ kernel_args = [
   #   -> geni_spi_transfer 根本没启动 SCLK（opcode/FIFO_IF_DISABLE 问题）
   #   -> 变成 00/ff/其他 -> 传输跑了，从机没驱动 MISO（供电/复位引脚问题）
   # fifo=0 (DMA) 实测硬复位，无 panic 屏，排除。
-  # v110: 面板真的上电了（RPMh 投 L4B_E0/L16B_E0），stage 3 拿到 "S3910" IDENTIFY:
-  #   done s3/3 st0 e0, id rc0 mode1, x0 = a5 10 1c.., x1 = 5a 50 30 10..
-  # v111: 跑到 stage 4（GET_APP_INFO + 配置报告），panic=4 停在触点轮询之前，
-  #   这一屏的 mx/my/obj/cfg 是面板的真实几何；确认后下一版去掉 panic。
+  # v111 实测：done s4/4, mx12639 my27799 obj10 cfg128 -> 面板几何是 1264x2780（0.1px
+  #   单位），10 个触点对象，配置块 128 字节；cmd-db 布局确认为 slave 8 / data 144，
+  #   两路 LDO 地址 0x40800(L4B) / 0x41900(L16B)。
+  # v112: panic 关掉，stage 4 之后进触点轮询并往 NativeHidInput publish。
+  #   想再要一次"点到为止"的诊断屏就把它改成 9（第一个触点上报时 panic）。
   "offline-hid-input=1", "offline-hid-home=1", "sheng-touch-hid=1",
-  "hummer-touch=4", "hummer-touch-panic=4", "hummer-touch-fifo=1",
+  "hummer-touch=4", "hummer-touch-panic=0", "hummer-touch-fifo=1",
 ]
 trust_cache_sha256 = ["7416ca4f8377146626bb284e2133c76bee6cb4e3ee0af5d648b186235a7323a7"]
 

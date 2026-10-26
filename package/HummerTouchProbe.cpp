@@ -864,6 +864,11 @@ static void touchThread(void *, wait_result_t) {
                 if (n) {native_htouch_last_x = xs[0]; native_htouch_last_y = ys[0];}
                 native_htouch_contacts = n;
                 publish(n, ids, xs, ys);
+                // hummer-touch-panic=9: stop on the first published finger. The panic
+                // screen then carries the counters and the two raw bytes of the frame,
+                // which is the only way this board can answer "did the panel report a
+                // touch at all" without a serial console.
+                if (gPanicAfter == 9) panicReadout(*s, "touch");
             } else if (code == S3910_REPORT_IDENTIFY) {
                 // The controller rebooted (crash/watchdog): reconfigure in place.
                 const int rc = tcmConfigure(*s);
