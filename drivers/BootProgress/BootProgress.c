@@ -479,12 +479,12 @@ void boot_progress_init(void)
 
 // The assembly fatal path re-enters with physical addresses and MMU/cache off.
 //
-// One row only. On hummer's panel this path can draw exactly one row before the rest of
-// the console falls outside the visible area - the old multi-line dump showed nothing but
-// the title, clipped around character 33 - so the four numbers that identify the fault go
-// on a single ~29 character line: checkpoint, ESR, ELR and FAR. ESR is 32 bits by
-// definition; ELR/FAR are cut to their low 32 bits, which is enough to separate a kernel
-// virtual address (0xfff0xxxx..0xffffxxxx) from a device window (0x16080000 = GICR).
+// One row only. On hummer's panel this path can draw exactly one row of ~30 characters
+// before the rest of the console falls outside the visible area, so the readout is
+//   E<checkpoint> <MPIDR low 16>/<SPSR low 8> <ESR> <ELR low 32>
+// MPIDR says which core faulted (0000 = boot CPU, 0100..0500 = the secondaries), SPSR's
+// M[3:0] says at which exception level and stack it was running (05 = EL1h, 09 = EL2h,
+// 0d = EL3h), ESR 0 with FAR 0 is the AArch64 encoding for an undefined instruction.
 static void hex_fixed(uint64_t n, unsigned digits)
 {
     for (int shift = (int)(digits * 4) - 4; shift >= 0; shift -= 4) {
@@ -495,7 +495,11 @@ static void hex_fixed(uint64_t n, unsigned digits)
 
 void early_boot_progress_fatal(boot_args *args, uint64_t esr, uint64_t elr, uint64_t far, uint64_t spsr, uint64_t stage)
 {
-    (void)spsr;
+    (void)far;
+    uint64_t mpidr = 0;
+#ifndef BOOT_PROGRESS_TEST
+    __asm__ volatile("mrs %0, mpidr_el1" : "=r"(mpidr));
+#endif
     early_boot_progress_init(args);
     if (!framebuffer) panic_halt();
     panic_state = 1; busy = 1; panic_clipped = 0;
@@ -503,9 +507,10 @@ void early_boot_progress_fatal(boot_args *args, uint64_t esr, uint64_t elr, uint
     row = 1; column = 0;
     clear_line(row * LINE);
     text_raw("E"); hex_fixed(stage, 2);
+    text_raw(" "); hex_fixed(mpidr, 4);
+    text_raw("/"); hex_fixed(spsr, 2);
     text_raw(" "); hex_fixed(esr, 8);
     text_raw(" "); hex_fixed(elr, 8);
-    text_raw(" "); hex_fixed(far, 8);
     panic_halt();
 }
 
