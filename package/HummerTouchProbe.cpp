@@ -698,7 +698,7 @@ void panicReadout(const Session &s, const char *why) {
         "HUMTOUCH gsierr e0%08x e1%08x e2%08x e3%08x e4%08x\n"
         "HUMTOUCH gsiee st%08x sw%08x hw2%08x hw4%08x\n"
         "HUMTOUCH sesw out%08x cgc%08x dma%08x gsi%08x\n"
-        "HUMTOUCH pwr id%08x cfg%08x mgc%08x tcs%u dn%u rc%d/%d a%08x/%08x\n"
+        "HUMTOUCH pwr id%08x cfg%08x mgc%08x tcs%u rl%u dn%u rc%d/%d a%08x/%08x\n"
         "HUMTOUCH smmu str%08x rc%d b%u cb2%08x\n"
         "HUMTOUCH smr  %08x s2cr%08x cbar%08x\n"
         "HUMTOUCH smid idr0%08x idr1%08x\n"
@@ -734,7 +734,8 @@ void panicReadout(const Session &s, const char *why) {
         d[HGS_D_STAT], d[HGS_D_SWVER], d[HGS_D_HWP2], d[HGS_D_HWP4],
         d[HGS_D_SE_OUT], d[HGS_D_SE_CGC], d[HGS_D_SE_DMA], d[HGS_D_SE_GSI],
         s.rpmh.diag.id, s.rpmh.diag.config, s.rpmh.diag.magic, s.rpmh.diag.tcs,
-        s.rpmh.diag.done, (int)s.pwrRc[0], (int)s.pwrRc[1], s.pwrAddr[0], s.pwrAddr[1],
+        s.rpmh.diag.relaxed, s.rpmh.diag.done,
+        (int)s.pwrRc[0], (int)s.pwrRc[1], s.pwrAddr[0], s.pwrAddr[1],
         d[HGS_D_SMMU], (int)d[HGS_D_SMMU_RC], d[HGS_D_SMMU_BANK], d[HGS_D_SMMU_CBA2R],
         d[HGS_D_SMR], d[HGS_D_S2CR], d[HGS_D_CBAR],
         d[HGS_D_SMMU_IDR0], d[HGS_D_SMMU_IDR1],

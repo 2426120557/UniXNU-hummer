@@ -26,6 +26,7 @@ struct hrpmh_diag {
     uint32_t address;   // VRM address cmd-db returned for the last resource
     uint32_t found;     // how many matching VRM entries that lookup produced
     uint32_t tcs;       // ACTIVE TCS used, 0xffffffff = none found idle
+    uint32_t relaxed;   // 1 = the strict status check found nothing, control/enable/wait did
     uint32_t done;      // 1 = all three commands ACKed and the TCS reported completion
     uint32_t status;    // raw TCS status of the last vote
     uint32_t cmd0, cmd1, cmd2;

@@ -123,19 +123,23 @@ int hrpmh_vote(struct hrpmh *h, const char *resource, uint32_t mV) {
     uint32_t address = 0;
     int rc = hr_lookup(h, resource, &address);
     if (rc) {h->diag.rc = (uint32_t)rc; return rc;}
-    // A free ACTIVE TCS: status must be a real (non-0xff..) value, its control, enable,
-    // wait and the IRQ-status bit all clear. Never steal one - if the bootloader or AOP
-    // is using them, say so instead of corrupting its state.
+    // A free ACTIVE TCS: control, enable, wait and the IRQ-status bit all clear, and (the
+    // reference driver's empirical check) a real status value. If nothing passes the status
+    // test, fall back to the control/enable/wait test alone: those three are what an
+    // in-flight TCS actually sets, and `status` is not documented as a free/busy bit -
+    // the reference only ever ran against an RSC the bootloader had already used.
     const uint32_t irq_en = hr_rd(h->rsc, HR_TCS_OFF + 0);
     const uint32_t irq_st = hr_rd(h->rsc, HR_TCS_OFF + 4);
     unsigned chosen = 0xffffffffu;
-    for (unsigned t = 0; t < HR_ACTIVE_N; ++t) {
-        const uint32_t b = HR_TCS_OFF + t * HR_TCS_STRIDE;
-        const uint32_t st = hr_rd(h->rsc, b + L->status), ctl = hr_rd(h->rsc, b + L->control);
-        const uint32_t en = hr_rd(h->rsc, b + L->enable), wt = hr_rd(h->rsc, b + L->wait);
-        if (st != 0 && st != 0xffffffffu && ctl == 0 && en == 0 && wt == 0 &&
-            !(irq_st & (1u << t))) {
+    for (unsigned pass = 0; pass < 2 && chosen == 0xffffffffu; ++pass) {
+        for (unsigned t = 0; t < HR_ACTIVE_N; ++t) {
+            const uint32_t b = HR_TCS_OFF + t * HR_TCS_STRIDE;
+            const uint32_t st = hr_rd(h->rsc, b + L->status), ctl = hr_rd(h->rsc, b + L->control);
+            const uint32_t en = hr_rd(h->rsc, b + L->enable), wt = hr_rd(h->rsc, b + L->wait);
+            if (ctl != 0 || en != 0 || wt != 0 || (irq_st & (1u << t))) continue;
+            if (pass == 0 && (st == 0 || st == 0xffffffffu)) continue;
             chosen = t;
+            h->diag.relaxed = pass;
             break;
         }
     }
