@@ -345,10 +345,15 @@ void powerRails(Session &s) {
                                 reinterpret_cast<void *>(s.cmddb.va));
     s.pwrRc[0] = s.pwrRc[1] = static_cast<uint32_t>(init);
     if (init) return;                  // unknown RSC layout: report, do not touch
-    // IO rail first, then the analog rail, the order the DT lists them in.
-    s.pwrRc[0] = static_cast<uint32_t>(hrpmh_vote(&s.rpmh, "L4B_E0", 1800));
+    // Read-only first: record what the bootloader's cmd-db calls the LDOs this board uses,
+    // so a failed vote still comes back with the names to use next time.
+    hrpmh_scan(&s.rpmh);
+    // IO rail first, then the analog rail, the order the DT lists them in. Each vote tries
+    // "<name>_E0", "<name>_E1" and the bare name: v109 proved the cmd-db on this board does
+    // not key LDO4 as "L4B_E0" the way the reference device keys its L4I.
+    s.pwrRc[0] = static_cast<uint32_t>(hrpmh_vote_ldo(&s.rpmh, 4, 1800));
     s.pwrAddr[0] = s.rpmh.diag.address;
-    s.pwrRc[1] = static_cast<uint32_t>(hrpmh_vote(&s.rpmh, "L16B_E0", 3104));
+    s.pwrRc[1] = static_cast<uint32_t>(hrpmh_vote_ldo(&s.rpmh, 16, 3104));
     s.pwrAddr[1] = s.rpmh.diag.address;
     IOSleep(20);
 }
@@ -683,32 +688,26 @@ void panicReadout(const Session &s, const char *why) {
     static char text[3200];
     const uint32_t *v = s.vals;
     const uint32_t *d = s.gsi.diag;
+    // v110 is a power investigation, so the readout only carries what answers that
+    // question: did the rails get their vote, what does the cmd-db really call them, and
+    // did anything reach the pads. The GCC/QUP/GSI configuration lines that v108 proved
+    // are dropped here so nothing scrolls off the top of the screen.
     snprintf(text, sizeof text,
         "HUMTOUCH %s s%u/%u st%u e%d\n"
-        "HUMTOUCH vote%08x halt %08x %08x %08x %08x %08x gpll%08x pins %08x %08x %08x %08x\n"
-        "HUMTOUCH qup%08x fw%08x if%08x hw%08x lvl%u div%u %uHz fd%u ud%u os%u dfs %08x %08x fifo %08x %08x\n"
         "HUMTOUCH id rc%u via%u mode%u ver%d w%u mx%u my%u obj%u cfg%u fr%u ct%u agn%u oth%u bad%u feed%u rc%d n%u\n"
-        "HUMTOUCH x0 %02x%02x%02x%02x%02x%02x/%02x%02x%02x%02x%02x%02x x1 %02x%02x%02x%02x%02x%02x/%02x%02x%02x%02x%02x%02x\n"
+        "HUMTOUCH x0 %02x%02x%02x%02x%02x%02x/%02x%02x%02x%02x%02x%02x\n"
+        "HUMTOUCH x1 %02x%02x%02x%02x%02x%02x/%02x%02x%02x%02x%02x%02x\n"
         "HUMTOUCH snap irq%08x st%08x txfs%08x rxfs%08x dmatx%08x dmarx%08x valid%u\n"
-        "HUMTOUCH snap2 mcmd%08x clk%08x sel%08x dma%08x mirq%08x\n"
-        "HUMTOUCH snap3 rcmd%08x rcfg%08x rdfs%08x rpcfg%08x s4cbcr%08x gpll%08x ifen%08x fifoif%08x\n"
-        "HUMTOUCH gsi gpii%u ee%05x irc%d rc%d ok%d pre%08x a0%08x a1%08x a2%08x a3%08x rb%08x tr%08x trs%08x tirq%08x src%08x evsrc%08x\n"
-        "HUMTOUCH gsich ch0%08x ch1%08x ev%08x evrp%08x evn%u poll%u idx%08x scr%08x msk%08x srcm%08x globen%08x gpiien%08x\n"
-        "HUMTOUCH gsiev %08x %08x %08x %08x irq%08x glob%08x errl%08x errl2%08x sdma%08x sgsi%08x\n"
-        "HUMTOUCH gsierr e0%08x e1%08x e2%08x e3%08x e4%08x\n"
-        "HUMTOUCH gsiee st%08x sw%08x hw2%08x hw4%08x\n"
+        "HUMTOUCH gsi gpii%u ee%05x irc%d rc%d ok%d tr%08x rb%08x evn%u\n"
+        "HUMTOUCH chg ch0%08x ch1%08x scr%08x errl%08x glob%08x\n"
         "HUMTOUCH sesw out%08x cgc%08x dma%08x gsi%08x\n"
-        "HUMTOUCH pwr id%08x cfg%08x mgc%08x tcs%u rl%u dn%u rc%d/%d a%08x/%08x\n"
-        "HUMTOUCH smmu str%08x rc%d b%u cb2%08x\n"
-        "HUMTOUCH smr  %08x s2cr%08x cbar%08x\n"
-        "HUMTOUCH smid idr0%08x idr1%08x\n"
-        "HUMTOUCH smgf pre%08x clr%08x post%08x\n"
+        "HUMTOUCH pwr ly%u/%u n%u rc%d/%d dn%u a%08x/%08x\n"
+        "HUMTOUCH pw2 k%08x/%08x f%u tcs%u rl%u\n"
+        "HUMTOUCH pw3 n%u %08x %08x %08x\n"
+        "HUMTOUCH pw4 %08x %08x %08x\n"
+        "HUMTOUCH pw5 %08x %08x %08x\n"
         "HUMTOUCH tpin g162c%08x irqb%08x irqa%08x g161%08x",
         why, native_htouch_stage_done, native_htouch_stage_req, native_htouch_step, native_htouch_error,
-        v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[9], v[10], v[11], v[12],
-        v[19], v[20], v[21], v[22], s.level, s.div, static_cast<unsigned>(s.actualHz),
-        static_cast<unsigned>(s.spi.info.fifo_disabled), static_cast<unsigned>(s.spi.use_dma),
-        static_cast<unsigned>(s.spi.oversampling), v[15], v[16], v[17], v[18],
         s.idRc, static_cast<unsigned>(s.viaCommand), s.fwMode, s.fwVersion, s.max_write, s.max_x, s.max_y,
         s.objects, s.config_size,
         native_htouch_frames, native_htouch_contacts, native_htouch_again, native_htouch_other, native_htouch_bad,
@@ -719,27 +718,16 @@ void panicReadout(const Session &s, const char *why) {
         s.traceRx[1][0], s.traceRx[1][1], s.traceRx[1][2], s.traceRx[1][3], s.traceRx[1][4], s.traceRx[1][5],
         s.spi.snap_irq, s.spi.snap_status, s.spi.snap_txfs, s.spi.snap_rxfs,
         s.spi.snap_dma_tx, s.spi.snap_dma_rx, s.spi.snap_valid,
-        s.dbg[0], s.dbg[1], s.dbg[2], s.dbg[3], s.dbg[4],
-        s.dbg[6], s.dbg[7], s.dbg[8], s.dbg[9], s.dbg[10], s.dbg[11], s.dbg[12], s.dbg[13],
         d[HGS_D_GPII], d[HGS_D_EE], (int)d[HGS_D_INIT_RC], (int)d[HGS_D_RC], s.gsi.ready,
-        d[HGS_D_PRE], d[HGS_D_A0], d[HGS_D_A1], d[HGS_D_A2], d[HGS_D_A3],
-        d[HGS_D_RB], d[HGS_D_TRACE], d[HGS_D_TR_ALL], d[HGS_D_TIRQ], d[HGS_D_SRC], d[HGS_D_EVSRC],
-        d[HGS_D_CH0], d[HGS_D_CH1], d[HGS_D_EV], d[HGS_D_EV_RP], d[HGS_D_EVN], d[HGS_D_POLL],
-        d[HGS_D_IDX], d[HGS_D_SCRATCH],
-        d[HGS_D_MSK], d[HGS_D_SRCM], d[HGS_D_GLOBEN], d[HGS_D_GPIIEN],
-        d[HGS_D_EV0], d[HGS_D_EV1], d[HGS_D_EV2], d[HGS_D_EV3],
-        d[HGS_D_IRQ_STTS], d[HGS_D_GLOB], d[HGS_D_ERRL], d[HGS_D_ERRL2],
-        d[HGS_D_SE_DMA], d[HGS_D_SE_GSI],
-        d[HGS_D_E0], d[HGS_D_E1], d[HGS_D_E2], d[HGS_D_E3], d[HGS_D_E4],
-        d[HGS_D_STAT], d[HGS_D_SWVER], d[HGS_D_HWP2], d[HGS_D_HWP4],
+        d[HGS_D_TRACE], d[HGS_D_RB], d[HGS_D_EVN],
+        d[HGS_D_CH0], d[HGS_D_CH1], d[HGS_D_SCRATCH], d[HGS_D_ERRL], d[HGS_D_GLOB],
         d[HGS_D_SE_OUT], d[HGS_D_SE_CGC], d[HGS_D_SE_DMA], d[HGS_D_SE_GSI],
-        s.rpmh.diag.id, s.rpmh.diag.config, s.rpmh.diag.magic, s.rpmh.diag.tcs,
-        s.rpmh.diag.relaxed, s.rpmh.diag.done,
-        (int)s.pwrRc[0], (int)s.pwrRc[1], s.pwrAddr[0], s.pwrAddr[1],
-        d[HGS_D_SMMU], (int)d[HGS_D_SMMU_RC], d[HGS_D_SMMU_BANK], d[HGS_D_SMMU_CBA2R],
-        d[HGS_D_SMR], d[HGS_D_S2CR], d[HGS_D_CBAR],
-        d[HGS_D_SMMU_IDR0], d[HGS_D_SMMU_IDR1],
-        s.dbg[17], s.dbg[18], s.dbg[19],
+        s.rpmh.diag.sbase, s.rpmh.diag.hbase, s.rpmh.diag.walk,
+        (int)s.pwrRc[0], (int)s.pwrRc[1], s.rpmh.diag.done, s.pwrAddr[0], s.pwrAddr[1],
+        s.rpmh.diag.k0, s.rpmh.diag.k1, s.rpmh.diag.found, s.rpmh.diag.tcs, s.rpmh.diag.relaxed,
+        s.rpmh.diag.hitN, s.rpmh.diag.hitKey0[0], s.rpmh.diag.hitKey1[0], s.rpmh.diag.hitAddr[0],
+        s.rpmh.diag.hitKey0[1], s.rpmh.diag.hitKey1[1], s.rpmh.diag.hitAddr[1],
+        s.rpmh.diag.hitKey0[2], s.rpmh.diag.hitKey1[2], s.rpmh.diag.hitAddr[2],
         s.dbg[14], s.dbg[15], s.dbg[16], v[13]);
     panic("%s", text);
 }

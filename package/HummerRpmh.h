@@ -10,9 +10,8 @@
 //
 // Register layout, cmd-db format and the command sequence come from Linux rpmh-rsc.c
 // (ver_2_7 / ver_3_0 layouts) and from the proven XNU S3910 driver on the same SoC
-// family (pandora_touch.c: apt_rpmh_vote). Nothing is guessed: every write is read back,
-// every command's ACK is polled, and the function bails out before touching anything if
-// the RSC reports a layout or a TCS state it does not recognise.
+// family (pandora_touch.c). Every write is read back, every command's ACK is polled, and
+// the function refuses to touch a TCS whose control/enable/wait are not all zero.
 #ifndef HUMMER_RPMH_H
 #define HUMMER_RPMH_H
 #include <stdint.h>
@@ -24,7 +23,13 @@ struct hrpmh_diag {
     uint32_t version;   // cmd-db version word
     uint32_t magic;     // cmd-db magic (0x0c0330db)
     uint32_t address;   // VRM address cmd-db returned for the last resource
-    uint32_t found;     // how many matching VRM entries that lookup produced
+    uint32_t found;     // how many matching VRM entries the last lookup produced
+    uint32_t sbase;     // slave-table base that produced a match (0 = none yet)
+    uint32_t hbase;     // cmd-db data base that produced a match (0 = none yet)
+    uint32_t walk;      // entries walked in the best attempt (0 = the walk never started)
+    uint32_t k0, k1;    // first entry's 8-byte resource key (should read as ASCII)
+    uint32_t hitN;      // entries whose key looks like L4*/L16* (see hrpmh_scan)
+    uint32_t hitKey0[4], hitKey1[4], hitAddr[4];
     uint32_t tcs;       // ACTIVE TCS used, 0xffffffff = none found idle
     uint32_t relaxed;   // 1 = the strict status check found nothing, control/enable/wait did
     uint32_t done;      // 1 = all three commands ACKed and the TCS reported completion
@@ -37,14 +42,23 @@ struct hrpmh {
     volatile uint32_t *rsc;     // drv-2 register window (0x16520000)
     volatile uint32_t *db;      // aop_cmd_db_region (0x81c60000)
     uint32_t major, minor;
+    unsigned sbase, hbase;      // cmd-db layout discovered by the first successful lookup
     struct hrpmh_diag diag;
 };
 
 // Returns 0 when the RSC and cmd-db look like the layouts this file implements.
 int hrpmh_init(struct hrpmh *h, void *rsc, void *cmddb);
-// Vote `resource` (cmd-db name, e.g. "L4B_E0") to `mV` in high-power mode and enable it.
-// The TCS is released afterwards, exactly like the reference driver: the vote stays
+// Vote `resource` (exact cmd-db key, e.g. "L4B_E0") to `mV` in high-power mode and enable
+// it. The TCS is released afterwards, exactly like the reference driver: the vote stays
 // latched in the RSC, the TCS goes back to the pool.
 int hrpmh_vote(struct hrpmh *h, const char *resource, uint32_t mV);
+// Convenience for the two rails this board needs: tries "<res>_E0", "<res>_E1" and the
+// bare name, so a vendor cmd-db that names them differently still gets its vote.
+int hrpmh_vote_ldo(struct hrpmh *h, unsigned id, uint32_t mV);
+// Read-only pass over the documented cmd-db layout that records up to four entries whose
+// key starts with 'L' and a decimal 4 or 16 - i.e. the LDO this board's touch node names.
+// The keys go to the panic screen, so a boot where the vote still fails says what the
+// bootloader actually called those rails.
+void hrpmh_scan(struct hrpmh *h);
 
 #endif
