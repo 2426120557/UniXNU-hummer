@@ -90,6 +90,15 @@ loader = "firmware"
 title = "OnePlus Ace 5 Pro Stage 7"
 dram_size = "0x100000000"
 timeout = 10
+# 跳过 Setup（Hello 页）：payload 步骤用 seed-data-skip-setup.py 在 Data 种子的**副本**上
+# 展开 APFS、rw 挂载、把 Setup 标记为完成（com.apple.purplebuddy 的 SetupDone /
+# SetupFinishedAllSteps、notbackedup 的 mini-buddy 全 false、managedconfiguration 不提示
+# 云配置、migration 的 buildVersion=21H461），原始种子不变，改好的副本当 scratch-data.img。
+# 脚本用本 repo scripts/ 里的那份：它支持 --no-auto-dim，而引擎 upstream.rev=d9460ebb 的
+# 同名脚本是 `len(sys.argv)!=3` 就退出、不接受额外参数。--no-auto-dim 关掉 SpringBoard
+# 自动变暗/空闲休眠——本机还没按键、触摸刚接上，不关的话起来约 30 秒就熄屏。
+skip_setup_tool = "scripts/seed-data-skip-setup.py"
+skip_setup_args = ["--no-auto-dim"]
 kernel_args = [
   "-v", "serial=0", "debug=0x14e", "cpus=6", "kt_fixed_zones=240",
   # 根镜像所在分区：编译期由 GccUfs.h 的 UFS_ROOT_PARTITION 决定——SM8750 构建

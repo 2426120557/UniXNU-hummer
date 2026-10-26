@@ -122,7 +122,9 @@ jobs:
           if [ -z "$UNIXNU_UNIQUE_CHIP_ID" ]; then
             export UNIXNU_UNIQUE_CHIP_ID="$(python3 -c 'import secrets; print(secrets.token_hex(8))')"
           fi
-          ./unixnu build kernel payload -j 3 --trust-cache out/hummer/original-static-system.bundle --data-ramdisk out/hummer/ram-data/data.dbrdisk 2>&1 | tee out/hummer/logs/actions-build.log
+          # --skip-setup：payload 步骤读 board.toml [payload] skip_setup_tool，在 Data 种子
+          # 的副本上把 Setup 标记为完成，系统起来直接进 SpringBoard 而不是 Hello。
+          ./unixnu build kernel payload -j 3 --trust-cache out/hummer/original-static-system.bundle --data-ramdisk out/hummer/ram-data/data.dbrdisk --skip-setup 2>&1 | tee out/hummer/logs/actions-build.log
 
       - name: Show build log tail
         if: always()
