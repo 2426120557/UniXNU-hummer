@@ -38,6 +38,9 @@ uint32_t gApids;
 void (*volatile gSink)(void *, uint32_t);
 void *volatile gSinkContext;
 
+uint32_t gVersion;
+int gVerbose;
+
 bool mapWindow(Window &w, uint64_t base, uint64_t size) {
     IODeviceMemory *memory = IODeviceMemory::withRange(base, size);
     w.map = memory ? memory->map(kIOMapAnywhere | kIOMapInhibitCache) : nullptr;
@@ -81,9 +84,9 @@ bool setup() {
         !mapWindow(gCnfg, 0xc42d000ULL, 0x4000)) return false;
     gArb.core = gCore.va;
     gArb.cnfg = gCnfg.va;
-    const uint32_t version = gCore.va[0];
+    gVersion = gCore.va[0];
     gApids = gCore.va[BR_FEATURES / 4] & BR_FEATURES_APIDS_MASK;
-    if (version < BR_VERSION_V7_MIN || version >= BR_VERSION_V8_MIN || !gApids || gApids > 1024) return false;
+    if (gVersion < BR_VERSION_V7_MIN || gVersion >= BR_VERSION_V8_MIN || !gApids || gApids > 1024) return false;
     if (!mapWindow(gObs, TB_SPMI_OBS_BASE,
                    ((uint64_t)BR_OBS_APID_STRIDE * gApids + 0xfff) & ~0xfffull)) return false;
     gPon = findApid(kPonPpid);
@@ -92,7 +95,22 @@ bool setup() {
 }
 
 void buttonsThread(void *, wait_result_t) {
-    if (!setup()) return;
+    const bool ready = setup();
+    // hummer-keyscan=2: one deliberate panic five seconds in, carrying everything needed to
+    // tell "the PMIC read never worked" from "the read works but nothing was registered".
+    if (gVerbose) {
+        IOSleep(5000);
+        uint8_t pon = 0, gpio = 0;
+        int rcPon = -9, rcGpio = -9;
+        if (gObs.va && gPon >= 0) rcPon = br_read8(gObs.va, &gArb, gPon, kRtSts, &pon);
+        if (gObs.va && gGpio >= 0) rcGpio = br_read8(gObs.va, &gArb, gGpio, kRtSts, &gpio);
+        panic("HUMTOUCH btn ver%08x apids%u pon%d gpio%d sink%u\n"
+              "HUMTOUCH btn pon %02x rc%d gpio %02x rc%d ready%u",
+              gVersion, gApids, gPon, gGpio, gSink != nullptr ? 1u : 0u,
+              pon, rcPon, gpio, rcGpio, ready ? 1u : 0u);
+        return;
+    }
+    if (!ready) return;
     uint32_t last = 0;
     unsigned settled = 0;
     uint32_t candidate = 0;
@@ -123,6 +141,7 @@ extern "C" void native_buttons_set_sink(void (*sink)(void *, uint32_t), void *co
 extern "C" void hummer_buttons_probe(void) {
     unsigned enabled = 0;
     if (!PE_parse_boot_argn("hummer-keyscan", &enabled, sizeof enabled) || !enabled) return;
+    gVerbose = enabled >= 2 ? 1 : 0;
     thread_t thread = nullptr;
     if (kernel_thread_start(buttonsThread, nullptr, &thread) == KERN_SUCCESS) thread_deallocate(thread);
 }

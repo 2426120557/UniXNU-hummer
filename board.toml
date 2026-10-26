@@ -162,8 +162,11 @@ kernel_args = [
   #   SPMI 访问用引擎自带的 BootResetCore.h（br_read8/br_write8），不再自己写一份。
   #   上报走报告 2 的 bit1 Power / bit2 Volume Increment / bit3 Volume Decrement
   #   （drivers/NativeHidInput 的 report 2 已按 ShengHidInput 的定义扩成这四个 usage）。
-  #   20 ms 轮询 + 3 次去抖（60 ms，越过 DTS 的 32 ms）。1 = 启用，0 = 关。
-  "hummer-keyscan=1",
+  #   20 ms 轮询 + 3 次去抖（60 ms，越过 DTS 的 32 ms）。
+  #   0 = 关；1 = 启用；2 = 启动 5 秒后 panic 打印整套状态（SPMI 版本、APID 数、
+  #   PON 与 GPIO 的 APID、两个 RT_STS 原文与读回码、HID sink 是否已注册）。
+  #   现在用 2：三个键都没反应，先分清是"读不到"还是"读到了没人收"。
+  "hummer-keyscan=2",
   # v120 实测（带 hummer-cpu=1 的延迟诊断屏）：
   #   HUMTOUCH cpu processor_count=6 avail=6 max=5 cpus_arg=6
   # 六核全部注册，SMP 通了，所以这里不再带诊断参数。需要再量一次就把
