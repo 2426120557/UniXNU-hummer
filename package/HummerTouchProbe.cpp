@@ -1046,16 +1046,14 @@ static void ipiDiagThread(void *, wait_result_t) {
     wr32(gd.va, 0x0280 + (id / 32) * 4, 1u << (id % 32));
     __asm__ __volatile__("dsb sy" ::: "memory");
 
-    // GICR_TYPER.Last (bit 4) says whether this is the final frame, so the second read never
-    // lands on unmapped memory the way the 0x20000 stride did.
+    // Only redistributor 0 is read. With stride 0x40000 the second frame would be at
+    // 0x160C0000, and reading it takes a synchronous external abort on this board at both
+    // the architectural and the DT stride, so whatever lives there is not a redistributor
+    // this core may touch. RD0 alone answers the question that matters: can an SGI be
+    // delivered at all (its SGI frame enabled and grouped).
     const uint64_t rd0typer = *reinterpret_cast<volatile uint64_t *>(
         gr.va + TB_GICR_RD_BASE + 0x0008);
     const uint32_t rd0waker = rd32(gr.va, TB_GICR_RD_BASE + TB_GICR_RD_WAKER);
-    const bool rd0last = (rd0typer & (1ull << 4)) != 0;
-    const uint64_t rd1off = TB_GICR_STRIDE;
-    const uint64_t rd1typer = rd0last ? 0 : *reinterpret_cast<volatile uint64_t *>(
-        gr.va + rd1off + 0x0008);
-    const uint32_t rd1waker = rd0last ? 0 : rd32(gr.va, rd1off + TB_GICR_RD_WAKER);
     // The SGI frame of core 0: what decides whether an SGI can be delivered at all.
     const uint32_t sgiEn = rd32(gr.va, TB_GICR_SGI_BASE + 0x0100);
     const uint32_t sgiGrp = rd32(gr.va, TB_GICR_SGI_BASE + 0x0080);
@@ -1067,10 +1065,10 @@ static void ipiDiagThread(void *, wait_result_t) {
     const uint64_t sent1 = armcpu_ipi_sent, rcvd1 = armcpu_ipi_interrupts;
     const uint64_t self1 = armcpu_ipi_selftest_sent;
 
-    panic("HUMTOUCH ipi typer%08x iidr%08x lines%u\n"
+    panic("HUMTOUCH ipi3 typer%08x iidr%08x lines%u\n"
           "HUMTOUCH ipi en%08x grp%08x prio%08x pend%08x\n"
           "HUMTOUCH ipi route%016llx self %llu->%llu\n"
-          "HUMTOUCH ipi rd0 %016llx w%08x rd1 %016llx w%08x\n"
+          "HUMTOUCH ipi rd0 %016llx w%08x last%u\n"
           "HUMTOUCH ipi sgi en%04x grp%08x\n"
           "HUMTOUCH ipi sent %llu->%llu rcvd %llu->%llu",
           typer, iidr, lines,
@@ -1078,7 +1076,7 @@ static void ipiDiagThread(void *, wait_result_t) {
           static_cast<unsigned long long>(route),
           static_cast<unsigned long long>(self0), static_cast<unsigned long long>(self1),
           static_cast<unsigned long long>(rd0typer), rd0waker,
-          static_cast<unsigned long long>(rd1typer), rd1waker,
+          (rd0typer & (1ull << 4)) ? 1u : 0u,
           sgiEn & 0xffffu, sgiGrp,
           static_cast<unsigned long long>(sent0), static_cast<unsigned long long>(sent1),
           static_cast<unsigned long long>(rcvd0), static_cast<unsigned long long>(rcvd1));
