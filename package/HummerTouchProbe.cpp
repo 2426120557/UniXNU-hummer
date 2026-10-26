@@ -20,6 +20,7 @@
 #include <string.h>
 #include <libkern/c++/OSSharedPtr.h>
 #include <kern/thread.h>
+#include <arm/machine_routines.h>        // ml_get_max_cpu_number() (osfmk/arm, not the machine/ link)
 #include <pexpert/pexpert.h>
 extern "C" {
 #include "GeniSpi.h"
@@ -890,21 +891,31 @@ static void touchThread(void *, wait_result_t) {
 }
 
 // CPU bring-up readout. processor_count is XNU's count of processors that actually
-// registered (kern/processor.c, bumped from processor_init as each one comes up); the ADT
-// declares six, so a value below six means PSCI never started the secondaries and every
-// other symptom - a SpringBoard that feels like one core - follows from that. `cpus` is
-// the boot argument's requested limit, printed for comparison.
+// registered (kern/processor.c, bumped from processor_init as each one comes up).
+//
+// The first version of this reported from native_touch_probe() itself, which runs inside
+// bsd_init's PMGR nub start - long before IOKit matches the IOCPU nubs and the scheduler
+// starts the secondaries, so it read 1 even on a machine whose SMP was working. The report
+// therefore runs on its own thread after a delay, when IOCPU matching and the per-core
+// start have had their chance, and prints both counts plus the ADT's topology size.
 extern "C" int processor_count;
 extern "C" int processor_avail_count;
+
+static void cpuReportThread(void *, wait_result_t) {
+    unsigned delayMs = 15000, requested = 0;
+    PE_parse_boot_argn("hummer-cpu-delay", &delayMs, sizeof delayMs);
+    PE_parse_boot_argn("cpus", &requested, sizeof requested);
+    IOSleep(delayMs);
+    panic("HUMTOUCH cpu processor_count=%d avail=%d max=%d cpus_arg=%u", processor_count,
+          processor_avail_count, ml_get_max_cpu_number(), requested);
+}
 
 extern "C" void native_touch_probe(void) {
     unsigned stage = 0;
     int cpuReport = 0;
     if (PE_parse_boot_argn("hummer-cpu", &cpuReport, sizeof cpuReport) && cpuReport) {
-        unsigned requested = 0;
-        PE_parse_boot_argn("cpus", &requested, sizeof requested);
-        panic("HUMTOUCH cpu processor_count=%d avail=%d cpus_arg=%u", processor_count,
-              processor_avail_count, requested);
+        thread_t thread = nullptr;
+        if (kernel_thread_start(cpuReportThread, nullptr, &thread) == KERN_SUCCESS) thread_deallocate(thread);
     }
     if (!PE_parse_boot_argn("hummer-touch", &stage, sizeof stage) || stage < 1 || native_htouch_stage_req) return;
     if (stage > 4) stage = 4;
