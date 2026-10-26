@@ -262,3 +262,20 @@ Lessons for this bring-up:
   cmd-db names) is a place where copying the reference driver cannot help. Those need to
   be *discovered*, not guessed - two flashes were spent guessing the one datum the
   hardware could have told us in a single read.
+
+## v112: touch is alive on the panel (2026-10-26 19:45)
+
+`hummer-touch-panic=0` (stage 4, no stop) booted and the first finger produced pointers on
+screen: left/right correct, up/down inverted. That closes the bring-up:
+
+| step | evidence |
+|---|---|
+| VDDIO + AVDD | `pwr rc0/0 dn1 a0040800/0041900` (RPMh TCS completed for L4B/L16B) |
+| SE + GPI | `tr=0`, `evn=2`, `errl=0`, `sesw out=0000007f` |
+| TouchComm | `id rc0 mode1`, `mx12639 my27799 obj10 cfg128` |
+| HID | fingers published -> UI reacted |
+
+The one wrong mapping flag was `mirrorY`, inherited from sheng's panel; v113 defaults it
+to 0 (boot arg `hummer-touch-fy=0`). Note the panel is 1264x2780 (portrait, 0.1 px units)
+and the digitizer space is 30480x20320, so the X/Y scales are not 1:1 - a swipe that
+"feels fast" in one axis is a scale question, not a mirror one.
