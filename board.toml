@@ -141,16 +141,13 @@ kernel_args = [
   #   hummer 上是多余的，默认关掉（hummer-touch-fy=1 可再打开）。
   "offline-hid-input=1", "offline-hid-home=1", "sheng-touch-hid=1",
   "sheng-smp=1", "sheng-smp-gic=1",
-  # v126 IPI：这两行是 6 核真正能用的最后一块。
-  #   XNU 的 gFastIPI 默认为 1（machine_routines.c:503），于是 cpu_signal() 走
-  #   ml_cpu_signal() -> MSR S3_5_C15_C0_0/1，那是 Apple 的 ACC Fast IPI 私用寄存器，
-  #   SM8750 上不产生任何中断。于是 task_restartable_ranges_synchronize() 的
-  #   trr_ipi_ack_pending 永远等不到 ACK，hw_wait_while_equals32 自旋到超时 panic
-  #   （locks.c:607，等的是 thread->t_rr_state.trr_value，当时值 0x00010000）。
-  #   fastipi=0 让它改走 PE_cpu_signal() -> IOCPU::signalCPU() -> ArmCpu::signalCPU()；
-  #   armcpu-spi-ipi=1 让那一步不用 ICC_SGI1R_EL1（ArmCpu 自己的注释：本板不产生中断），
+  # v126/v127 IPI：构建出的内核里 HAS_IPI 是未定义的（kernel.macho 里查不到 gFastIPI 符号），
+  #   所以 cpu_signal() 从来都走 PE_cpu_signal() -> IOCPU::signalCPU() -> ArmCpu::signalCPU()，
+  #   `fastipi` 这个 boot arg 在内核里根本不存在，v126 加它是无效的，已删。
+  #   armcpu-spi-ipi=1 让 signalCPU 不用 ICC_SGI1R_EL1（ArmCpu 注释：本板不产生中断），
   #   改成软件 pend 的 SPI 1008+core（GICD 0x16000000，每核注册时 spiIpiConfigure 路由）。
-  "fastipi=0", "armcpu-spi-ipi=1",
+  #   v126 加了它仍然 panic，所以 v127 用 hummer-ipidiag 直接量 GIC，不再猜。
+  "armcpu-spi-ipi=1",
   "hummer-touch=4", "hummer-touch-panic=0", "hummer-touch-fifo=1",
   "hummer-touch-fy=0",
   # v125 音量键（是功能，不是探针）：UEFI 树里的 Resources/DTBs/hummer.dts（本内核启动用的

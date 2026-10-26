@@ -1010,11 +1010,15 @@ static void keyScanThread(void *, wait_result_t) {
 //     actually implements, so this answers "does this line exist" without guessing;
 //   - ArmCpu's own sent / received counters, plus one self-test signal, which separates
 //     "never sent" from "sent but never delivered".
+// Note: the built kernel has no gFastIPI at all - HAS_IPI is undefined, so cpu_signal() has
+// always taken the PE_cpu_signal() branch and `fastipi` does not even exist as a boot arg.
+// That leaves ArmCpu's own send path as the only one in play, which is what these counters
+// measure.
 //   hummer-ipidiag=1
-extern "C" unsigned int gFastIPI;
 extern "C" volatile uint64_t armcpu_ipi_sent;
 extern "C" volatile uint64_t armcpu_ipi_interrupts;
-extern "C" void armcpu_ipi_selftest(uint64_t aff);
+extern "C" volatile uint64_t armcpu_ipi_selftest_sent;
+extern "C" void armcpu_ipi_selftest(uint64_t aff) __attribute__((weak_import));
 
 static void ipiDiagThread(void *, wait_result_t) {
     Region gd, gr;
@@ -1048,18 +1052,21 @@ static void ipiDiagThread(void *, wait_result_t) {
     const uint32_t rd1waker = rd32(gr.va, 0x20014);
 
     const uint64_t sent0 = armcpu_ipi_sent, rcvd0 = armcpu_ipi_interrupts;
+    const uint64_t self0 = armcpu_ipi_selftest_sent;
     if (&armcpu_ipi_selftest) armcpu_ipi_selftest(0x100);
     IOSleep(200);
     const uint64_t sent1 = armcpu_ipi_sent, rcvd1 = armcpu_ipi_interrupts;
+    const uint64_t self1 = armcpu_ipi_selftest_sent;
 
     panic("HUMTOUCH ipi typer%08x iidr%08x lines%u\n"
           "HUMTOUCH ipi en%08x grp%08x prio%08x pend%08x\n"
-          "HUMTOUCH ipi route%016llx fast%u\n"
+          "HUMTOUCH ipi route%016llx self %llu->%llu\n"
           "HUMTOUCH ipi rd0 %016llx w%08x rd1 %016llx w%08x\n"
           "HUMTOUCH ipi sent %llu->%llu rcvd %llu->%llu",
           typer, iidr, lines,
           en, grp, prio, pend,
-          static_cast<unsigned long long>(route), gFastIPI,
+          static_cast<unsigned long long>(route),
+          static_cast<unsigned long long>(self0), static_cast<unsigned long long>(self1),
           static_cast<unsigned long long>(rd0typer), rd0waker,
           static_cast<unsigned long long>(rd1typer), rd1waker,
           static_cast<unsigned long long>(sent0), static_cast<unsigned long long>(sent1),
