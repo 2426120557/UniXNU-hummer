@@ -51,6 +51,7 @@ enum hgs_diag {
     HGS_D_A3,            // CH1 CNTXT_0 after the ring context was written
     HGS_D_RB,            // CH0 CNTXT_1 read back after programming (0x400 = the ring length stored)
     HGS_D_TRACE,         // per-command result, 2 bits each: alloc0 alloc1 start0 start1 (0 ok, 1 timeout, 2 error)
+    HGS_D_TR_ALL,        // the same trace for every GPII tried, one byte per instance (1..4)
     HGS_D_TIRQ,          // CNTXT_TYPE_IRQ after the event-channel ALLOCATE (bit0 = CH_CTRL)
     HGS_D_SRC,           // CNTXT_SRC_CH_IRQ after the TX channel ALLOCATE (bit k = channel k changed)
     HGS_D_EVSRC,         // CNTXT_SRC_EV_CH_IRQ after the event-channel ALLOCATE

@@ -352,6 +352,10 @@ static int hgs_channels_start(struct hgs_dma *g) {
     }
     g->diag[HGS_D_TRACE] = trace;
     g->diag[HGS_D_E4] = hgs_rd(g, HGS_ERRL(n));
+    // A START that never reports means this GPII instance cannot run our channels. Treat it
+    // as a failed attempt so hgs_init walks on to the next instance instead of stopping at
+    // GPII 1 - until now every build exercised exactly one instance and reported nothing.
+    if (trace & 0xf0u) return HGS_ERR_TIMEOUT;
     // A command the engine rejects also raises CH_CTRL (which is why a set SRC bit alone
     // is not proof of success), so capture the error reporting here as well: GLOB bit0 is
     // the general-error interrupt and ERROR_LOG is what mainline dumps on failure.
@@ -476,7 +480,10 @@ static int hgs_smmu_bypass(struct hgs_dma *g, uint32_t sid) {
     const uint32_t idr1 = m[HGS_SMMU_IDR1 / 4u];
     unsigned streams = idr0 & 0xffu;
     unsigned banks = idr1 & 0xffu;
-    const unsigned pages = 1u << (((idr1 >> 28) & 7u) + 1u);
+    // Context-bank page size, Linux's rule (arm-smmu.c): IDR1 bit31 set means 64 KiB banks,
+    // otherwise 4 KiB. UFS's planner used 1 << (((idr1 >> 28) & 7) + 1), which on this part
+    // (idr1 = 0x60000053) yields 128 pages and makes the window check fail for no reason.
+    const unsigned pages = (idr1 >> 31) & 1u ? 16u : 1u;
     g->diag[HGS_D_SMMU_IDR0] = idr0;
     g->diag[HGS_D_SMMU_IDR1] = idr1;
     if (!streams || banks < 2 || banks > 128) return -2;
@@ -582,12 +589,15 @@ int hgs_init(struct hgs_dma *g, uintptr_t regs, uintptr_t se, const struct hgs_r
     g->diag[HGS_D_SWVER] = hgs_rd(g, HGS_EE_SW_VERSION(1));
     g->diag[HGS_D_HWP2] = hgs_rd(g, HGS_EE_HW_PARAM_2(1));
     g->diag[HGS_D_HWP4] = hgs_rd(g, HGS_EE_HW_PARAM_4(1));
+    uint32_t trAll = 0;
     for (unsigned n = 1; n <= 4; ++n) {
         g->gpii = n;
         g->tx_wp = g->rx_wp = 0;
         g->ev_rp = g->ev_wp = 0;
         rc = hgs_try(g);
+        trAll |= (g->diag[HGS_D_TRACE] & 0xffu) << (8u * (n - 1u));
         if (!rc) {
+            g->diag[HGS_D_TR_ALL] = trAll;
             g->diag[HGS_D_GPII] = n;
             g->diag[HGS_D_EE] = g->ee;
             g->ready = 1;
@@ -595,6 +605,7 @@ int hgs_init(struct hgs_dma *g, uintptr_t regs, uintptr_t se, const struct hgs_r
             return HGS_OK;
         }
     }
+    g->diag[HGS_D_TR_ALL] = trAll;
     g->diag[HGS_D_GPII] = g->gpii;
     g->diag[HGS_D_EE] = g->ee;
     g->diag[HGS_D_CH0] = hgs_rd(g, HGS_CH_CNTXT(g->gpii, 0));
