@@ -472,6 +472,10 @@ static int hgs_try(struct hgs_dma *g) {
 #define HGS_SMMU_S2CR(i) (0xc00u + 4u * (i))
 #define HGS_SMMU_CBAR(b) (0x1000u + 4u * (b))
 #define HGS_SMMU_CBA2R(b) (0x1800u + 4u * (b))
+// Context bank registers live in GR1 at 0x8000, one page each - NOT right after CBAR/CBA2R.
+// v105 crashed with a synchronous external abort (FAR = smmu + 0x2000, i.e. bank 1 under the
+// old (pages + bank) * 4096 arithmetic) because 0x2000..0x7FFF is an unimplemented hole.
+#define HGS_SMMU_GR1 0x8000u
 
 static int hgs_smmu_bypass(struct hgs_dma *g, uint32_t sid) {
     if (!g->smmu) return -1;                       // no window mapped
@@ -504,7 +508,7 @@ static int hgs_smmu_bypass(struct hgs_dma *g, uint32_t sid) {
         // S2CR simply points at the same context bank - so reuse a bank that already is
         // "stage 1 off, stage 2 bypass" instead of failing.
         for (unsigned b = banks; b-- > 0u;) {
-            const uint32_t cbOff = (pages + b) * 4096u;
+            const uint32_t cbOff = HGS_SMMU_GR1 + b * pages * 4096u;
             if (m[HGS_SMMU_CBAR(b) / 4u] == 0x10000u && m[cbOff / 4u] == 0) {
                 bank = b; reuse = 1; break;
             }
@@ -520,7 +524,7 @@ static int hgs_smmu_bypass(struct hgs_dma *g, uint32_t sid) {
         if (!(m[HGS_SMMU_SMR(i) / 4u] & 0x80000000u)) {slot = i; break;}
     if (slot == streams) return -4;
 
-    const uint32_t cb = (pages + bank) * 4096u;
+    const uint32_t cb = HGS_SMMU_GR1 + bank * pages * 4096u;
     if (!reuse) {
         m[cb / 4u] = 0;                            // SCTLR = 0: stage 1 disabled
         hgs_barrier();
