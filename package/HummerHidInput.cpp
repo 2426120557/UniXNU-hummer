@@ -21,6 +21,7 @@ extern kmod_info_t g_kernel_kmod_info;
 extern "C" void native_hid_static_init(void) __asm__("__GLOBAL__sub_I_NativeHidInput.cpp");
 extern "C" IOService *native_hid_input_allocate(void);
 extern "C" IOService *native_hid_touch_allocate(void);
+extern "C" IOService *native_hid_buttons_allocate(void);
 extern "C" {
 extern kern_return_t OSKextLoadKextWithIdentifier(const char *);
 volatile uint32_t native_hid_stage,native_hid_resource_found;
@@ -172,6 +173,17 @@ extern "C" void native_hid_input_probe(void) {
                         native_hid_input_observed(7,kIOReturnError);
                         if(attached)device->detach(resource);
                         OSSafeReleaseNULL(device);native_hid_input_object=0;
+                    }
+                    if(started) {
+                        // Physical buttons: a Consumer Control device of their own. Report 2 on
+                        // the keyboard device stays as it is, but nothing downstream of it is
+                        // known to read a Consumer collection nested inside a Keyboard one.
+                        IOService *buttons=native_hid_buttons_allocate();
+                        bool buttonsStarted=buttons && buttons->metaCast("IOHIDDevice") && buttons->init() &&
+                                            buttons->attach(resource) && buttons->start(resource);
+                        // Nothing to record on failure: the board driver prints sink0 when no
+                        // device ever registered a sink, which is this branch.
+                        if(!buttonsStarted && buttons){buttons->detach(resource);OSSafeReleaseNULL(buttons);}
                     }
                     unsigned touchHid=0;
                     unsigned split=0;

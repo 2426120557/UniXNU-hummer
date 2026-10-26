@@ -24,6 +24,11 @@ extern "C" {
 #include "HummerTouchBoard.h"
 }
 
+// Filled in by the Consumer Control device (drivers/NativeHidInput): bit 0 = a client has
+// the device open, bits 8..15 = the last handleReport result. A report nobody consumes and a
+// report the device refused look identical from this side without it.
+extern "C" uint32_t native_buttons_status(void) __attribute__((weak_import));
+
 namespace {
 constexpr uint32_t kPonPpid = 0x013, kGpioPpid = 0x18d;
 constexpr uint8_t kPowerBit = 1u << 7, kResinBit = 1u << 6, kGpioBit = 1u << 0;
@@ -101,10 +106,6 @@ bool setup() {
 
 void buttonsThread(void *, wait_result_t) {
     const bool ready = setup();
-    // hummer-keyscan=2: the quiet state was already verified (arbiter v7, 896 APIDs, PON on
-    // APID 581, GPIO on 610, both reads rc0, sink registered). What is missing is the press
-    // itself, so this panics on the first one and prints what the mask became, whether the
-    // callback ran, and the raw levels behind it.
     if (!ready) {
         if (gVerbose) {
             panic("HUMTOUCH btn setup failed ver%08x apids%u pon%d gpio%d",
@@ -112,30 +113,43 @@ void buttonsThread(void *, wait_result_t) {
         }
         return;
     }
-    uint32_t last = 0;
-    unsigned settled = 0;
-    uint32_t candidate = 0;
+    uint32_t last = 0, candidate = 0, masks = 0;
+    unsigned settled = 0, ticks = 0, presses = 0;
+    // OR of every PON status byte and AND of every GPIO status byte seen: the first shows the
+    // bits that were ever asserted (so a key whose bit we guessed wrong still shows up), the
+    // second the bits that were ever pulled low on the active-low pad.
+    uint8_t ponOr = 0, gpioAnd = 0xff;
     for (;;) {
         const uint32_t mask = pressed();
+        ponOr |= gPonLast;
+        gpioAnd &= gGpioLast;
         if (mask == candidate) {
             if (++settled >= 3 && mask != last) {
                 last = mask;
                 void (*sink)(void *, uint32_t) = __atomic_load_n(&gSink, __ATOMIC_ACQUIRE);
                 if (sink) sink(gSinkContext, mask);
                 if (sink) ++gSent;
-                if (gVerbose && mask) {
-                    panic("HUMTOUCH btn press mask%08x sent%u sink%u\n"
-                          "HUMTOUCH btn raw pon %02x gpio %02x",
-                          mask, gSent, sink ? 1u : 0u, gPonLast, gGpioLast);
+                if (mask) {
+                    ++presses;
+                    masks |= mask;
                 }
             }
         } else {
             candidate = mask;
             settled = 0;
         }
+        // hummer-keyscan=2: one screen, 25 s in. Pressing a key before that still reaches the
+        // system, so a lock/wake or a volume change is observable instead of being preempted.
+        if (gVerbose && ++ticks >= 1250) {
+            const uint32_t st = (&native_buttons_status) ? native_buttons_status() : 0xffffffffu;
+            panic("HUMTOUCH btn p%u m%08x st%04x\n"
+                  "HUMTOUCH btn pon|%02x %02x gpio&%02x %02x",
+                  presses, masks, st, ponOr, gPonLast, gpioAnd, gGpioLast);
+        }
         IOSleep(20);
     }
 }
+
 }  // namespace
 
 // Called by drivers/NativeHidInput once its device is started (weak import there, so a build
