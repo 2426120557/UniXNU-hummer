@@ -53,7 +53,7 @@ jobs:
           path: |
             .cache
             out/feeds
-          key: hummer-13t-${{ hashFiles('upstream.rev', 'patches/unixnu-source-kernel.patch', 'patches/native-ufs-sm8750.patch', 'patches/native-mobile-display-stage7.patch') }}
+          key: hummer-13t-${{ hashFiles('upstream.rev', 'patches/unixnu-source-kernel.patch', 'patches/native-ufs-sm8750.patch', 'patches/native-mobile-display-stage7.patch', 'board.toml') }}
           restore-keys: |
             hummer-13t-
 
