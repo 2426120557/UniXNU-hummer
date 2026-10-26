@@ -279,3 +279,39 @@ The one wrong mapping flag was `mirrorY`, inherited from sheng's panel; v113 def
 to 0 (boot arg `hummer-touch-fy=0`). Note the panel is 1264x2780 (portrait, 0.1 px units)
 and the digitizer space is 30480x20320, so the X/Y scales are not 1:1 - a swipe that
 "feels fast" in one axis is a scale question, not a mirror one.
+
+## Multi-core: six cores on hummer (2026-10-26 23:15)
+
+`HUMTOUCH cpu processor_count=6 avail=6 max=5 cpus_arg=6` and the boot then reached
+`exit pid=1 init status=0` (SystemOS manifest, SystemOS mount, Data mount) instead of
+stopping in bsd_init.
+
+Three separate things had to be true, in this order:
+
+1. `sheng-smp=1` - `ArmCpu::probe()` returns nullptr for every secondary nub unless the
+   boot argument is set, so multi-core was never opt-in on this board. With it:
+   `sheng-smp-gic=1` as well, because the boot CPU has to wake the target redistributor
+   before `CPU_ON` (GICv3) or the new core spins on `wfe` in its own GICR.
+2. The first readout of `processor_count` said 1 and was simply taken too early - the probe
+   runs inside bsd_init's "original PMGR nub start", before IOKit matches the IOCPU nubs.
+   A delayed report (own thread, `hummer-cpu-delay` ms) is the honest measurement.
+3. The real bug: the engine's early-boot-progress patch replaced the exception vectors in
+   `start_cpu` for *every* core, and only the boot CPU ever calls
+   `early_boot_progress_vectors_done()`. A secondary therefore ran with BootProgress's table
+   (all 16 entries -> fatal), and its first timer interrupt in `machine_idle` was treated as
+   a fatal exception. Fixed in
+   `patches/unixnu-source-kernel.patch` -> `patches/xnu/zzzz-early-boot-progress.patch`:
+   the post-MMU VBAR block now tests `x21` (cpu_data pointer, zero only on the boot CPU) and
+   gives secondaries `ExceptionVectorsBase` with the usual KVA conversion.
+
+How the fault was identified, in case it happens again: the one-line early readout
+`E<checkpoint> <MPIDR>/<SPSR> <ESR> <ELR>` gave `E01 0200/04 00000000 0b9f4c78` - MPIDR 0x0200
+= cpu2, SPSR 0x04 = EL1t, ESR 0 = no syndrome (an IRQ/FIQ does not write ESR), and the ELR
+resolved through kernel.macho's symbol table to `_machine_idle`. That is the idle loop with
+interrupts enabled, which is exactly where a wrong vector table bites.
+
+Not done: the two Oryon prime cores sit at MPIDR Affinity2 (0x10000/0x10100) and XNU's
+`ml_parse_cpu_topology` derives cluster/cpu ids only from MPIDR_CLUSTER_ID/MPIDR_CPU_ID, so
+they collapse onto logical 0 - the "AppleS8000CPU: CPU configuration in device tree is
+invalid" panic of the earlier attempt. Eight cores needs an engine-side affinity mapping
+change (fold Aff2 into the logical id, and teach the PSCI CPU_ON call the same mapping).
