@@ -756,7 +756,10 @@ static void touchThread(void *, wait_result_t) {
     // was the timed-out read before it. Restore the ones that must not be zero.
     s->max_write = 1024;
     unsigned stage = native_htouch_stage_req, hz = TB_SPI_DEFAULT_HZ, pollMs = 8;
-    int mirrorY = 1, flipX = 0, swapXY = 0;
+    // v113: hummer's panel reports Y the same way round as the digitizer space expects -
+    // the mirror that sheng's panel needed made every vertical movement come out
+    // inverted here (first on-device report: left/right right, up/down reversed).
+    int mirrorY = 0, flipX = 0, swapXY = 0;
     PE_parse_boot_argn("hummer-touch-hz", &hz, sizeof hz);
     if (hz < 100000 || hz > TB_SPI_MAX_HZ) hz = TB_SPI_DEFAULT_HZ;
     PE_parse_boot_argn("hummer-touch-poll", &pollMs, sizeof pollMs);

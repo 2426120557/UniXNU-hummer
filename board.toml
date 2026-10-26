@@ -119,8 +119,11 @@ kernel_args = [
   #   两路 LDO 地址 0x40800(L4B) / 0x41900(L16B)。
   # v112: panic 关掉，stage 4 之后进触点轮询并往 NativeHidInput publish。
   #   想再要一次"点到为止"的诊断屏就把它改成 9（第一个触点上报时 panic）。
+  # v113: 第一次真机触摸的结果是"左右对、上下反"——sheng 那块面板要的 Y 镜像在
+  #   hummer 上是多余的，默认关掉（hummer-touch-fy=1 可再打开）。
   "offline-hid-input=1", "offline-hid-home=1", "sheng-touch-hid=1",
   "hummer-touch=4", "hummer-touch-panic=0", "hummer-touch-fifo=1",
+  "hummer-touch-fy=0",
 ]
 trust_cache_sha256 = ["7416ca4f8377146626bb284e2133c76bee6cb4e3ee0af5d648b186235a7323a7"]
 
