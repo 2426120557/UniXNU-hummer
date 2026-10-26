@@ -173,7 +173,10 @@ kernel_args = [
   #   v135 屏已经把"读"这一半彻底证实：p4 m0000000e st0002 —— 电源键（PON bit7）、
   #   RESIN（bit6）、GPIO6 三个都读到了，三个报告位都发过，且 IOHIDEventDriver 确实挂在
   #   新的 Consumer Control 设备下面。剩下唯一的问题是 iOS 认不认这些 Consumer usage。
-  #   所以这一版回到 1（不 panic，可以正常玩），并打开下面那个 Menu 探针。
+  #   v136 的 Menu 探针**没反应**，于是问题不再只是 usage：独立那台 Consumer Control 设备
+  #   （st0002 的 bit0=0）有个从没 open 它的 IOHIDEventDriver 子节点，报告送进去没人收。
+  #   v137 起：① 按键改回**合并设备**（它的数字化仪从 v112 起就一直在工作，确定被消费）；
+  #   ② report 2 的 Consumer 拆成**自己的 top-level collection**（不再是键盘 collection 的子项）。
   "hummer-keyscan=1",
   # hummer-key-menu=1：把任何按键都报成 Consumer Menu（= iOS 的 Home）。
   # 目的：一次按键就能分开"Consumer 事件根本没到"和"到了但 iOS 不认 Power 0x30 / 没有音频

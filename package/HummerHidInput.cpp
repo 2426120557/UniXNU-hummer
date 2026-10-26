@@ -174,15 +174,15 @@ extern "C" void native_hid_input_probe(void) {
                         if(attached)device->detach(resource);
                         OSSafeReleaseNULL(device);native_hid_input_object=0;
                     }
-                    if(started) {
-                        // Physical buttons: a Consumer Control device of their own. Report 2 on
-                        // the keyboard device stays as it is, but nothing downstream of it is
-                        // known to read a Consumer collection nested inside a Keyboard one.
+                    // Off by default since v137: a separate Consumer Control device gets an
+                    // IOHIDEventDriver child that never opens it (st0002 in the v135 readout), so
+                    // reports to it go nowhere. hummer-btn-dev=1 brings it back for experiments.
+                    unsigned buttonsDev=0;
+                    PE_parse_boot_argn("hummer-btn-dev",&buttonsDev,sizeof(buttonsDev));
+                    if(started && buttonsDev==1) {
                         IOService *buttons=native_hid_buttons_allocate();
                         bool buttonsStarted=buttons && buttons->metaCast("IOHIDDevice") && buttons->init() &&
                                             buttons->attach(resource) && buttons->start(resource);
-                        // Nothing to record on failure: the board driver prints sink0 when no
-                        // device ever registered a sink, which is this branch.
                         if(!buttonsStarted && buttons){buttons->detach(resource);OSSafeReleaseNULL(buttons);}
                     }
                     unsigned touchHid=0;
