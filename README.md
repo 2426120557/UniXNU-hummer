@@ -25,7 +25,7 @@ OnePlus Ace 5 Pro（`hummer` / PKR110 / SM8750 骁龙 8 Elite）的 UniXNU 设�
 | 8 核（2 个 Oryon prime） | ⬜ Aff2 拓扑未接 | — |
 | 常驻刷入（替代 `fastboot boot`） | ⬜ | — |
 
-## 五个坑（都已修，别再踩）
+## 六个坑（都已修，别再踩）
 
 ### 1. 6 核必须开 `sheng-smp=1`，而且从核要用内核向量表
 
@@ -88,6 +88,35 @@ v109/v110 凭 `L4B_E0` 之类的名字去查，`rc-19`（`-ENOENT`）浪费了�
 `key: hummer-13t-${{ hashFiles(...) }}` 里漏了 `board.toml` 时，只改启动参数**不会**让缓存失效，
 `.cache/upstream-*` 里固化的旧 config 会被复用——payload 里的 `args` 还是上一版的（v121 空转
 就是这么来的）。现在 `board.toml` 已在 key 里；另外 `doc` 类改动用 `[skip ci]` 提交，不触发编译。
+
+### 6. 非 Apple 平台没有 IPI，别指望修好，按 sheng 的做法绕过去
+
+`kernel.macho` 里查不到 `gFastIPI` 符号——`HAS_IPI` 是未定义的，所以 `sleh_fiq()` 里没有 IPI 分支，
+`ml_cpu_signal()` 是 `__dead2` 的 panic 版本，`cpu_signal()` 一直走
+`PE_cpu_signal() → IOCPU::signalCPU() → ArmCpu::signalCPU()`。而 ArmCpu 自己的注释写着
+`ICC_SGI1R_EL1 generates nothing on this board`，它的替代方案 `armcpu-spi-ipi=1`（软件 pend
+SPI 1008+core）在 hummer 上也没送到（`0x160C0000` 这个第二个 redistributor 直接 external abort）。
+
+结果就是 `task_restartable_ranges_synchronize()` 里的
+`hw_wait_while_equals32(&thread->t_rr_state.trr_value, …)` 永远等不到 ACK，超时后 panic：
+
+```
+wait_while_equals32[…]: timeout …  current value: 0x00010000   @locks.c:607
+```
+
+**引擎里已经有答案**（`osfmk/kern/startup.c`，sheng 的补丁）：
+
+```c
+/* A thread that waits for an IPI acknowledgement (restartable ranges) then keeps waiting
+ * instead of panicking the whole machine; the other cores keep running. */
+if (PE_parse_boot_argn("-no_slto_panic", &namep, sizeof(namep))) {
+    spinlock_timeout_panic = FALSE;
+}
+```
+
+所以 sheng 的板子上 IPI 同样不通，他们的做法是两个参数：`-no_slto_panic` +
+`ml-timeout-lock-panic-scale=40`。照抄即可，代价是 exec 改地址空间时有一个线程停在那条等待上，
+其余核照常跑。想在 XNU 里真正实现 IPI 是另一个量级的工程（发送 + 接收 + 中断号分配都要自己做）。
 
 ## 另外两个操作教训
 
