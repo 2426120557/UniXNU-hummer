@@ -37,8 +37,13 @@ def merge_pref(var, name, values):
     print('pref', name, sorted(values))
 
 def main():
-    no_auto_dim = '--no-auto-dim' in sys.argv[1:]
-    positional = [arg for arg in sys.argv[1:] if arg != '--no-auto-dim']
+    # The engine's `unixnu` (upstream.rev d9460ebb) only forwards the two positional
+    # paths - board.toml [payload] skip_setup_args is never passed on, which the v114 CI
+    # log proves (the command line has no --no-auto-dim and the JSON summary says
+    # "no_auto_dim": false). Baking the behaviour in as the default keeps the intent
+    # wherever the tool is invoked from; --auto-dim restores SpringBoard's idle dimming.
+    no_auto_dim = '--auto-dim' not in sys.argv[1:]
+    positional = [arg for arg in sys.argv[1:] if not arg.startswith('--')]
     if len(positional) != 2:
         sys.exit(__doc__)
     base, output = Path(positional[0]).resolve(), Path(positional[1]).resolve()
