@@ -23,8 +23,25 @@ def prepare(device=DEVICE, source=None):
         # The volume key needs a consumer usage the engine's keyboard report cannot carry,
         # so report 4 and its board entry point live in the NativeHidInput submodule.
         ('native-hid-media.patch', 'NativeHidInput'))]
-    fingerprint = hashlib.sha256(patch.read_bytes() + b''.join(
-        path.read_bytes() for path, _ in driver_patches if path.is_file())).hexdigest()
+    # Everything that ends up inside the built kernel decides this fingerprint. `package/`
+    # becomes kits/<board.kit> and `scripts/` holds the recipes that compile it, so a change
+    # to either one produces a different payload. Leaving them out meant "only edit a driver"
+    # hit the cache and reused the previous tree - v127c shipped the exact machine code of
+    # v127b, down to the same pc and far, because the tree was never rebuilt.
+    digest = hashlib.sha256(patch.read_bytes())
+    for path, _ in driver_patches:
+        if path.is_file():
+            digest.update(path.read_bytes())
+    for directory in ('package', 'scripts'):
+        root = device / directory
+        if not root.is_dir():
+            continue
+        for source in sorted(root.rglob('*')):
+            if not source.is_file() or '__pycache__' in source.parts:
+                continue
+            digest.update(str(source.relative_to(device)).encode())
+            digest.update(source.read_bytes())
+    fingerprint = digest.hexdigest()
     cache = device / '.cache'
     target = cache / f'upstream-{revision[:12]}-{fingerprint[:12]}'
     if target.is_dir():
