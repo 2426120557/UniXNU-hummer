@@ -1,79 +1,64 @@
 /* SPDX-License-Identifier: BSD-2-Clause-Patent */
 /*
- * hummer: Adreno 830 (a8xx) register liveness probe.
+ * hummer: Adreno 830 (a8xx) state probe.
  *
- * The engine already calls native_adreno_firmware_probe() from bsd_init()
- * (offline-component-load-probes.patch, after vfsinit) when the defconfig
- * carries CONFIG_XNU_ADRENO_FIRMWARE_PROBE=y, and force-loads the archive
- * this file lands in (build/adreno-firmware-probe/libAdrenoFirmwareProbe.a).
- * Nothing in the kernel tree has to be patched for that.
+ * The engine calls native_adreno_firmware_probe() from bsd_init() (via
+ * patches/xnu/offline-component-load-probes.patch, right after vfsinit) when
+ * the defconfig carries CONFIG_XNU_ADRENO_FIRMWARE_PROBE=y, and force-loads
+ * the archive this file lands in (build/adreno-firmware-probe/
+ * libAdrenoFirmwareProbe.a).
  *
- * What this is not: a driver.  The a8xx display stack (GMU firmware, SMMU,
- * clocks/GDSC, then the Metal plugin) is a project of its own; this probe
- * only answers the first question with hardware truth instead of guesses:
- * do the windows the device tree advertises answer at all?
+ * What this is not: a driver.  It answers one question with hardware truth:
+ * in what power/clock state does the a8xx GPU sit when XNU takes over, and
+ * which of its register blocks answer at all?
  *
- * All addresses come from the stock DTB (qcom,kgsl-3d0@3d00000 with its
- * reg-names, and clock-controller@3d90000 = qcom,sun-gpucc):
- *   kgsl_3d0_reg_memory 0x3d00000 / 0x40000
- *   rscc                0x3d50000 / 0x10000
- *   cx_dbgc             0x3d61000 / 0x3000
- *   cx_misc             0x3d9e000 / 0x2000
- *   cc_base (gpucc)     0x3d90000 / 0x9800
- * and the node itself says qcom,gpu-model "Adreno830v2", qcom,chipid
- * 0x44050001, compatible "qcom,adreno-gpu-gen8-0-1".
+ * The first version read the first eight dwords of each window.  That was
+ * useless: the meaningful registers are not at 0x00.  The offsets below come
+ * from the A830 reference driver (hackios adreno8_private.h), which names
+ * them by dword the way the vendor does:
  *
- * Gated by boot arg hummer-adreno-probe=1 (PE_parse_boot_argn, the same
- * pattern native-ufs-probe uses).  Reading a collapsed GX domain is expected
- * to come back as zeroes rather than hang the NoC; if that is wrong the probe
- * shows it as a fault, which is also the answer.  Every read is bounded and
- * the probe always ends in a panic so the values stay on the panel (and on
- * the UART once hummer-uart=1 is set).
+ *   GPUCC  (0x3d90000)  CX_GDSCR 0x9080  bit31 = domain UP, bit0 = SW collapse,
+ *                                        bit1 = HW control
+ *                       CX_HW_CTRL 0x9094   the hardware's own vote
+ *                       AHB_CBCR 0x90bc     register bus clock
+ *                       CX_CBCR 0x90e4      crystal clock into the block
+ *                       GX_GMU_CBCR 0x9060  GX clocks (only after the GMU runs)
+ *                       GX_ACCU_CBCR 0x9070
+ *   KGSL   (0x3d00000)  RBBM_STATUS 0x48, RBBM_STATUS1 0x4c,
+ *                       GPU_GBIF_HALT 0xf114
+ *   RSCC   (0x3d50000)  RSC_STATUS RSCC(0x4) = 0x10, bit16 = RSC asleep
+ *   CXMISC (0x3d9e000)  SW_FUSE 0x1000, TCM_RET 0xe4
+ *
+ * GX itself is powered by the GMU firmware's vote, not by a plain GDSCR write
+ * (the reference drives adreno8_step_gx_power through HFI), so a zero RBBM
+ * before the GMU boots is expected, not a fault.
+ *
+ * Gated by boot arg hummer-adreno-probe=1.  Always ends in a panic, with every
+ * reading inside the panic text: the BootProgress panic UI redraws the screen,
+ * so anything printed with IOLog before it is lost.
  */
 #include <kern/debug.h>
 #include <pexpert/pexpert.h>
 #include <IOKit/IOLib.h>
 #include <arm/machine_routines.h>   /* ml_io_map lives here, not machine/ */
 
-/* ml_io_map is a PEXPERT_KERNEL_PRIVATE declaration in
- * <arm/machine_routines.h>: the bsd compile record this file is built with
- * carries KERNEL_PRIVATE but not PEXPERT_KERNEL_PRIVATE, so the prototype
- * is compiled out (v68c lost a run to exactly that).  The prototype below
- * is the header's own, verbatim. */
+/* See the note in the first version: the bsd compile record does not define
+ * PEXPERT_KERNEL_PRIVATE, so the header's own prototype is compiled out. */
 extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
+
 #include <libkern/OSBase.h>
 #include <libkern/OSTypes.h>
 
-#define HU_ADRENO_KGSL_BASE   0x3d00000ULL
-#define HU_ADRENO_KGSL_SIZE   0x40000ULL
-#define HU_ADRENO_RSCC_BASE   0x3d50000ULL
-#define HU_ADRENO_RSCC_SIZE   0x10000ULL
-#define HU_ADRENO_CXMISC_BASE 0x3d9e000ULL
-#define HU_ADRENO_CXMISC_SIZE 0x2000ULL
-#define HU_ADRENO_GPUCC_BASE  0x3d90000ULL
-#define HU_ADRENO_GPUCC_SIZE  0x9800ULL
+#define HU_KGSL_BASE    0x3d00000ULL
+#define HU_KGSL_SIZE    0x40000ULL
+#define HU_RSCC_BASE    0x3d50000ULL
+#define HU_RSCC_SIZE    0x10000ULL
+#define HU_GPUCC_BASE   0x3d90000ULL
+#define HU_GPUCC_SIZE   0x9800ULL
+#define HU_CXMISC_BASE  0x3d9e000ULL
+#define HU_CXMISC_SIZE  0x2000ULL
 
-/* The first eight dwords of each window, published for the panic line and
- * for any later kernel dump. */
-volatile int       hummer_adreno_probe_stage;
-volatile uint32_t  hummer_adreno_probe_kgsl[8];
-volatile uint32_t  hummer_adreno_probe_rscc[8];
-volatile uint32_t  hummer_adreno_probe_cxmisc[8];
-volatile uint32_t  hummer_adreno_probe_gpucc[8];
-
-struct hummer_adreno_window {
-	uint64_t          base;
-	uint64_t          size;
-	const char       *name;
-	volatile uint32_t *out;
-};
-
-static const struct hummer_adreno_window hummer_adreno_windows[] = {
-	{ HU_ADRENO_KGSL_BASE,   HU_ADRENO_KGSL_SIZE,   "kgsl",   hummer_adreno_probe_kgsl },
-	{ HU_ADRENO_RSCC_BASE,   HU_ADRENO_RSCC_SIZE,   "rscc",   hummer_adreno_probe_rscc },
-	{ HU_ADRENO_CXMISC_BASE, HU_ADRENO_CXMISC_SIZE, "cxmisc", hummer_adreno_probe_cxmisc },
-	{ HU_ADRENO_GPUCC_BASE,  HU_ADRENO_GPUCC_SIZE,  "gpucc",  hummer_adreno_probe_gpucc },
-};
+volatile int hummer_adreno_probe_stage;
 
 void
 native_adreno_firmware_probe(void)
@@ -86,62 +71,49 @@ native_adreno_firmware_probe(void)
 	}
 	hummer_adreno_probe_stage = 1;
 
-	for (unsigned w = 0; w < sizeof(hummer_adreno_windows) / sizeof(hummer_adreno_windows[0]); w++) {
-		const struct hummer_adreno_window *win = &hummer_adreno_windows[w];
-		hummer_adreno_probe_stage = (int)(w + 2);
-
-		vm_offset_t va = ml_io_map(win->base, win->size);
-		if (va == 0) {
-			IOLog("hummer-adreno: %s @0x%llx: ml_io_map failed\n",
-			    win->name, win->base);
-			panic("hummer: adreno probe: %s window unmappable", win->name);
-		}
-
-		for (unsigned i = 0; i < 8; i++) {
-			win->out[i] = *(volatile uint32_t *)(uintptr_t)(va + i * 4);
-		}
-		IOLog("hummer-adreno: %s @0x%llx: %08x %08x %08x %08x %08x %08x %08x %08x\n",
-		    win->name, win->base,
-		    win->out[0], win->out[1], win->out[2], win->out[3],
-		    win->out[4], win->out[5], win->out[6], win->out[7]);
+	vm_offset_t kgsl = ml_io_map(HU_KGSL_BASE, HU_KGSL_SIZE);
+	vm_offset_t rscc = ml_io_map(HU_RSCC_BASE, HU_RSCC_SIZE);
+	vm_offset_t gpucc = ml_io_map(HU_GPUCC_BASE, HU_GPUCC_SIZE);
+	vm_offset_t cxmisc = ml_io_map(HU_CXMISC_BASE, HU_CXMISC_SIZE);
+	if (!kgsl || !rscc || !gpucc || !cxmisc) {
+		panic("hummer adreno: window unmappable kgsl=%lx rscc=%lx gpucc=%lx cxmisc=%lx",
+		    (unsigned long)kgsl, (unsigned long)rscc,
+		    (unsigned long)gpucc, (unsigned long)cxmisc);
 	}
+
+#define HU_RD(base, off) (*(volatile uint32_t *)(uintptr_t)((base) + (off)))
+
+	uint32_t cx_gdscr  = HU_RD(gpucc,  0x9080);
+	uint32_t cx_hw     = HU_RD(gpucc,  0x9094);
+	uint32_t ahb_cbcr  = HU_RD(gpucc,  0x90bc);
+	uint32_t cx_cbcr   = HU_RD(gpucc,  0x90e4);
+	uint32_t gx_gmu    = HU_RD(gpucc,  0x9060);
+	uint32_t gx_accu   = HU_RD(gpucc,  0x9070);
+	uint32_t rbbm      = HU_RD(kgsl,   0x0048);
+	uint32_t rbbm1     = HU_RD(kgsl,   0x004c);
+	uint32_t kgsl0     = HU_RD(kgsl,   0x0000);
+	uint32_t gbif      = HU_RD(kgsl,   0xf114);
+	uint32_t rsc       = HU_RD(rscc,   0x0010);
+	uint32_t fuse      = HU_RD(cxmisc, 0x1000);
+	uint32_t tcm       = HU_RD(cxmisc, 0x00e4);
+
+#undef HU_RD
 
 	hummer_adreno_probe_stage = 100;
 
-	/* The panel panic UI (BootProgress) redraws the screen, so the IOLog
-	 * lines above are lost by the time anyone reads it.  Put the raw dwords
-	 * into the panic text itself: four windows, eight dwords each, four per
-	 * line so no number is split across a wrap. */
-	int any = 0;
-	for (unsigned i = 0; i < 8; i++) {
-		any |= (hummer_adreno_probe_kgsl[i] | hummer_adreno_probe_rscc[i] |
-		    hummer_adreno_probe_cxmisc[i] | hummer_adreno_probe_gpucc[i]) != 0;
-	}
-
-	panic("hummer adreno probe (Adreno830v2 chipid 0x44050001)%s\n"
-	    "kgsl   %08x %08x %08x %08x\n"
-	    "       %08x %08x %08x %08x\n"
-	    "rscc   %08x %08x %08x %08x\n"
-	    "       %08x %08x %08x %08x\n"
-	    "cxmisc %08x %08x %08x %08x\n"
-	    "       %08x %08x %08x %08x\n"
-	    "gpucc  %08x %08x %08x %08x\n"
-	    "       %08x %08x %08x %08x",
-	    any ? "" : "  [ALL ZERO]",
-	    hummer_adreno_probe_kgsl[0], hummer_adreno_probe_kgsl[1],
-	    hummer_adreno_probe_kgsl[2], hummer_adreno_probe_kgsl[3],
-	    hummer_adreno_probe_kgsl[4], hummer_adreno_probe_kgsl[5],
-	    hummer_adreno_probe_kgsl[6], hummer_adreno_probe_kgsl[7],
-	    hummer_adreno_probe_rscc[0], hummer_adreno_probe_rscc[1],
-	    hummer_adreno_probe_rscc[2], hummer_adreno_probe_rscc[3],
-	    hummer_adreno_probe_rscc[4], hummer_adreno_probe_rscc[5],
-	    hummer_adreno_probe_rscc[6], hummer_adreno_probe_rscc[7],
-	    hummer_adreno_probe_cxmisc[0], hummer_adreno_probe_cxmisc[1],
-	    hummer_adreno_probe_cxmisc[2], hummer_adreno_probe_cxmisc[3],
-	    hummer_adreno_probe_cxmisc[4], hummer_adreno_probe_cxmisc[5],
-	    hummer_adreno_probe_cxmisc[6], hummer_adreno_probe_cxmisc[7],
-	    hummer_adreno_probe_gpucc[0], hummer_adreno_probe_gpucc[1],
-	    hummer_adreno_probe_gpucc[2], hummer_adreno_probe_gpucc[3],
-	    hummer_adreno_probe_gpucc[4], hummer_adreno_probe_gpucc[5],
-	    hummer_adreno_probe_gpucc[6], hummer_adreno_probe_gpucc[7]);
+	panic("adreno830 state:\n"
+	    "gpucc cx_gdscr=%08x up=%u hw=%08x\n"
+	    "gpucc ahb=%08x cx_cbcr=%08x\n"
+	    "gpucc gx_gmu=%08x gx_accu=%08x\n"
+	    "kgsl  rbbm=%08x rbbm1=%08x\n"
+	    "kgsl  [0]=%08x gbif=%08x\n"
+	    "rscc  rsc=%08x asleep=%u\n"
+	    "cxmisc fuse=%08x tcm=%08x",
+	    cx_gdscr, (cx_gdscr >> 31) & 1u, cx_hw,
+	    ahb_cbcr, cx_cbcr,
+	    gx_gmu, gx_accu,
+	    rbbm, rbbm1,
+	    kgsl0, gbif,
+	    rsc, (rsc >> 16) & 1u,
+	    fuse, tcm);
 }
