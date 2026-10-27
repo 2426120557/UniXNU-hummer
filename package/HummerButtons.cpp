@@ -4,8 +4,10 @@
 // ShengHidInput defines, and the one drivers/NativeHidInput now carries).
 //
 // Follows UniXNU-sheng's package/ButtonProbe.cpp; only the board constants differ:
-//   hummer.dts  gpio_keys/vol_down  = <&pm8550_gpios 6 GPIO_ACTIVE_LOW>, code 0x72
-//               pinctrl@8800 "gpio6" input-enable / bias-pull-up / power-source 1
+//   hummer.dts  gpio_keys names GPIO6 (PM8550) as vol_down, but on this board GPIO6 is the
+//               VOLUME-UP key and PON RESIN is VOLUME-DOWN - the same pairing ShengHidInput
+//               uses, and the one the hardware actually shows (volume came out reversed before
+//               the swap). pinctrl@8800 "gpio6" input-enable / bias-pull-up / power-source 1.
 //               pon_hlos@1300 "qcom,pmk8350-pwrkey" (PON pwrkey) and a resin node
 // PM8550 is SPMI USID 1, pad 5 = 0x8800 + 5*0x100, real-time status at +0x10 -> 0x8D10,
 // ppid = 0x18D. The PMK8550 PON peripheral is USID 0, periph 0x13 -> RT_STS 0x1310,
@@ -90,13 +92,14 @@ uint32_t pressed() {
     uint32_t mask = 0;
     if (gPon >= 0 && !br_read8(gObs.va, &gArb, gPon, kRtSts, &pon)) {
         if (pon & kPowerBit) mask |= kReportPower;
-        // hummer.dts names only one gpio-keys child (volume down on PM8550 GPIO6), so the
-        // second volume key can only be RESIN. If the pairing turns out swapped on hardware,
-        // these two lines are the whole change.
-        if (pon & kResinBit) mask |= kReportVolumeUp;
+        // Board convention matches the upstream ShengHidInput reference and the observed
+        // hardware: PM8550 GPIO6 is VOLUME UP, PON RESIN is VOLUME DOWN. The original
+        // HummerButtons assumed hummer.dts's gpio-keys child made GPIO6 volume-down; on this
+        // board that produced reversed volume, so these two lines are swapped from that.
+        if (pon & kResinBit) mask |= kReportVolumeDown;
     }
     if (gGpio >= 0 && !br_read8(gObs.va, &gArb, gGpio, kRtSts, &gpio) && !(gpio & kGpioBit)) {
-        mask |= kReportVolumeDown;
+        mask |= kReportVolumeUp;
     }
     gPonLast = pon;
     gGpioLast = gpio;

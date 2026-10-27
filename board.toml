@@ -180,9 +180,13 @@ kernel_args = [
   #   v137 实测：去掉独立设备、按键回到合并设备、report 2 的 Consumer 拆成自己的
   #   top-level collection 之后，按任意键报成 Consumer Menu（Home）**能稳定回到桌面** ——
   #   通路（合并设备的数字化仪从 v112 起就被消费）彻底打通。
-  #   v138：撤销上面的 menu 探针（不再把所有键都当成 Home），让电源/音量键报各自真实 usage；
-  #   同时修正 descriptor 里 0xe9/0xea 的位序（原先 VolUp/VolDown 接反）。
-  #   电源键 → Consumer 0x30(Power)；音量加 → 0xea(Vol Inc)；音量减 → 0xe9(Vol Dec)。
+  #   v138：撤销 menu 探针，让电源/音量键报各自真实 usage；并交换 descriptor 里 0xe9/0xea 的
+  #   位序（以为 VolUp/VolDown 接反）。但实测音量仍反 → 真因不在 descriptor，而在
+  #   HummerButtons.cpp 的 RESIN/GPIO6 物理映射写反了（误信 DTS 命名 GPIO6=vol_down）。
+  #   v139（对照官方 ShengHidInput 参考）：① 把 RESIN/GPIO6 对调成 GPIO6=音量加、RESIN=音量减
+  #   （与 sheng 一致、与实测硬件一致）；② report 2 从独立 top-level Consumer collection **嵌回
+  #   键盘 application**（sheng 的结构）——iOS 把键盘的 consumer 控制当系统键路由，独立集合只送到
+  #   Home、电源键不吃这一套。电源键仍用 Consumer 0x30(Power)。
   #   音量键在没有音频驱动（本机没有 codec/audio）时不会出声，属已知缺口，非回归。
   "hummer-keyscan=1",
   # v120 实测（带 hummer-cpu=1 的延迟诊断屏）：
