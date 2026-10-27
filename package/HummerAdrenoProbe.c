@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: BSD-2-Clause-Patent */
 /*
- * hummer: Adreno 830 (a8xx) state probe.
+ * hummer: Adreno 830 (a8xx) CX power step.
  *
  * The engine calls native_adreno_firmware_probe() from bsd_init() (via
  * patches/xnu/offline-component-load-probes.patch, right after vfsinit) when
@@ -8,43 +8,43 @@
  * the archive this file lands in (build/adreno-firmware-probe/
  * libAdrenoFirmwareProbe.a).
  *
- * What this is not: a driver.  It answers one question with hardware truth:
- * in what power/clock state does the a8xx GPU sit when XNU takes over, and
- * which of its register blocks answer at all?
+ * v144 measured the state the boot loader hands over, and the answer was
+ * clean:
+ *   GPUCC_CX_GDSCR = 0x0222f801  bit31 = 0 (CX down)
+ *                                bit1  = 0 (NOT under hardware control)
+ *                                bit0  = 1 (software collapse requested)
+ *   RBBM / GBIF / CXMISC / GX clocks all read 0, which is exactly what a
+ *   collapsed CX domain looks like -- none of it is a fault.
  *
- * The first version read the first eight dwords of each window.  That was
- * useless: the meaningful registers are not at 0x00.  The offsets below come
- * from the A830 reference driver (hackios adreno8_private.h), which names
- * them by dword the way the vendor does:
+ * That is the branch of the A830 reference driver's adreno8_step_cx_power
+ * where the domain is ours to pull: the 3D core has no OS-visible switch
+ * (the GMU firmware powers GX), but the CX half is controlled here, by
+ * clearing GDSC_SW_COLLAPSE (bit 0) in GPUCC_CX_GDSCR and waiting for
+ * GDSC_POWER_ON (bit 31) to come back -- the other two branches are "already
+ * up, leave it" and "under hardware control and off, not ours".
  *
- *   GPUCC  (0x3d90000)  CX_GDSCR 0x9080  bit31 = domain UP, bit0 = SW collapse,
- *                                        bit1 = HW control
- *                       CX_HW_CTRL 0x9094   the hardware's own vote
- *                       AHB_CBCR 0x90bc     register bus clock
- *                       CX_CBCR 0x90e4      crystal clock into the block
- *                       GX_GMU_CBCR 0x9060  GX clocks (only after the GMU runs)
- *                       GX_ACCU_CBCR 0x9070
- *   KGSL   (0x3d00000)  RBBM_STATUS 0x48, RBBM_STATUS1 0x4c,
- *                       GPU_GBIF_HALT 0xf114
- *   RSCC   (0x3d50000)  RSC_STATUS RSCC(0x4) = 0x10, bit16 = RSC asleep
- *   CXMISC (0x3d9e000)  SW_FUSE 0x1000, TCM_RET 0xe4
+ * This version performs exactly that write once, polls up to 500 ms, and
+ * then panics with the before/after state so the panel shows whether the
+ * domain actually came up.  It does not restore the register: the device is
+ * rebooted after the panic anyway, and restoring would hide the answer.
  *
- * GX itself is powered by the GMU firmware's vote, not by a plain GDSCR write
- * (the reference drives adreno8_step_gx_power through HFI), so a zero RBBM
- * before the GMU boots is expected, not a fault.
- *
- * Gated by boot arg hummer-adreno-probe=1.  Always ends in a panic, with every
- * reading inside the panic text: the BootProgress panic UI redraws the screen,
- * so anything printed with IOLog before it is lost.
+ * Gated by boot arg hummer-adreno-probe=1.  The BootProgress panic UI redraws
+ * the screen, so every number goes inside the panic text (IOLog would be lost).
  */
 #include <kern/debug.h>
 #include <pexpert/pexpert.h>
 #include <IOKit/IOLib.h>
 #include <arm/machine_routines.h>   /* ml_io_map lives here, not machine/ */
 
-/* See the note in the first version: the bsd compile record does not define
- * PEXPERT_KERNEL_PRIVATE, so the header's own prototype is compiled out. */
+/* The bsd compile record does not define PEXPERT_KERNEL_PRIVATE, so the
+ * header's own prototype for ml_io_map is compiled out; repeat it verbatim. */
 extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
+
+/* BootProgress' live stage marker: it prints to the panel immediately, so if
+ * the CX write hangs the screen still shows the last stage reached.  Declared
+ * here instead of including <kern/boot_progress.h> so the probe's include set
+ * stays exactly what bsd_init.o already compiles against. */
+extern void boot_progress_stage(const char *s);
 
 #include <libkern/OSBase.h>
 #include <libkern/OSTypes.h>
@@ -58,6 +58,18 @@ extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
 #define HU_CXMISC_BASE  0x3d9e000ULL
 #define HU_CXMISC_SIZE  0x2000ULL
 
+/* GPUCC offsets, from the A830 reference driver's adreno8_private.h. */
+#define HU_GPUCC_CX_GDSCR   0x9080u   /* bit31 up, bit1 hw control, bit0 sw collapse */
+#define HU_GPUCC_CX_HW_CTRL 0x9094u
+#define HU_GPUCC_AHB_CBCR   0x90bcu
+#define HU_GPUCC_CX_CBCR    0x90e4u
+#define HU_GPUCC_GX_GMU     0x9060u
+#define HU_GPUCC_GX_ACCU    0x9070u
+
+#define HU_GDSC_SW_COLLAPSE (1u << 0)
+#define HU_GDSC_HW_CONTROL  (1u << 1)
+#define HU_GDSC_POWER_ON    (1u << 31)
+
 volatile int hummer_adreno_probe_stage;
 
 void
@@ -70,6 +82,7 @@ native_adreno_firmware_probe(void)
 		return;
 	}
 	hummer_adreno_probe_stage = 1;
+	boot_progress_stage("adreno: probe start");
 
 	vm_offset_t kgsl = ml_io_map(HU_KGSL_BASE, HU_KGSL_SIZE);
 	vm_offset_t rscc = ml_io_map(HU_RSCC_BASE, HU_RSCC_SIZE);
@@ -82,38 +95,57 @@ native_adreno_firmware_probe(void)
 	}
 
 #define HU_RD(base, off) (*(volatile uint32_t *)(uintptr_t)((base) + (off)))
+#define HU_WR(base, off, v) \
+	(*(volatile uint32_t *)(uintptr_t)((base) + (off)) = (uint32_t)(v))
 
-	uint32_t cx_gdscr  = HU_RD(gpucc,  0x9080);
-	uint32_t cx_hw     = HU_RD(gpucc,  0x9094);
-	uint32_t ahb_cbcr  = HU_RD(gpucc,  0x90bc);
-	uint32_t cx_cbcr   = HU_RD(gpucc,  0x90e4);
-	uint32_t gx_gmu    = HU_RD(gpucc,  0x9060);
-	uint32_t gx_accu   = HU_RD(gpucc,  0x9070);
-	uint32_t rbbm      = HU_RD(kgsl,   0x0048);
-	uint32_t rbbm1     = HU_RD(kgsl,   0x004c);
-	uint32_t kgsl0     = HU_RD(kgsl,   0x0000);
-	uint32_t gbif      = HU_RD(kgsl,   0xf114);
-	uint32_t rsc       = HU_RD(rscc,   0x0010);
-	uint32_t fuse      = HU_RD(cxmisc, 0x1000);
-	uint32_t tcm       = HU_RD(cxmisc, 0x00e4);
+	uint32_t gdscr0 = HU_RD(gpucc, HU_GPUCC_CX_GDSCR);
+	uint32_t hw0    = HU_RD(gpucc, HU_GPUCC_CX_HW_CTRL);
+	uint32_t up0    = ((gdscr0 | hw0) >> 31) & 1u;
+
+	uint32_t acted = 0, loops = 0;
+	uint32_t gdscr1 = gdscr0, hw1 = hw0, up1 = up0;
+	uint32_t target = gdscr0 & ~HU_GDSC_SW_COLLAPSE;
+
+	/* The reference's three branches: already up -> leave it; hardware
+	 * control and off -> not ours; otherwise clear software collapse. */
+	if (!up0 && !(gdscr0 & HU_GDSC_HW_CONTROL)) {
+		acted = 1;
+		hummer_adreno_probe_stage = 2;
+		boot_progress_stage("adreno: cx write");
+		HU_WR(gpucc, HU_GPUCC_CX_GDSCR, target);
+		boot_progress_stage("adreno: cx poll");
+		hummer_adreno_probe_stage = 3;
+		for (loops = 1; loops <= 5000; loops++) {
+			gdscr1 = HU_RD(gpucc, HU_GPUCC_CX_GDSCR);
+			hw1    = HU_RD(gpucc, HU_GPUCC_CX_HW_CTRL);
+			up1    = ((gdscr1 | hw1) >> 31) & 1u;
+			if (up1) {
+				break;
+			}
+			IODelay(100);
+		}
+	}
+
+	hummer_adreno_probe_stage = 4;
+	boot_progress_stage("adreno: cx done");
+
+	uint32_t rbbm2 = HU_RD(kgsl,   0x0048);
+	uint32_t fuse2 = HU_RD(cxmisc, 0x1000);
+	uint32_t rsc2  = HU_RD(rscc,   0x0010);
+	uint32_t ahb2  = HU_RD(gpucc,  HU_GPUCC_AHB_CBCR);
 
 #undef HU_RD
+#undef HU_WR
 
 	hummer_adreno_probe_stage = 100;
 
-	panic("adreno830 state:\n"
-	    "gpucc cx_gdscr=%08x up=%u hw=%08x\n"
-	    "gpucc ahb=%08x cx_cbcr=%08x\n"
-	    "gpucc gx_gmu=%08x gx_accu=%08x\n"
-	    "kgsl  rbbm=%08x rbbm1=%08x\n"
-	    "kgsl  [0]=%08x gbif=%08x\n"
-	    "rscc  rsc=%08x asleep=%u\n"
-	    "cxmisc fuse=%08x tcm=%08x",
-	    cx_gdscr, (cx_gdscr >> 31) & 1u, cx_hw,
-	    ahb_cbcr, cx_cbcr,
-	    gx_gmu, gx_accu,
-	    rbbm, rbbm1,
-	    kgsl0, gbif,
-	    rsc, (rsc >> 16) & 1u,
-	    fuse, tcm);
+	panic("adreno830 cx step:\n"
+	    "before gdscr=%08x hw=%08x up=%u swcollapse=%u\n"
+	    "write  acted=%u target=%08x\n"
+	    "after  gdscr=%08x hw=%08x up=%u loops=%u\n"
+	    "post   rbbm=%08x fuse=%08x rsc=%08x ahb=%08x",
+	    gdscr0, hw0, up0, gdscr0 & HU_GDSC_SW_COLLAPSE,
+	    acted, target,
+	    gdscr1, hw1, up1, loops,
+	    rbbm2, fuse2, rsc2, ahb2);
 }
