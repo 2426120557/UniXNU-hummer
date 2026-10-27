@@ -38,7 +38,11 @@
 #include "NativeAdrenoKernelTime.h"
 #include "NativeAdrenoSha256.h"
 
-extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
+/* This translation unit is C++, so the kernel's C entry points must be declared
+ * with C linkage or the reference is emitted mangled and the link fails with
+ * "found _ml_io_map in machine_routines.o, declaration possibly missing
+ * extern \"C\"" (that is exactly what v155 hit). */
+extern "C" vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
 extern "C" void boot_progress_stage(const char *s);
 
 /* The firmware archive's strong definitions; NativeAdrenoFirmwareDefaults.cpp
