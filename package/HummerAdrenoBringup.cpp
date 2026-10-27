@@ -111,6 +111,82 @@ static int cx_power_up(uint32_t *before, uint32_t *after)
 	return (gdscr1 | hw1) >> 31;
 }
 
+/* The GPU SMMU on this board is not virgin. The boot loader leaves stream routes
+ * behind, and the arm-smmu kit refuses to attach a slot whose S2CR is not already
+ * FAULT (ArmSmmu4KStreams.c: "All target S2CRs must already fault"). v156 proved
+ * that matters here: slot 2 read back S2CR 0x03000018 (context 24, translate),
+ * so the kit returned Busy and the bring-up stopped at step 4.
+ *
+ * The layout is the SMMU-500 one the kit and the K90 driver agree on: SMR at
+ * 0x800+4n with bit 31 valid (bit 10 of S2CR instead in EXIDS mode), stream in
+ * [14:0] and match mask in [30:16]; S2CR at 0xc00+4n with type in [17:16]
+ * (0 = translate, 2 = fault) and the context bank in [7:0]. */
+struct hu_smmu_slot {
+	unsigned slot;
+	uint32_t smr, s2cr;
+};
+
+struct hu_smmu_view {
+	uint32_t id0, id1, id2, scr0;
+	unsigned matches, exids, live, free_slots, pick, takeover, prefaulted;
+	unsigned sid_taken;
+	unsigned live_count;
+	hu_smmu_slot live_map[4];
+};
+
+static void hu_smmu_scan(vm_offset_t base, unsigned sid, hu_smmu_view *v)
+{
+	*v = hu_smmu_view{};
+	v->id0 = HU_RD(base, 0x20);
+	v->id1 = HU_RD(base, 0x24);
+	v->id2 = HU_RD(base, 0x28);
+	v->scr0 = HU_RD(base, 0x00);
+	v->matches = v->id0 & 0xffu;
+	v->exids = (v->id0 >> 8) & 1u;
+	v->pick = v->matches;      /* "nothing chosen" */
+	v->takeover = v->matches;
+	if (!v->matches)
+		return;
+	const uint32_t smr_valid = v->exids ? 0u : (1u << 31);
+	const uint32_t s2cr_valid = v->exids ? (1u << 10) : 0u;
+	for (unsigned i = 0; i < v->matches; ++i) {
+		const uint32_t smr = HU_RD(base, 0x800 + 4 * i);
+		const uint32_t s2cr = HU_RD(base, 0xc00 + 4 * i);
+		if (!(smr & smr_valid)) {
+			/* Not matching anything, so it is ours to take: an unclaimed
+			 * SMR cannot conflict with SID 5 whatever its S2CR says. */
+			if (v->takeover == v->matches)
+				v->takeover = i;
+			if ((s2cr & ~s2cr_valid) == 0x20000u) {
+				++v->free_slots;
+				if (v->pick == v->matches)
+					v->pick = i;
+			}
+			continue;
+		}
+		++v->live;
+		if (v->live_count < 4) {
+			hu_smmu_slot *s = &v->live_map[v->live_count++];
+			s->slot = i;
+			s->smr = smr;
+			s->s2cr = s2cr;
+		}
+		const uint32_t mask = (smr >> 16) & 0x7fffu;
+		if (!((sid ^ (smr & 0x7fffu)) & ~mask & 0x7fffu))
+			v->sid_taken = 1;
+	}
+}
+
+/* True when a live translation route already names this context bank; the kit
+ * rejects a candidate bank an active route points at. */
+static int hu_bank_taken(const hu_smmu_view *v, unsigned bank)
+{
+	for (unsigned i = 0; i < v->live_count; ++i)
+		if ((v->live_map[i].s2cr & 0x30000u) == 0 && (v->live_map[i].s2cr & 0xffu) == bank)
+			return 1;
+	return 0;
+}
+
 extern "C" void hummer_adreno_bringup_probe(void)
 {
 	uint32_t enabled = 0;
@@ -154,11 +230,62 @@ extern "C" void hummer_adreno_bringup_probe(void)
 	if (ShengGmuBindMmio(&mmio, &io) != ShengGmuSuccess)
 		panic("hummer gmu: ShengGmuBindMmio refused the DT windows");
 
-	uint32_t bank = 2, asid = 1, slot = 2, sid = SHENG_GPU_SMMU_GMU_SID;
-	(void)PE_parse_boot_argn("hummer-adreno-bank", &bank, sizeof(bank));
+	/* No default slot: v156 proved slot 2 carries a boot-loader route, so "pick
+	 * the first slot that is genuinely free" has to be the default and an explicit
+	 * hummer-adreno-slot overrides it. */
+	uint32_t bank_arg = ~0u, asid = 1, slot_arg = ~0u, sid = SHENG_GPU_SMMU_GMU_SID;
+	(void)PE_parse_boot_argn("hummer-adreno-bank", &bank_arg, sizeof(bank_arg));
 	(void)PE_parse_boot_argn("hummer-adreno-asid", &asid, sizeof(asid));
-	(void)PE_parse_boot_argn("hummer-adreno-slot", &slot, sizeof(slot));
+	(void)PE_parse_boot_argn("hummer-adreno-slot", &slot_arg, sizeof(slot_arg));
 	(void)PE_parse_boot_argn("hummer-adreno-sid", &sid, sizeof(sid));
+
+	hu_smmu_view scan;
+	hu_smmu_scan(smmu, sid, &scan);
+	if (scan.sid_taken)
+		panic("hummer gmu: SID %u already routed by the boot loader "
+		      "id0=%08x matches=%u live=%u free=%u\n"
+		      "lu0 %u %08x/%08x  lu1 %u %08x/%08x  lu2 %u %08x/%08x  lu3 %u %08x/%08x",
+		    sid, scan.id0, scan.matches, scan.live, scan.free_slots,
+		    scan.live_map[0].slot, scan.live_map[0].smr, scan.live_map[0].s2cr,
+		    scan.live_map[1].slot, scan.live_map[1].smr, scan.live_map[1].s2cr,
+		    scan.live_map[2].slot, scan.live_map[2].smr, scan.live_map[2].s2cr,
+		    scan.live_map[3].slot, scan.live_map[3].smr, scan.live_map[3].s2cr);
+
+	unsigned bank = bank_arg;
+	if (bank_arg == ~0u) {
+		bank = 2;                      /* v156 proved bank 2 accepts the image */
+		while (bank < 64 && hu_bank_taken(&scan, bank))
+			++bank;
+		if (bank >= 64)
+			bank = 2;                  /* let the kit report it instead of guessing */
+	}
+
+	unsigned slot;
+	if (slot_arg != ~0u) {
+		slot = slot_arg;
+	} else if (scan.pick < scan.matches) {
+		slot = scan.pick;
+	} else if (scan.takeover < scan.matches) {
+		slot = scan.takeover;
+	} else {
+		panic("hummer gmu: no SMMU slot to route id0=%08x matches=%u live=%u free=%u",
+		    scan.id0, scan.matches, scan.live, scan.free_slots);
+	}
+
+	/* The kit requires the target slot to already read FAULT. A slot whose SMR is
+	 * invalid matches nothing, so faulting it first cannot disturb a live device,
+	 * and it is the only way past a leftover S2CR such as v156 found. */
+	if (slot < scan.matches) {
+		const uint32_t s2cr = HU_RD(smmu, 0xc00 + 4 * slot);
+		if ((s2cr & ~0x400u) != 0x20000u) {
+			HU_WR(smmu, 0xc00 + 4 * slot, 0x20000u);
+			(void)HU_RD(smmu, 0xc00 + 4 * slot);
+			scan.prefaulted = 1;
+		}
+	}
+	if (slot > 127)
+		panic("hummer gmu: slot %u beyond the kit's limit id0=%08x matches=%u",
+		    slot, scan.id0, scan.matches);
 
 	boot_progress_stage("adreno-gmu: smmu ctx");
 	static NativeAdrenoGmuContextReport report;
@@ -169,11 +296,23 @@ extern "C" void hummer_adreno_bringup_probe(void)
 	static NativeAdrenoGmuPayload payloads[5];
 	const IOReturn payload_status = NativeAdrenoGmuContextPayloads(payloads);
 	if (context_status || payload_status)
-		panic("hummer gmu: context failed status=%x step=%u inner=%x payload=%x "
-		      "id1=%08x id2=%08x ttbr0=%llx spans=%u sctlr=%08x smr=%08x s2cr=%08x",
+		panic("hummer gmu: ctx failed status=%x step=%u inner=%x payload=%x "
+		      "kit=%u phase=%u w=%u vfy=%u\n"
+		      "smmu id0=%08x id1=%08x scr0=%08x matches=%u exids=%u live=%u free=%u sidtaken=%u\n"
+		      "pick slot=%u bank=%u sid=%u prefault=%u bktaken=%u smr=%08x s2cr=%08x "
+		      "sctlr=%08x ttbr0=%llx\n"
+		      "lu0 %u %08x/%08x  lu1 %u %08x/%08x\n"
+		      "lu2 %u %08x/%08x  lu3 %u %08x/%08x",
 		    context_status, report.step, report.status, payload_status,
-		    report.id1, report.id2, (unsigned long long)report.ttbr0, report.spans,
-		    report.sctlr, report.smr, report.s2cr);
+		    report.route_status, report.route_phase, report.route_writes, report.routes_verified,
+		    scan.id0, scan.id1, scan.scr0, scan.matches, scan.exids, scan.live, scan.free_slots,
+		    scan.sid_taken,
+		    slot, bank, sid, scan.prefaulted, hu_bank_taken(&scan, bank),
+		    report.smr, report.s2cr, report.sctlr, (unsigned long long)report.ttbr0,
+		    scan.live_map[0].slot, scan.live_map[0].smr, scan.live_map[0].s2cr,
+		    scan.live_map[1].slot, scan.live_map[1].smr, scan.live_map[1].s2cr,
+		    scan.live_map[2].slot, scan.live_map[2].smr, scan.live_map[2].s2cr,
+		    scan.live_map[3].slot, scan.live_map[3].smr, scan.live_map[3].s2cr);
 
 	ShengGmuConfig config{};
 	config.chip_id = SHENG_GMU_CHIP_ID;
