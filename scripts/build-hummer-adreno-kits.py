@@ -20,9 +20,10 @@ scripts/build-arm-driver.py, so the whole archive is assembled here:
   kits/hummer/ShengGmuCommandDb*.c  command-database parser
   firmware.S                        the two pinned blobs as strong symbols
 
-NativeAdrenoAccelerator.cpp is deliberately not compiled: nothing references it,
-and it installs an IOService personality from a static initializer, which must not
-run during boot (the same reason the SM8550 board stages it separately).
+NativeAdrenoAccelerator.cpp and NativeAdrenoPublish.cpp are deliberately not
+compiled; see EXCLUDED below for why. Everything else in the list compiles
+against this revision -- the first CI run archived 49 objects and then failed only
+at the kernel link, on the three board symbols Publish.cpp wants.
 
 The firmware images come from scripts/fetch-hummer-gpu-firmware.py, which verifies
 linux-firmware provenance by SHA-256; the blobs stay out of Git. They become the
@@ -153,6 +154,23 @@ def audit_object(obj):
         raise SystemExit('%s: unexpected platform deployment %s' % (obj, deployment))
 
 
+# Two driver translation units are left out on purpose.
+#
+#   NativeAdrenoAccelerator.cpp  nothing references it, and it installs an
+#       IOAcceleratorES personality from a static initializer, which must not run
+#       during boot (the SM8550 board stages it separately for the same reason).
+#
+#   NativeAdrenoPublish.cpp      nothing references it either (native_adreno_
+#       service refuses to publish at this revision), and it needs three board
+#       symbols this kernel does not have: native_gop_handoff_memory and
+#       native_gop_handoff_call (the UEFI GOP -> scanout handoff provider) and
+#       boot_log_export_put (declared __attribute__((weak_import)), which a
+#       statically linked kernel still rejects). Its whole content is the
+#       AGXDeviceUserClient / NativeAdrenoGpuPublished pair behind the Metal
+#       publish path, so it comes back with that path, not before.
+EXCLUDED = {'NativeAdrenoAccelerator.cpp', 'NativeAdrenoPublish.cpp'}
+
+
 def sources():
     """Every translation unit that belongs in the archive."""
     items = []
@@ -160,7 +178,7 @@ def sources():
     if not driver.is_dir():
         raise SystemExit('%s missing: the NativeAdreno submodule is not checked out' % driver)
     for path in sorted(driver.glob('NativeAdreno*.cpp')):
-        if path.name == 'NativeAdrenoAccelerator.cpp':
+        if path.name in EXCLUDED:
             continue
         items.append((path, 'cxx'))
     for pattern, directory in (('AdrenoFirmware*.c', 'kits/AdrenoFirmware'),
