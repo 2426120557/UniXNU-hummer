@@ -34,7 +34,12 @@ CONFIG_XNU_OWNER_DATA_MOUNT=y
 # OWNER_DATA_VOLUME_UUID 在构建前由真实 RAM seed 写入。
 CONFIG_XNU_OWNER_UNION_SYSTEMOS=y
 CONFIG_XNU_VERIFIED_ROOT_ARCHIVE="{tree}/build/verified-root-os-xnu-bundle/libVerifiedRootProbe.a"
-# CONFIG_XNU_NATIVE_ADRENO is not set   (a740 后端；hummer 是 a8xx，不适用，保持关闭)
+# GPU 驱动：drivers/NativeAdreno 经 patches/native-adreno-a830.patch 重定向到 A830，
+# 平台层是 package/ 里的 SM8750 版 ShengGmu/ShengGpuSmmu/ShengGmuCommandDb，
+# 归档由 build-hummer-adreno-kits.py 产出，引擎在本地 force-load。
+# 本版不带 personality（引擎注释：由板级探针直接调用），所以只是把驱动链进内核，
+# 不改开机行为——真正的 GPU 动作要等探针去调 ShengGmuLoadAndStartHfi。
+CONFIG_XNU_NATIVE_ADRENO=y
 CONFIG_XNU_NATIVE_LEGACY_DISPLAY=y
 # Adreno 830 (a8xx) 寄存器活性探针：引擎 bsd_init 的 offline-component-load-probes.patch
 # 在该 flag 下调用 native_adreno_firmware_probe()（见 package/HummerAdrenoProbe.c），

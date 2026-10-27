@@ -72,6 +72,16 @@ archives = [
   # native_adreno_firmware_probe()）。开 boot arg hummer-adreno-probe=1 后该探针必 panic，
   # 把 kgsl/rscc/cxmisc/gpucc 四个窗口的读值留在屏上，等真机读回后撤掉本行与对应 kernel_arg。
   "build-hummer-adreno-probe.py",
+  # GPU 驱动的归档（XNU_NATIVE_ADRENO=y 时引擎 force-load build/native-adreno/
+  # libNativeAdreno.a）。两块按顺序跑：
+  #   1. 从 pin 的 linux-firmware（commit 5c57d481）下载 gen80000_gmu.bin 与
+  #      gen80000_sqe.fw 到 .cache/firmware/hummer-gpu/，逐个校验 SHA-256；
+  #      厂商 blob 不进 Git。
+  #   2. 编译 drivers/NativeAdreno（已按 patches/native-adreno-a830.patch 重定向到
+  #      A830）+ kits/AdrenoFirmware + kits/ArmSmmu4K + kits/AdrenoPM4 +
+  #      package/ 里的 SM8750 平台层，把两个固件 blob 作为强符号一起归档。
+  "fetch-hummer-gpu-firmware.py",
+  "build-hummer-adreno-kits.py",
 ]
 
 [kernel.prelink]
@@ -198,7 +208,11 @@ kernel_args = [
   # v140 GPU bring-up 第一步（临时诊断，读回寄存器后撤掉）：开 Adreno 830 寄存器活性探针。
   # 开后会 panic 把 kgsl/rscc/cxmisc/gpucc 四个窗口的读值留在屏上/UART，用于确认设备树
   # 声称的 GPU 寄存器窗口到底有没有响应（GX 电源域塌了会回 0，不会挂总线）。
-  "hummer-adreno-probe=1",
+  #
+  # v153 起注释掉：探针的问题已经答完了（v142~v148：窗口可读、CX 能上电、PLL 能锁、
+  # TCM 可写、GMU 从没启动过），而且它会在 bsd_init 里 panic，挡住"驱动链进内核后
+  # 能不能正常开机"这件事。要再量一次就把下面这行取消注释。
+  # "hummer-adreno-probe=1",
   # v120 实测（带 hummer-cpu=1 的延迟诊断屏）：
   #   HUMTOUCH cpu processor_count=6 avail=6 max=5 cpus_arg=6
   # 六核全部注册，SMP 通了，所以这里不再带诊断参数。需要再量一次就把
