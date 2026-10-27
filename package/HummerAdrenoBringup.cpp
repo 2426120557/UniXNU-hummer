@@ -473,6 +473,30 @@ extern "C" void hummer_adreno_bringup_probe(void)
 	ShengGmuResult result{};
 	const ShengGmuStatus status = ShengGmuLoadAndStartHfi(&hummer_gmu_device, &config, &result);
 
+	/* The firmware runs and its queues are up, so read what it has to say before
+	 * anything is asked of it. GENERAL_9 is how far into the log it has written,
+	 * DTCM's version word 16 dwords on is the HFI wire version (gen8 moved the
+	 * performance table to message 15 in 2.6.1), and PWR_CLK_STATUS says whether
+	 * GX is still off -- it is, until the firmware's own startup turns it on. */
+	uint32_t hfi_version = 0, log_written = 0, pwr_clk = 0, hfi_ctrl = 0;
+	uint32_t log_words[4] = {};
+	auto gmu_word = [gmu](uint32_t word) {
+		return HU_RD(gmu, (word << 2) - SHENG_GMU_CORE_GPU_DELTA);
+	};
+	hfi_version = gmu_word(REG_GMU_HFI_VERSION);
+	log_written = gmu_word(REG_GMU_GENERAL_9) & 0xffffu;
+	pwr_clk = gmu_word(REG_GMU_PWR_CLK_STATUS);
+	hfi_ctrl = gmu_word(REG_GMU_HFI_CTRL_STATUS);
+	const volatile uint32_t *log =
+	    reinterpret_cast<const volatile uint32_t *>(payloads[3].cpu);
+	if (log) {
+		const unsigned upto = log_written ? 4u : 0u;
+		for (unsigned i = 0; i < upto; ++i)
+			log_words[i] = log[i];
+	}
+	const uint32_t hfi_table = hummer_gmu_device.hfi.shared
+	    ? hummer_gmu_device.hfi.shared[0] : 0;
+
 	if (hu_cb_offset) {
 		hu_cb_sctlr = HU_RD(smmu, hu_cb_offset);
 		hu_cb_fsr = HU_RD(smmu, hu_cb_offset + HU_CB_FSR);
@@ -486,6 +510,7 @@ extern "C" void hummer_adreno_bringup_probe(void)
 	      "cb fsr=%08x far=%08x syn=%08x sctlr=%08x off=%x\n"
 	      "clk cxo=%08x/%08x gmu=%08x/%08x ahb=%08x noc=%08x\n"
 	      "ctx bank=%u asid=%u slot=%u sid=%u spans=%u ttbr0=%llx\n"
+	      "hfi ver=%08x q=%08x pwr=%08x ctrl=%08x log=%u %08x %08x\n"
 	      "iou: %llx %llx %llx %llx %llx",
 	    status, result.phase, result.firmware_init_result, result.hfi_status,
 	    result.firmware_ready_observed, result.hfi_ready_observed,
@@ -497,6 +522,8 @@ extern "C" void hummer_adreno_bringup_probe(void)
 	    hu_ahb_after, hu_memnoc_after,
 	    bank, asid, slot, sid, report.spans,
 	    (unsigned long long)report.ttbr0,
+	    hfi_version, hfi_table, pwr_clk, hfi_ctrl, log_written,
+	    log_words[0], log_words[1],
 	    (unsigned long long)payloads[0].iova, (unsigned long long)payloads[1].iova,
 	    (unsigned long long)payloads[2].iova, (unsigned long long)payloads[3].iova,
 	    (unsigned long long)payloads[4].iova);
