@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """Build the hummer Adreno 830 (a8xx) register liveness probe archive.
 
-The engine calls native_adreno_firmware_probe() from the END of bsd_init()
-(the call is injected by the embedded hummer-adreno-probe.patch, a new-file
-hunk inside patches/unixnu-source-kernel.patch) when the defconfig carries
+The engine calls native_adreno_firmware_probe() from bsd_init() after vfsinit
+(offline-component-load-probes.patch) when the defconfig carries
 CONFIG_XNU_ADRENO_FIRMWARE_PROBE=y, and build-xnu-4k-baseline.sh force-loads
 
     build/adreno-firmware-probe/libAdrenoFirmwareProbe.a

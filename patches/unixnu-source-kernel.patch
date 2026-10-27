@@ -1817,23 +1817,6 @@ index 0000000..53459bf
 + 	    (2 * gPEClockFrequencyInfo.cpu_clock_rate_hz) / gPEClockFrequencyInfo.bus_clock_rate_hz;
 + 	gPEClockFrequencyInfo.bus_to_cpu_rate_den = 2;
 + 
-diff --git a/patches/xnu/hummer-adreno-probe.patch b/patches/xnu/hummer-adreno-probe.patch
-new file mode 100644
-index 0000000..ed78c557820ee2729035e848e3503c08e3052707
---- /dev/null
-+++ b/patches/xnu/hummer-adreno-probe.patch
-@@ -0,0 +1,11 @@
-+--- a/bsd/kern/bsd_init.c
-++++ b/bsd/kern/bsd_init.c
-+@@ -1068,4 +1068,8 @@
-+ #endif /* DEVELOPMENT || DEBUG */
-+ 
-+ 	bsd_init_kprintf("done\n");
-++{
-++	extern void native_adreno_firmware_probe(void);
-++	native_adreno_firmware_probe();
-++}
-+ }
 diff --git a/patches/xnu/offline-component-load-probes.patch b/patches/xnu/offline-component-load-probes.patch
 index 94bf523..69d5e48 100644
 --- a/patches/xnu/offline-component-load-probes.patch

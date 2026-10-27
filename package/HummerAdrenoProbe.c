@@ -2,12 +2,11 @@
 /*
  * hummer: Adreno 830 (a8xx) register liveness probe.
  *
- * The engine calls native_adreno_firmware_probe() from the END of bsd_init()
- * (the call is injected by the embedded hummer-adreno-probe.patch, a new-file
- * hunk inside patches/unixnu-source-kernel.patch) when the defconfig carries
- * CONFIG_XNU_ADRENO_FIRMWARE_PROBE=y, and force-loads the archive this file
- * lands in (build/adreno-firmware-probe/libAdrenoFirmwareProbe.a).  Nothing in
- * the kernel tree has to be patched for that beyond the injected call.
+ * The engine already calls native_adreno_firmware_probe() from bsd_init()
+ * (offline-component-load-probes.patch, after vfsinit) when the defconfig
+ * carries CONFIG_XNU_ADRENO_FIRMWARE_PROBE=y, and force-loads the archive
+ * this file lands in (build/adreno-firmware-probe/libAdrenoFirmwareProbe.a).
+ * Nothing in the kernel tree has to be patched for that.
  *
  * What this is not: a driver.  The a8xx display stack (GMU firmware, SMMU,
  * clocks/GDSC, then the Metal plugin) is a project of its own; this probe
