@@ -107,5 +107,41 @@ native_adreno_firmware_probe(void)
 	}
 
 	hummer_adreno_probe_stage = 100;
-	panic("hummer: adreno probe done (Adreno830v2 chipid 0x44050001)");
+
+	/* The panel panic UI (BootProgress) redraws the screen, so the IOLog
+	 * lines above are lost by the time anyone reads it.  Put the raw dwords
+	 * into the panic text itself: four windows, eight dwords each, four per
+	 * line so no number is split across a wrap. */
+	int any = 0;
+	for (unsigned i = 0; i < 8; i++) {
+		any |= (hummer_adreno_probe_kgsl[i] | hummer_adreno_probe_rscc[i] |
+		    hummer_adreno_probe_cxmisc[i] | hummer_adreno_probe_gpucc[i]) != 0;
+	}
+
+	panic("hummer adreno probe (Adreno830v2 chipid 0x44050001)%s\n"
+	    "kgsl   %08x %08x %08x %08x\n"
+	    "       %08x %08x %08x %08x\n"
+	    "rscc   %08x %08x %08x %08x\n"
+	    "       %08x %08x %08x %08x\n"
+	    "cxmisc %08x %08x %08x %08x\n"
+	    "       %08x %08x %08x %08x\n"
+	    "gpucc  %08x %08x %08x %08x\n"
+	    "       %08x %08x %08x %08x",
+	    any ? "" : "  [ALL ZERO]",
+	    hummer_adreno_probe_kgsl[0], hummer_adreno_probe_kgsl[1],
+	    hummer_adreno_probe_kgsl[2], hummer_adreno_probe_kgsl[3],
+	    hummer_adreno_probe_kgsl[4], hummer_adreno_probe_kgsl[5],
+	    hummer_adreno_probe_kgsl[6], hummer_adreno_probe_kgsl[7],
+	    hummer_adreno_probe_rscc[0], hummer_adreno_probe_rscc[1],
+	    hummer_adreno_probe_rscc[2], hummer_adreno_probe_rscc[3],
+	    hummer_adreno_probe_rscc[4], hummer_adreno_probe_rscc[5],
+	    hummer_adreno_probe_rscc[6], hummer_adreno_probe_rscc[7],
+	    hummer_adreno_probe_cxmisc[0], hummer_adreno_probe_cxmisc[1],
+	    hummer_adreno_probe_cxmisc[2], hummer_adreno_probe_cxmisc[3],
+	    hummer_adreno_probe_cxmisc[4], hummer_adreno_probe_cxmisc[5],
+	    hummer_adreno_probe_cxmisc[6], hummer_adreno_probe_cxmisc[7],
+	    hummer_adreno_probe_gpucc[0], hummer_adreno_probe_gpucc[1],
+	    hummer_adreno_probe_gpucc[2], hummer_adreno_probe_gpucc[3],
+	    hummer_adreno_probe_gpucc[4], hummer_adreno_probe_gpucc[5],
+	    hummer_adreno_probe_gpucc[6], hummer_adreno_probe_gpucc[7]);
 }
