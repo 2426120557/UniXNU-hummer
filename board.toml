@@ -66,6 +66,12 @@ archives = [
   # hummer 触屏（S3910 @ GENI SPI4）；触发点在 scripts/pmgr/ShengPlatformPower.cpp
   # 的 sheng_pmgr_run() 末尾（弱引用）。默认不跑（hummer-touch=0）。
   "build-hummer-touch.py",
+  # GPU bring-up 第一步：Adreno 830 (a8xx) 寄存器活性探针归档（package/HummerAdrenoProbe.c
+  # 经 CI 的 package→kits/hummer 映射后编译；引擎 build-xnu-4k-baseline.sh 在
+  # CONFIG_XNU_ADRENO_FIRMWARE_PROBE=y 时 force-load 它，bsd_init 钩子调用
+  # native_adreno_firmware_probe()）。开 boot arg hummer-adreno-probe=1 后该探针必 panic，
+  # 把 kgsl/rscc/cxmisc/gpucc 四个窗口的读值留在屏上，等真机读回后撤掉本行与对应 kernel_arg。
+  "build-hummer-adreno-probe.py",
 ]
 
 [kernel.prelink]
@@ -189,6 +195,10 @@ kernel_args = [
   #   Home、电源键不吃这一套。电源键仍用 Consumer 0x30(Power)。
   #   音量键在没有音频驱动（本机没有 codec/audio）时不会出声，属已知缺口，非回归。
   "hummer-keyscan=1",
+  # v140 GPU bring-up 第一步（临时诊断，读回寄存器后撤掉）：开 Adreno 830 寄存器活性探针。
+  # 开后会 panic 把 kgsl/rscc/cxmisc/gpucc 四个窗口的读值留在屏上/UART，用于确认设备树
+  # 声称的 GPU 寄存器窗口到底有没有响应（GX 电源域塌了会回 0，不会挂总线）。
+  "hummer-adreno-probe=1",
   # v120 实测（带 hummer-cpu=1 的延迟诊断屏）：
   #   HUMTOUCH cpu processor_count=6 avail=6 max=5 cpus_arg=6
   # 六核全部注册，SMP 通了，所以这里不再带诊断参数。需要再量一次就把

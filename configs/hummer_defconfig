@@ -34,8 +34,13 @@ CONFIG_XNU_OWNER_DATA_MOUNT=y
 # OWNER_DATA_VOLUME_UUID 在构建前由真实 RAM seed 写入。
 CONFIG_XNU_OWNER_UNION_SYSTEMOS=y
 CONFIG_XNU_VERIFIED_ROOT_ARCHIVE="{tree}/build/verified-root-os-xnu-bundle/libVerifiedRootProbe.a"
-# CONFIG_XNU_NATIVE_ADRENO is not set
+# CONFIG_XNU_NATIVE_ADRENO is not set   (a740 后端；hummer 是 a8xx，不适用，保持关闭)
 CONFIG_XNU_NATIVE_LEGACY_DISPLAY=y
+# Adreno 830 (a8xx) 寄存器活性探针：引擎 bsd_init 的 offline-component-load-probes.patch
+# 在该 flag 下调用 native_adreno_firmware_probe()（见 package/HummerAdrenoProbe.c），
+# 并由 build-xnu-4k-baseline.sh force-load build/adreno-firmware-probe/libAdrenoFirmwareProbe.a。
+# 独立于上面的 NATIVE_ADRENO（a740 驱动），只打开探针钩子，不会拉入 a740 后端。
+CONFIG_XNU_ADRENO_FIRMWARE_PROBE=y
 CONFIG_XNU_BOOT_PROGRESS=y
 CONFIG_XNU_EARLY_BOOT_PROGRESS=y
 
