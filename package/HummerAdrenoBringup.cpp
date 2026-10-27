@@ -494,8 +494,10 @@ extern "C" void hummer_adreno_bringup_probe(void)
 		for (unsigned i = 0; i < upto; ++i)
 			log_words[i] = log[i];
 	}
-	const uint32_t hfi_table = hummer_gmu_device.hfi.shared
-	    ? hummer_gmu_device.hfi.shared[0] : 0;
+	uint32_t hfi_table[3] = {};
+	if (hummer_gmu_device.hfi.shared)
+		for (unsigned i = 0; i < 3; ++i)
+			hfi_table[i] = hummer_gmu_device.hfi.shared[i];
 
 	if (hu_cb_offset) {
 		hu_cb_sctlr = HU_RD(smmu, hu_cb_offset);
@@ -510,7 +512,8 @@ extern "C" void hummer_adreno_bringup_probe(void)
 	      "cb fsr=%08x far=%08x syn=%08x sctlr=%08x off=%x\n"
 	      "clk cxo=%08x/%08x gmu=%08x/%08x ahb=%08x noc=%08x\n"
 	      "ctx bank=%u asid=%u slot=%u sid=%u spans=%u ttbr0=%llx\n"
-	      "hfi ver=%08x q=%08x pwr=%08x ctrl=%08x log=%u %08x %08x\n"
+	      "hfi ver=%08x q=%08x %08x %08x pwr=%08x ctrl=%08x\n"
+	      "log=%u %08x %08x %08x %08x\n"
 	      "iou: %llx %llx %llx %llx %llx",
 	    status, result.phase, result.firmware_init_result, result.hfi_status,
 	    result.firmware_ready_observed, result.hfi_ready_observed,
@@ -522,8 +525,8 @@ extern "C" void hummer_adreno_bringup_probe(void)
 	    hu_ahb_after, hu_memnoc_after,
 	    bank, asid, slot, sid, report.spans,
 	    (unsigned long long)report.ttbr0,
-	    hfi_version, hfi_table, pwr_clk, hfi_ctrl, log_written,
-	    log_words[0], log_words[1],
+	    hfi_version, hfi_table[0], hfi_table[1], hfi_table[2], pwr_clk, hfi_ctrl,
+	    log_written, log_words[0], log_words[1], log_words[2], log_words[3],
 	    (unsigned long long)payloads[0].iova, (unsigned long long)payloads[1].iova,
 	    (unsigned long long)payloads[2].iova, (unsigned long long)payloads[3].iova,
 	    (unsigned long long)payloads[4].iova);

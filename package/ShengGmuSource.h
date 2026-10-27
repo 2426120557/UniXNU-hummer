@@ -66,10 +66,12 @@
 /* GMU_PWR_CLK_STATUS: bit 0 the 3D core's supply is off, bit 1 its clock is off.
  * Both stay set until the firmware's own startup turns GX on. */
 #define REG_GMU_PWR_CLK_STATUS          UINT32_C(0x1f7e8)
-/* The firmware's three versions live at the end of DTCM; the HFI wire version
- * is the word 16 dwords later, and the annibale port refuses anything below
- * 2.6.1 because gen8 moved the performance table to message 15 there. */
-#define REG_GMU_HFI_VERSION             (REG_GMU_CM3_DTCM_START + UINT32_C(0xff8) + 16)
+/* The firmware's three versions live at the end of DTCM; the HFI wire version is
+ * 16 BYTES later, i.e. four dwords, and the annibale port refuses anything below
+ * 2.6.1 because gen8 moved the performance table to message 15 there.
+ * v161 read 16 dwords on instead, which is past the end of DTCM (its last word
+ * sits at byte 0x3dffc of this window) and took a synchronous external abort. */
+#define REG_GMU_HFI_VERSION             (REG_GMU_CM3_DTCM_START + UINT32_C(0xff8) + 4)
 /* gen8_gmu_register_config(): the GMU's own power state and its two FAL
  * interfaces, all three written before the CM3 is released. Absent from the
  * SM8550 kit's A7XX order; the annibale port (SM8750, same register file) does
