@@ -177,11 +177,14 @@ kernel_args = [
   #   （st0002 的 bit0=0）有个从没 open 它的 IOHIDEventDriver 子节点，报告送进去没人收。
   #   v137 起：① 按键改回**合并设备**（它的数字化仪从 v112 起就一直在工作，确定被消费）；
   #   ② report 2 的 Consumer 拆成**自己的 top-level collection**（不再是键盘 collection 的子项）。
+  #   v137 实测：去掉独立设备、按键回到合并设备、report 2 的 Consumer 拆成自己的
+  #   top-level collection 之后，按任意键报成 Consumer Menu（Home）**能稳定回到桌面** ——
+  #   通路（合并设备的数字化仪从 v112 起就被消费）彻底打通。
+  #   v138：撤销上面的 menu 探针（不再把所有键都当成 Home），让电源/音量键报各自真实 usage；
+  #   同时修正 descriptor 里 0xe9/0xea 的位序（原先 VolUp/VolDown 接反）。
+  #   电源键 → Consumer 0x30(Power)；音量加 → 0xea(Vol Inc)；音量减 → 0xe9(Vol Dec)。
+  #   音量键在没有音频驱动（本机没有 codec/audio）时不会出声，属已知缺口，非回归。
   "hummer-keyscan=1",
-  # hummer-key-menu=1：把任何按键都报成 Consumer Menu（= iOS 的 Home）。
-  # 目的：一次按键就能分开"Consumer 事件根本没到"和"到了但 iOS 不认 Power 0x30 / 没有音频
-  # 所以音量无声"。按一下音量键回到桌面 = Consumer 通路是好的。
-  "hummer-key-menu=1",
   # v120 实测（带 hummer-cpu=1 的延迟诊断屏）：
   #   HUMTOUCH cpu processor_count=6 avail=6 max=5 cpus_arg=6
   # 六核全部注册，SMP 通了，所以这里不再带诊断参数。需要再量一次就把

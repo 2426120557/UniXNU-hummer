@@ -1,5 +1,5 @@
 diff --git a/NativeHidInput.cpp b/NativeHidInput.cpp
-index 5bdce1c..002545e 100644
+index 5bdce1c..422f8b9 100644
 --- a/NativeHidInput.cpp
 +++ b/NativeHidInput.cpp
 @@ -11,6 +11,9 @@ extern "C" void native_hid_input_observed(unsigned,int);
@@ -24,7 +24,7 @@ index 5bdce1c..002545e 100644
 +    // application, which is not what a headset or a remote looks like; as a top-level collection
 +    // of their own they are the thing an event driver dispatches as kIOHIDEventTypeConsumer.
 +    0xc0,0x05,0x0c,0x09,0x01,0xa1,0x01,
-+    0x85,0x02,0x09,0x40,0x09,0x30,0x09,0xe9,0x09,0xea,0x15,0x00,0x25,0x01,
++    0x85,0x02,0x09,0x40,0x09,0x30,0x09,0xea,0x09,0xe9,0x15,0x00,0x25,0x01,
 +    0x75,0x01,0x95,0x04,0x81,0x02,
 +    0x75,0x04,0x95,0x01,0x81,0x03,0xc0
 +};
@@ -34,7 +34,7 @@ index 5bdce1c..002545e 100644
 +// nested inside the Keyboard collection.
 +static const unsigned char buttonsDescriptor[]={
 +    0x05,0x0c,0x09,0x01,0xa1,0x01,0x85,0x02,
-+    0x09,0x40,0x09,0x30,0x09,0xe9,0x09,0xea,
++    0x09,0x40,0x09,0x30,0x09,0xea,0x09,0xe9,
 +    0x15,0x00,0x25,0x01,0x75,0x01,0x95,0x04,0x81,0x02,
 +    0x75,0x04,0x95,0x01,0x81,0x03,0xc0
  };
@@ -67,13 +67,14 @@ index 5bdce1c..002545e 100644
          IOBufferMemoryDescriptor *buffer=IOBufferMemoryDescriptor::withBytes(report,sizeof(report),kIODirectionNone);
          IOReturn result=buffer?self->handleReport(buffer,0,0):kIOReturnNoMemory;
          OSSafeReleaseNULL(buffer);
-@@ -231,14 +253,47 @@ class NativeHidInput : public IOHIDDevice {
+@@ -231,14 +253,48 @@ class NativeHidInput : public IOHIDDevice {
      }
  public:
      void setTouchOnly() {touchOnly=true;}
 +    void setButtonsOnly() {buttonsOnly=true;}
-+    // Report 2 carries the buttons: bit 0 Menu, bit 1 Power, bit 2 Volume Increment,
-+    // bit 3 Volume Decrement (same layout as ShengHidInput). A change is sent immediately
++    // Report 2 carries the buttons: bit 0 Menu (unused in normal mode), bit 1 Power,
++    // bit 2 Volume Increment, bit 3 Volume Decrement (same layout as ShengHidInput).
++    // The descriptor below lists usages in that exact bit order: 0x40,0x30,0xea,0xe9. A change is sent immediately
 +    // instead of waiting for the 1 s Home timer.
 +    uint8_t buttons=0;
 +    static IOReturn buttonsAction(OSObject *owner,void *mask,void *,void *,void *) {
@@ -117,7 +118,7 @@ index 5bdce1c..002545e 100644
          else{
              size=sizeof(descriptor);memcpy(combined,descriptor,size);
              // Default: one device, keyboard collection first, digitizer second (the arrangement whose event driver
-@@ -252,23 +307,32 @@ public:
+@@ -252,23 +308,32 @@ public:
          inputLoop=IOWorkLoop::workLoop();if(!inputLoop)return false;
          // Request the normal generic HID event personality for this owned
          // keyboard. This is a matching property, not a client entitlement.
@@ -156,7 +157,7 @@ index 5bdce1c..002545e 100644
          if((touchOnly||touchEnabled) && &native_touch_set_sink)native_touch_set_sink(nullptr,nullptr);
          if(timer){timer->cancelTimeout();inputLoop->removeEventSource(timer);OSSafeReleaseNULL(timer);}
          IOHIDDevice::stop(provider);
-@@ -278,3 +342,4 @@ public:
+@@ -278,3 +343,4 @@ public:
  OSDefineMetaClassAndStructors(NativeHidInput,IOHIDDevice)
  extern "C" IOService *native_hid_input_allocate(void) {return new NativeHidInput;}
  extern "C" IOService *native_hid_touch_allocate(void) {NativeHidInput *device=new NativeHidInput;if(device)device->setTouchOnly();return device;}
