@@ -1,0 +1,31 @@
+diff --git a/NativeAdrenoGmuContext.cpp b/NativeAdrenoGmuContext.cpp
+index eb41fd9..49b5a14 100644
+--- a/NativeAdrenoGmuContext.cpp
++++ b/NativeAdrenoGmuContext.cpp
+@@ -115,7 +115,8 @@ extern "C" IOReturn NativeAdrenoGmuContextPayloads(NativeAdrenoGmuPayload out[5]
+     for(unsigned i=0;i<5;++i) {
+         const NativeAdrenoMemory *m=objects[i];
+         if(m->spanCount()!=1 || m->spans()[0].bytes!=m->bytes())return kIOReturnUnsupported;
+-        out[i]={m->spans()[0].physical,m->bytes(),iovas[i]};
++        out[i]={m->spans()[0].physical,m->bytes(),iovas[i],
++            (uint64_t)(uintptr_t)m->mapping()};
+     }
+     return kIOReturnSuccess;
+ }
+diff --git a/NativeAdrenoGmuContext.h b/NativeAdrenoGmuContext.h
+index b6e4b12..1ff9723 100644
+--- a/NativeAdrenoGmuContext.h
++++ b/NativeAdrenoGmuContext.h
+@@ -56,6 +56,11 @@ extern "C" IOReturn NativeAdrenoGmuContextBringup(volatile uint8_t *smmu,size_t
+  * log, hfi): physical base, size and GMU address of each physically contiguous object. Only after
+  * that context reached Ready. The GMU maps them Normal non-cacheable (MAIR index 0), as Linux maps
+  * the GMU buffers without IOMMU_CACHE; the caller gives the CPU a matching non-cacheable view. */
+-struct NativeAdrenoGmuPayload {uint64_t physical,bytes,iova;};
++/* physical/bytes/iova describe the device view; cpu is the object's own kernel
++ * mapping (the wired IOBufferMemoryDescriptor bytes). A board that has to hand
++ * the CPU a matching view of the buffer needs it: re-mapping the physical range
++ * goes through the io submap, which refused 16 MiB of icache on hummer (v157).
++ * Zero when the object has no kernel mapping. */
++struct NativeAdrenoGmuPayload {uint64_t physical,bytes,iova,cpu;};
+ extern "C" IOReturn NativeAdrenoGmuContextPayloads(NativeAdrenoGmuPayload out[5]);
+ #endif

@@ -26,6 +26,13 @@ typedef struct {
     int (*sha256)(void *,const void *,size_t,uint8_t digest[32]);
     int (*now_us)(void *,uint64_t *);
     int (*wait_us)(void *,unsigned);
+    /* Make every byte this module wrote reach the point of coherence, for a board
+     * whose CPU view of a payload is cacheable while the GMU reads it through its
+     * SMMU as Normal non-cacheable. Called once, after the firmware image and the
+     * HFI table are in place and before the CM3 is released; the A8XX reference
+     * does the same per segment (dc civac + dsb sy). Optional: a board that maps
+     * the payloads uncached leaves this null and nothing is called. */
+    int (*flush)(void *,const void *,size_t);
 } ShengGmuServices;
 typedef struct {volatile uint32_t *cpu;size_t bytes;uint64_t iova;} ShengGmuMemory;
 typedef struct {

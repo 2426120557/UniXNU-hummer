@@ -187,6 +187,36 @@ static int hu_bank_taken(const hu_smmu_view *v, unsigned bank)
 	return 0;
 }
 
+/* Which payloads the CPU sees through their own (cacheable) kernel mapping. The
+ * io submap refused the 16 MiB icache on v157 (kmem_alloc failed with KERN_NO_SPACE
+ * inside ml_io_map), so that one falls back to NativeAdrenoGmuPayload.cpu and has to
+ * be flushed before the CM3 is released: the GMU reads the buffers through its SMMU
+ * as Normal non-cacheable. */
+static uintptr_t gmu_cacheable_view[5];
+
+/* Clean+invalidate the lines covering a range, then wait for the maintenance to
+ * complete -- the order the A8XX reference uses before the other side reads a
+ * buffer this kernel just built. The memory clobber stops the compiler from sinking
+ * a store past the instruction that cleans its line. Only ranges reached through a
+ * cacheable mapping are touched: cache maintenance on the uncached aliases would be
+ * a no-op at best. */
+static int gmu_flush(void *, const void *bytes, size_t length)
+{
+	const uintptr_t at = reinterpret_cast<uintptr_t>(bytes);
+	int cacheable = 0;
+	for (unsigned i = 0; i < 5; ++i)
+		if (at == gmu_cacheable_view[i])
+			cacheable = 1;
+	if (!cacheable || !length)
+		return 0;
+	uintptr_t line = at & ~static_cast<uintptr_t>(63);
+	const uintptr_t end = (at + length + 63) & ~static_cast<uintptr_t>(63);
+	for (; line < end; line += 64)
+		__asm__ volatile("dc civac, %0" : : "r"(line) : "memory");
+	__asm__ volatile("dsb sy" : : : "memory");
+	return 0;
+}
+
 extern "C" void hummer_adreno_bringup_probe(void)
 {
 	uint32_t enabled = 0;
@@ -321,12 +351,24 @@ extern "C" void hummer_adreno_bringup_probe(void)
 	config.poll_budget = 1000;
 	ShengGmuMemory *memory[5] = { &config.icache, &config.dummy, &config.debug,
 	                              &config.log, &config.hfi };
+	unsigned uncached = 0, cacheable = 0;
 	for (unsigned i = 0; i < 5; ++i) {
-		vm_offset_t view = ml_io_map(payloads[i].physical, static_cast<vm_size_t>(payloads[i].bytes));
+		vm_offset_t view = ml_io_map(payloads[i].physical,
+		                             static_cast<vm_size_t>(payloads[i].bytes));
+		if (view) {
+			++uncached;
+		} else if (payloads[i].cpu) {
+			/* The io submap refused this range, so take the object's own kernel
+			 * mapping and have ShengGmu clean it before the CM3 is released. */
+			view = static_cast<vm_offset_t>(payloads[i].cpu);
+			gmu_cacheable_view[i] = static_cast<uintptr_t>(view);
+			++cacheable;
+		}
 		if (!view)
-			panic("hummer gmu: payload %u unmappable pa=%llx bytes=%llx", i,
+			panic("hummer gmu: payload %u unmappable pa=%llx bytes=%llx cpu=%llx", i,
 			    (unsigned long long)payloads[i].physical,
-			    (unsigned long long)payloads[i].bytes);
+			    (unsigned long long)payloads[i].bytes,
+			    (unsigned long long)payloads[i].cpu);
 		memory[i]->cpu = reinterpret_cast<volatile uint32_t *>(view);
 		memory[i]->bytes = static_cast<size_t>(payloads[i].bytes);
 		memory[i]->iova = payloads[i].iova;
@@ -336,6 +378,7 @@ extern "C" void hummer_adreno_bringup_probe(void)
 	services.now_us = NativeAdrenoKernelTime::now_us;
 	services.wait_us = NativeAdrenoKernelTime::wait_us;
 	services.sha256 = gmu_sha256;
+	services.flush = cacheable ? gmu_flush : nullptr;
 
 	hummer_gmu_device = ShengGmuDevice{};
 	hummer_gmu_device.io = io;
@@ -347,7 +390,7 @@ extern "C" void hummer_adreno_bringup_probe(void)
 
 	panic("hummer gmu: status=%u phase=%u fw_result=%08x hfi=%08x "
 	      "fw_ready=%u hfi_ready=%u hash=%u reset=%u ao=%08x cm3=%08x "
-	      "poll=%u w=%u r=%u\n"
+	      "poll=%u w=%u r=%u uc=%u cc=%u\n"
 	      "ctx bank=%u asid=%u slot=%u sid=%u ttbr0=%llx spans=%u\n"
 	      "iou: %llx %llx %llx %llx %llx",
 	    status, result.phase, result.firmware_init_result, result.hfi_status,
@@ -355,6 +398,7 @@ extern "C" void hummer_adreno_bringup_probe(void)
 	    result.complete_hash_verified, result.reset_verified,
 	    result.ao_fault_status, result.cm3_fault_status,
 	    result.poll_reads, result.write_attempts, result.read_attempts,
+	    uncached, cacheable,
 	    bank, asid, slot, sid, (unsigned long long)report.ttbr0, report.spans,
 	    (unsigned long long)payloads[0].iova, (unsigned long long)payloads[1].iova,
 	    (unsigned long long)payloads[2].iova, (unsigned long long)payloads[3].iova,

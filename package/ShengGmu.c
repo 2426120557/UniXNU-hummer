@@ -187,6 +187,19 @@ ShengGmuStatus ShengGmuLoadAndStartHfi(ShengGmuDevice *d,const ShengGmuConfig *c
         }
     }
     r->phase=4;
+    /* Everything the CPU wrote above has to be in memory before the CM3 is
+     * released, because the GMU reads these buffers through its SMMU as Normal
+     * non-cacheable. A board whose CPU view is cacheable supplies this hook; the
+     * A8XX reference does the same per segment (dc civac then dsb sy). Buffers
+     * the board mapped uncached are covered harmlessly, and a board that needs no
+     * maintenance leaves the hook null. */
+    if(d->services.flush) {
+        const ShengGmuMemory *all[]={&c->icache,&c->dummy,&c->debug,&c->log,&c->hfi};
+        for(unsigned m=0;m<5;++m)
+            if(d->services.flush(d->services.cookie,(const void *)all[m]->cpu,all[m]->bytes)) {
+                status=ShengGmuIoError;goto failed;
+            }
+    }
     const uint32_t fence=UINT32_C(0x80000000)|
         (SHENG_GMU_FENCE_UPPER<<18)|SHENG_GMU_FENCE_LOWER;
     if(core_write(d,REG_GMU_CM3_FW_INIT_RESULT,0,r) ||

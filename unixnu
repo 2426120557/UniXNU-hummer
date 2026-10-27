@@ -27,7 +27,11 @@ def prepare(device=DEVICE, source=None):
         # counter and power-up register lists are A6XX..A7XX. hummer is an Adreno 830
         # (gen8_0_0), where those blocks moved, so the driver is retargeted in place.
         # Inert until CONFIG_XNU_NATIVE_ADRENO is on.
-        ('native-adreno-a830.patch', 'NativeAdreno'))]
+        ('native-adreno-a830.patch', 'NativeAdreno'),
+        # NativeAdrenoGmuContextPayloads has to hand the board the payloads' own
+        # kernel mapping: re-mapping 16 MiB of icache through the io submap fails on
+        # this kernel (v157), and the GMU context already owns a CPU view of it.
+        ('native-adreno-payload-cpu.patch', 'NativeAdreno'))]
     # Everything that ends up inside the built kernel decides this fingerprint. `package/`
     # becomes kits/<board.kit> and `scripts/` holds the recipes that compile it, so a change
     # to either one produces a different payload. Leaving them out meant "only edit a driver"
