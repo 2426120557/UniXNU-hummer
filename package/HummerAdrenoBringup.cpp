@@ -351,15 +351,24 @@ extern "C" void hummer_adreno_bringup_probe(void)
 	config.poll_budget = 1000;
 	ShengGmuMemory *memory[5] = { &config.icache, &config.dummy, &config.debug,
 	                              &config.log, &config.hfi };
+	boot_progress_stage("adreno-gmu: payload views");
+	/* ml_io_map() does not return 0 when the io submap cannot serve a request: it
+	 * reaches kmem_alloc(), which panic()s outright ("kmem_alloc(...): failed with
+	 * 3 @vm_kern.c:180"). v157 and v158 both died there on the 16 MiB icache before
+	 * any fallback could run, so the request is never made at all. Only sizes this
+	 * board has already mapped are handed to it (the GPU windows above are up to
+	 * 0x68000); everything larger uses the payload's own kernel mapping, which
+	 * ShengGmu cleans before the CM3 is released. */
+	static const uint64_t kUncachedCeiling = 0x100000;
 	unsigned uncached = 0, cacheable = 0;
 	for (unsigned i = 0; i < 5; ++i) {
-		vm_offset_t view = ml_io_map(payloads[i].physical,
-		                             static_cast<vm_size_t>(payloads[i].bytes));
+		vm_offset_t view = 0;
+		if (payloads[i].bytes <= kUncachedCeiling)
+			view = ml_io_map(payloads[i].physical,
+			                 static_cast<vm_size_t>(payloads[i].bytes));
 		if (view) {
 			++uncached;
 		} else if (payloads[i].cpu) {
-			/* The io submap refused this range, so take the object's own kernel
-			 * mapping and have ShengGmu clean it before the CM3 is released. */
 			view = static_cast<vm_offset_t>(payloads[i].cpu);
 			gmu_cacheable_view[i] = static_cast<uintptr_t>(view);
 			++cacheable;
