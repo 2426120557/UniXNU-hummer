@@ -22,7 +22,12 @@ def prepare(device=DEVICE, source=None):
         ('native-mobile-display-stage7.patch', 'NativeMobileDisplay'),
         # The volume key needs a consumer usage the engine's keyboard report cannot carry,
         # so report 4 and its board entry point live in the NativeHidInput submodule.
-        ('native-keys.patch', 'NativeHidInput'))]
+        ('native-keys.patch', 'NativeHidInput'),
+        # The GPU driver as pinned is an A740 build: its CP, RBBM, perfctr, always-on
+        # counter and power-up register lists are A6XX..A7XX. hummer is an Adreno 830
+        # (gen8_0_0), where those blocks moved, so the driver is retargeted in place.
+        # Inert until CONFIG_XNU_NATIVE_ADRENO is on.
+        ('native-adreno-a830.patch', 'NativeAdreno'))]
     # Everything that ends up inside the built kernel decides this fingerprint. `package/`
     # becomes kits/<board.kit> and `scripts/` holds the recipes that compile it, so a change
     # to either one produces a different payload. Leaving them out meant "only edit a driver"

@@ -1,0 +1,395 @@
+diff --git a/NativeAdrenoA830HwInit.h b/NativeAdrenoA830HwInit.h
+new file mode 100644
+index 0000000..4a43dfc
+--- /dev/null
++++ b/NativeAdrenoA830HwInit.h
+@@ -0,0 +1,79 @@
++/* SPDX-License-Identifier: MIT */
++#ifndef NATIVE_ADRENO_A830_HWINIT_H
++#define NATIVE_ADRENO_A830_HWINIT_H
++#include <stdint.h>
++/* Generated for Adreno 830 (gen8_0_0, chipid 0x44050001) from the pinned
++ * a6xx.xml/adreno_common.xml/a6xx_gmu.xml A8XX variants.
++ * 8 of 54 offsets had no A8XX variant and are inherited from A7XX (see tail).
++ * hwcg and CP-protect tables are empty: the pinned catalog has no a830/a8xx
++ * entry for them, and the Adreno740 driver never reads either table. */
++#define A830_GBIF_HALT 0x03c45
++#define A830_RBBM_GBIF_HALT 0x0000a
++#define A830_RBBM_SECVID_TSB_CNTL 0x0f803
++#define A830_RBBM_SECVID_TSB_TRUSTED_BASE 0x0f800
++#define A830_RBBM_SECVID_TSB_TRUSTED_SIZE 0x0f802
++#define A830_RBBM_GBIF_CLIENT_QOS_CNTL 0x00008
++#define A830_UCHE_GBIF_GX_CONFIG 0x00e12
++#define A830_RBBM_PERFCTR_GPU_BUSY_MASKED 0x0019e
++#define A830_UCHE_TRAP_BASE 0x00e08
++#define A830_UCHE_WRITE_THRU_BASE 0x00e06
++#define A830_UCHE_GMEM_RANGE_MIN 0x00e0b
++#define A830_UCHE_GMEM_RANGE_MAX 0x00e0d
++#define A830_UCHE_CACHE_WAYS 0x00e04
++#define A830_CP_AHB_CNTL 0x00838
++#define A830_RBBM_PERFCTR_CNTL 0x00460
++#define A830_RBBM_INTERFACE_HANG_INT_CNTL 0x0002f
++#define A830_UCHE_CLIENT_PF 0x00e11
++#define A830_CP_PROTECT_CNTL 0x0084e
++#define A830_UCHE_CMDQ_CONFIG 0x00e3c
++#define A830_CP_APRIV_CNTL 0x0084d
++#define A830_CP_BV_APRIV_CNTL 0x00ad0
++#define A830_CP_LPAC_APRIV_CNTL 0x00b31
++#define A830_RB_CMP_DBG_ECO_CNTL 0x08f02
++#define A830_RBBM_INT_0_MASK 0x00062
++#define A830_CP_SQE_INSTR_BASE 0x00816
++#define A830_CP_RB_BASE 0x00800
++#define A830_CP_RB_CNTL 0x00802
++#define A830_CP_RB_RPTR_ADDR 0x00804
++#define A830_CP_BV_RB_RPTR_ADDR 0x00a98
++#define A830_CP_SQE_CNTL 0x00815
++#define A830_CP_RB_RPTR 0x00806
++#define A830_CP_RB_WPTR 0x00807
++#define A830_RBBM_STATUS 0x00012
++#define A830_RBBM_INT_0_STATUS 0x0006a
++#define A830_CP_HW_FAULT 0x008b3
++#define A830_CP_INTERRUPT_STATUS 0x008b5
++#define A830_RBBM_CLOCK_CNTL 0x0009a
++#define A830_RBBM_SECVID_TRUST_CNTL 0x0f400
++#define A830_RBBM_STATUS3 0x00213
++#define A830_CP_SQE_STAT_ADDR 0x008f0
++#define A830_CP_SQE_STAT_DATA 0x008f1
++#define A830_RB_NC_MODE_CNTL 0x08e08
++#define A830_TPL1_NC_MODE_CNTL 0x0b604
++#define A830_SP_NC_MODE_CNTL 0x0ae02
++#define A830_CP_APERTURE_CNTL_HOST 0x0081c
++#define A830_GRAS_NC_MODE_CNTL 0x08700
++#define A830_UCHE_MODE_CNTL 0x00e01
++#define A830_RBBM_NC_MODE_CNTL 0x00440
++#define A830_RBBM_INT_CLEAR_CMD 0x00061
++#define A830_CP_ALWAYS_ON_COUNTER 0x008e7
++#define A830_GPU_GMU_AO_GMU_CGC_MODE_CNTL 0x23b09
++#define A830_GPU_GMU_AO_GMU_CGC_DELAY_CNTL 0x23b0a
++#define A830_GPU_GMU_AO_GMU_CGC_HYST_CNTL 0x23b0b
++#define A830_CP_PROTECT 0x00850
++static const uint32_t NativeAdrenoA830Hwcg[][2]={
++};
++#define NATIVE_ADRENO_A830_HWCG_COUNT 0
++static const uint32_t NativeAdrenoA830Protect[][2]={
++};
++#define NATIVE_ADRENO_A830_PROTECT_COUNT 0
++/* Inherited from A7XX (no A8XX variant in the pinned XML): */
++/*   UCHE_GMEM_RANGE_MIN */
++/*   UCHE_GMEM_RANGE_MAX */
++/*   UCHE_CMDQ_CONFIG */
++/*   CP_BV_APRIV_CNTL */
++/*   CP_LPAC_APRIV_CNTL */
++/*   CP_BV_RB_RPTR_ADDR */
++/*   RBBM_STATUS3 */
++/*   RB_NC_MODE_CNTL */
++#endif
+diff --git a/NativeAdrenoCpInit.cpp b/NativeAdrenoCpInit.cpp
+index 23759d2..fceb609 100644
+--- a/NativeAdrenoCpInit.cpp
++++ b/NativeAdrenoCpInit.cpp
+@@ -4,14 +4,17 @@
+ #include <IOKit/IOLib.h>
+ 
+ /* Pinned definitions: CP_SQE_INSTR_BASE is the 64-bit register at dword offset
+- * 0x0830 for A6XX..A7XX (a6xx.xml). CP_THREAD_CONTROL is opcode 0x17 with
++ * 0x0830 for A6XX..A7XX and 0x0816 for A8XX- (a6xx.xml); this build targets
++ * A830, so it takes the A8XX offset -- the A8XX CP block moved, and writing
++ * 0x0830 here would land on CP_SCRATCH_PIPE instead of the SQE base.
++ * CP_THREAD_CONTROL is opcode 0x17 with
+  * CONCURRENT_BIN_DISABLE at bit 27, and CP_ME_INIT is opcode 0x48 with seven
+  * payload words (adreno_pm4.xml). The payload values are a7xx_cp_init in
+  * a6xx_gpu.c: mask BIT(0)|BIT(1)|BIT(3)|BIT(6)|BIT(8), three hardware
+  * contexts, 0x20000000 error detection, 0x00000002 operation mode, the
+  * power-up register list address and BIT(31) to read it. */
+ enum : uint32_t {
+-    CpSqeInstrBase = 0x0830,
++    CpSqeInstrBase = 0x0816,   /* CP_SQE_INSTR_BASE, A8XX- */
+     CpThreadControlOpcode = 0x17,
+     CpMeInitOpcode = 0x48,
+     CpConcurrentBinDisable = 1u << 27,
+diff --git a/NativeAdrenoIrq.cpp b/NativeAdrenoIrq.cpp
+index 96af912..1505b7b 100644
+--- a/NativeAdrenoIrq.cpp
++++ b/NativeAdrenoIrq.cpp
+@@ -3,16 +3,21 @@
+ #include <IOKit/IOLib.h>
+ 
+ /* Register offsets and bit positions are the pinned Linux definitions in
+- * registers/adreno/a6xx.xml: RBBM_INT_0_STATUS 0x0201, RBBM_INT_CLEAR_CMD
+- * 0x0037, RBBM_INT_0_MASK 0x0038, CP_INTERRUPT_STATUS 0x0823 and
+- * CP_PROTECT_STATUS 0x0824, plus the A7XX_INT_MASK enable set from
+- * a6xx_gpu.c. No bit is inferred beyond those sources. */
++ * registers/adreno/a6xx.xml. This build targets A830, so every offset is the
++ * A8XX- variant: RBBM_INT_0_STATUS 0x006a, RBBM_INT_CLEAR_CMD 0x0061,
++ * RBBM_INT_0_MASK 0x0062, CP_INTERRUPT_STATUS_GLOBAL 0x08b5 and
++ * CP_PROTECT_STATUS_PIPE 0x084f.  On A6XX..A7XX the same names sit at 0x0201,
++ * 0x0037, 0x0038, 0x0823 and 0x0824; the A8XX CP block moved, so those values
++ * would address unrelated registers here.  RBBM_INT_0_STATUS and
++ * RBBM_INT_0_MASK keep the A6XX_RBBM_INT_0_MASK bit layout on A8XX, so the
++ * IrqBit* set below is unchanged; the A7XX_INT_MASK enable set from a6xx_gpu.c
++ * is kept as well. */
+ enum : uint32_t {
+-    IrqRbbmStatus = 0x0201,
+-    IrqRbbmClear = 0x0037,
+-    IrqRbbmMask = 0x0038,
+-    IrqCpStatus = 0x0823,
+-    IrqCpProtect = 0x0824,
++    IrqRbbmStatus = 0x006a,
++    IrqRbbmClear = 0x0061,
++    IrqRbbmMask = 0x0062,
++    IrqCpStatus = 0x08b5,
++    IrqCpProtect = 0x084f,
+     IrqBitIdle = 1u << 0,
+     IrqBitAhb = 1u << 1,
+     IrqBitAtbAsync = 1u << 6,
+@@ -50,8 +55,12 @@ static constexpr uint32_t kKnown = IrqBitIdle | IrqBitAhb | IrqBitAtbAsync | Irq
+ static constexpr uint32_t kEnable = IrqBitAhb | IrqBitAtbAsync | IrqBitGpc | IrqBitCpSw |
+     IrqBitCpHw | IrqBitCpPm4 | IrqBitCpRbDone | IrqBitCpFence | IrqBitAtbBus |
+     IrqBitHang | IrqBitUcheOob | IrqBitUcheTrap | IrqBitTsbWrite | IrqBitFuse;
+-/* CP_INTERRUPT_STATUS error bits, including the A7XX LPAC/BV replicas. */
+-static constexpr uint32_t kCpErrors = 0x3fff7u;
++/* CP_INTERRUPT_STATUS_GLOBAL error bits.  The A8XX bitset is
++ * A8XX_CP_GLOBAL_INT_MASK, not A6XX_CP_INT: HWFAULTBR/BV/LPAC/AQE0/AQE1/DDEBR/
++ * DDEBV are bits 0..6 and SWFAULTBR/BV/LPAC/AQE0/AQE1/DDEBR/DDEBV are bits
++ * 16..22, so the A7XX mask 0x3fff7 would both miss SW faults and treat
++ * unimplemented low bits as errors. */
++static constexpr uint32_t kCpErrors = 0x007f007fu;
+ IOReturn NativeAdrenoIrq::poison()
+ {
+     poisoned_=true;return kIOReturnIOError;
+diff --git a/NativeAdrenoPwrup.cpp b/NativeAdrenoPwrup.cpp
+index d604c14..d315690 100644
+--- a/NativeAdrenoPwrup.cpp
++++ b/NativeAdrenoPwrup.cpp
+@@ -9,16 +9,19 @@ size_t NativeAdrenoPwrupList::requiredBytes(const NativeAdrenoPwrupCounts &count
+     return HeaderBytes+size_t(counts.ifpc+counts.preemption)*PairBytes+
+         size_t(counts.dynamic)*TripletBytes;
+ }
++/* Named buildA740 for source compatibility with its call site, but this build
++ * targets A830: the list it reads is the 45-entry A8XX one from
++ * NativeAdrenoPwrupRegs.h, not the A740 sixteen. */
+ IOReturn NativeAdrenoPwrupList::buildA740(int (*read)(void *,uint32_t,uint32_t *),
+     void *cookie,uint8_t *out,size_t capacity,size_t *written)
+ {
+     if(!read || !out || !written)return kIOReturnBadArgument;
+-    uint32_t values[NATIVE_ADRENO_A740_PWRUP_COUNT]={};
+-    for(size_t index=0;index<NATIVE_ADRENO_A740_PWRUP_COUNT;++index)
+-        if(read(cookie,NativeAdrenoA740PwrupRegs[index],&values[index]))
++    uint32_t values[NATIVE_ADRENO_A830_PWRUP_COUNT]={};
++    for(size_t index=0;index<NATIVE_ADRENO_A830_PWRUP_COUNT;++index)
++        if(read(cookie,NativeAdrenoA830PwrupRegs[index],&values[index]))
+             return kIOReturnIOError;
+-    const NativeAdrenoPwrupCounts counts={0,NATIVE_ADRENO_A740_PWRUP_COUNT,0};
+-    return pack(counts,nullptr,nullptr,NativeAdrenoA740PwrupRegs,values,nullptr,
++    const NativeAdrenoPwrupCounts counts={0,NATIVE_ADRENO_A830_PWRUP_COUNT,0};
++    return pack(counts,nullptr,nullptr,NativeAdrenoA830PwrupRegs,values,nullptr,
+         out,capacity,written);
+ }
+ IOReturn NativeAdrenoPwrupList::pack(const NativeAdrenoPwrupCounts &counts,
+diff --git a/NativeAdrenoPwrup.h b/NativeAdrenoPwrup.h
+index fa95865..3aa2154 100644
+--- a/NativeAdrenoPwrup.h
++++ b/NativeAdrenoPwrup.h
+@@ -25,9 +25,10 @@ public:
+     /* regs/values are parallel arrays; dynamic triplets are {aperture,offset,
+      * value} in that order. Output is the exact byte image; *written receives
+      * the length on success. */
+-    /* Read the sixteen A740 preemption registers through the callback (raw
+-     * 32-bit GPU register reads) and pack them with zero IFPC and dynamic
+-     * counts. A read failure refuses and writes nothing. */
++    /* Read the A830 preemption registers (45 entries, A8XX list) through the
++     * callback (raw 32-bit GPU register reads) and pack them with zero IFPC and
++     * dynamic counts. A read failure refuses and writes nothing. The name is
++     * kept for source compatibility. */
+     static IOReturn buildA740(int (*read)(void *,uint32_t,uint32_t *),void *cookie,
+         uint8_t *out,size_t capacity,size_t *written);
+     static IOReturn pack(const NativeAdrenoPwrupCounts &,
+diff --git a/NativeAdrenoPwrupRegs.h b/NativeAdrenoPwrupRegs.h
+index 570f464..6cede92 100644
+--- a/NativeAdrenoPwrupRegs.h
++++ b/NativeAdrenoPwrupRegs.h
+@@ -2,27 +2,67 @@
+ #ifndef NATIVE_ADRENO_PWRUP_REGS_H
+ #define NATIVE_ADRENO_PWRUP_REGS_H
+ #include <stdint.h>
+-/* Generated by scripts/derive-a740-pwrup.py from the pinned
+- * a6xx_catalog.c list and the pinned XMLs, selecting only entries whose
+- * variants include A7XX. Do not edit by hand. */
+-static const uint32_t NativeAdrenoA740PwrupRegs[]={
+-    0x00000e09,
+-    0x00000e0a,
++/* Retargeted from A740/SM8550 to A830/gen8_0_0 for this build.
++ *
++ * The pinned a6xx_catalog.c entry for our family (ADRENO_8XX_GEN1, which its
++ * own comment calls "a830 family") is gen80300, and it points at
++ * a810_pwrup_reglist_regs; the pinned tree has no a830 entry, so that list is
++ * the closest published source.  Every name in it was resolved to its A8XX-
++ * XML variant, so no entry falls back to an A7XX offset: 45 registers, 0
++ * inherited.
++ *
++ * This is a longer list than the A740 table's sixteen entries, and the wire
++ * format carries the length in one byte, so nothing else changes.  The
++ * firmware's preemption record layout for gen8_0_0 is not published in the
++ * pinned tree, so validate preemption on hardware before relying on it.
++ * Do not edit by hand. */
++static const uint32_t NativeAdrenoA830PwrupRegs[]={
++    0x00000e01,
++    0x00000e10,
++    0x00000e12,
++    0x00000e04,
++    0x00000f01,
++    0x00000f02,
++    0x00000f08,
++    0x00000f09,
++    0x00000f06,
++    0x00000f07,
++    0x00000f04,
++    0x00000f05,
++    0x00000e16,
++    0x00000e06,
+     0x00000e07,
+     0x00000e08,
+-    0x00000e0b,
+-    0x00000e0c,
+-    0x00000e0d,
+-    0x00000e0e,
+-    0x00000e17,
+-    0x00000e01,
+-    0x00008e08,
+-    0x00008e28,
+-    0x00008e50,
+-    0x00000e3a,
+-    0x00000e19,
++    0x00000e09,
++    0x00000e11,
++    0x00008f00,
++    0x0000ae6b,
++    0x0000ae10,
++    0x0000ae11,
++    0x0000ae6d,
++    0x0000b604,
++    0x0000b600,
+     0x0000b602,
++    0x0000b607,
++    0x0000b608,
++    0x0000b609,
++    0x0000b60a,
++    0x0000b60b,
++    0x0000b60c,
++    0x0000b60d,
++    0x0000b60e,
++    0x0000b60f,
++    0x0000b610,
++    0x0000b611,
++    0x0000b612,
++    0x0000b613,
++    0x0000b614,
++    0x0000b615,
++    0x0000b616,
++    0x0000b617,
++    0x0000b618,
++    0x0000b619,
+ };
+-#define NATIVE_ADRENO_A740_PWRUP_COUNT \
+-    (sizeof(NativeAdrenoA740PwrupRegs)/sizeof(NativeAdrenoA740PwrupRegs[0]))
++#define NATIVE_ADRENO_A830_PWRUP_COUNT \
++    (sizeof(NativeAdrenoA830PwrupRegs)/sizeof(NativeAdrenoA830PwrupRegs[0]))
+ #endif
+diff --git a/NativeAdrenoRing.cpp b/NativeAdrenoRing.cpp
+index 1711ea1..67a01db 100644
+--- a/NativeAdrenoRing.cpp
++++ b/NativeAdrenoRing.cpp
+@@ -15,7 +15,10 @@ enum : uint32_t {
+     RingRptrAddress = 0x0804, /* 64-bit CP_RB_RPTR_ADDR */
+     RingRptr = 0x0806,
+     RingWptr = 0x0807,
+-    RingScratch = 0x0885,     /* CP_SCRATCH(2) for A6XX..A7XX */
++    /* A8XX splits the A6XX..A7XX CP_SCRATCH array (0x0883, eight entries) into
++     * CP_SCRATCH_GLOBAL 0x082a (four) and CP_SCRATCH_PIPE 0x0830 (five); entry 2
++     * of the global set is 0x082c.  The ring registers above were not moved. */
++    RingScratch = 0x082c,     /* CP_SCRATCH_GLOBAL(2) for A8XX- */
+     RingFenceOpcode = 0x46,   /* CP_EVENT_WRITE7 on A7XX */
+     RingFenceEvent = 0x31,    /* CACHE_CLEAN */
+     RingFenceEnable = 1u << 27,
+@@ -43,16 +46,17 @@ enum : uint32_t {
+     RingPrologueWords = 11,
+     /* a6xx_set_pagetable()'s A7XX context entry: CP_RESET_CONTEXT_STATE (0x1f; CLEAR_ON_CHIP_TS, CLEAR_RESOURCE_TABLE,
+      * CLEAR_BV_BR_COUNTER, RESET_GLOBAL_LOCAL_TS = bits 0..3) between thread syncs, LRZ_FLUSH_INVALIDATE (0x26), the
+-     * RBBM_PERFCTR_SRAM_INIT_CMD (0x050e) write and CACHE_INVALIDATE (0x31), after a CP_WAIT_TIMESTAMP on the last fence, then the
+-     * CP_WAIT_REG_MEM (0x3c, WRITE_EQ) on RBBM_PERFCTR_SRAM_INIT_STATUS (0x050f) bit 0 that Linux always emits after the SRAM init
++     * RBBM_PERFCTR_SRAM_INIT_CMD write and CACHE_INVALIDATE (0x31), after a CP_WAIT_TIMESTAMP on the last fence, then the
++     * CP_WAIT_REG_MEM (0x3c, WRITE_EQ) on RBBM_PERFCTR_SRAM_INIT_STATUS bit 0 that Linux always emits after the SRAM init
+      * write. Without that wait the client's first IB started while the SRAM was still clearing; on sheng (int-064..067) the CP then
+-     * stopped on the IB's first CP_THREAD_CONTROL, while the same IB retired under the Linux driver. */
++     * stopped on the IB's first CP_THREAD_CONTROL, while the same IB retired under the Linux driver.
++     * A8XX moved both perfctr registers: 0x0449 / 0x019f instead of 0x050e / 0x050f. */
+     RingResetContextState = 0x1f,
+     RingResetAll = 0xf,
+     RingLrzFlushInvalidate = 0x26,
+     RingCacheInvalidate = 0x31,
+-    RingPerfctrSramInit = 0x050e,
+-    RingPerfctrSramInitStatus = 0x050f,
++    RingPerfctrSramInit = 0x0449,       /* RBBM_PERFCTR_SRAM_INIT_CMD, A8XX- */
++    RingPerfctrSramInitStatus = 0x019f, /* RBBM_PERFCTR_SRAM_INIT_STATUS, A8XX- */
+     RingWaitRegMem = 0x3c,
+     RingWaitWriteEq = 3,
+     RingResetWords = 26,
+diff --git a/NativeAdrenoTimer.cpp b/NativeAdrenoTimer.cpp
+index 0222415..be81739 100644
+--- a/NativeAdrenoTimer.cpp
++++ b/NativeAdrenoTimer.cpp
+@@ -2,19 +2,21 @@
+ #include "NativeAdrenoTimer.h"
+ #include <IOKit/IOLib.h>
+ 
+-/* Derivation, not a guess:
+- *   pinned a6xx_gmu.xml  GMU_ALWAYS_ON_COUNTER_L 0x1f888, _H 0x1f889
+- *                        (dword offsets, variants A6XX-A7XX)
+- *   pinned sm8550.dtsi   gpu@3d00000, gmu@3d6a000
++/* Derivation, not a guess (retargeted from A740/SM8550 to A830/SM8750):
++ *   pinned a6xx_gmu.xml  GMU_ALWAYS_ON_COUNTER_L 0x1f840, _H 0x1f841
++ *                        (dword offsets, variants A8XX-; A6XX..A7XX use
++ *                        0x1f888/0x1f889)
++ *   hummer DT            gpu@3d00000, gmu@3d37000, so gmu_base - gpu_base is
++ *                        0x37000, not SM8550's 0x6a000
+  *   byte offset = (offset << 2) - (gmu_base - gpu_base)
+- *               = (0x1f888 << 2) - 0x6a000 = 0x14220
+- *   pinned a6xx.xml      CP_ALWAYS_ON_COUNTER 0x0980 (64-bit, A6XX-A7XX)
+- *     read as low at 0x0980 and high at 0x0981, as Linux gpu_read64 does. */
++ *               = (0x1f840 << 2) - 0x37000 = 0x47100
++ *   pinned a6xx.xml      CP_ALWAYS_ON_COUNTER 0x08e7 (64-bit, A8XX-; A6XX..A7XX
++ *                        use 0x0980), read low at 0x08e7 and high at 0x08e8. */
+ enum : uint32_t {
+-    TimerGmuLow = 0x14220,
+-    TimerGmuHigh = 0x14224,
+-    TimerCpLow = 0x0980,
+-    TimerCpHigh = 0x0981,
++    TimerGmuLow = 0x47100,
++    TimerGmuHigh = 0x47104,
++    TimerCpLow = 0x08e7,
++    TimerCpHigh = 0x08e8,
+     TimerRetries = 8
+ };
+ uint32_t NativeAdrenoTimer::gmuLowOffset(){return TimerGmuLow;}
+diff --git a/NativeAdrenoTimer.h b/NativeAdrenoTimer.h
+index 4366105..e088aa4 100644
+--- a/NativeAdrenoTimer.h
++++ b/NativeAdrenoTimer.h
+@@ -6,12 +6,12 @@
+ 
+ /* GPU always-on counter reader for the user-visible timestamp. Two sources are
+  * distinguished because their address spaces differ:
+- *  - GMU window: byte offsets inside the already bound GMU window. The A740
+- *    offset is derived from the pinned a6xx_gmu.xml dword offset 0x1f888 and
+- *    the SM8550 DT layout: (0x1f888 << 2) - (gmu 0x03d6a000 - gpu 0x03d00000)
+- *    = 0x14220 for the low word and 0x14224 for the high word.
++ *  - GMU window: byte offsets inside the already bound GMU window. The A830
++ *    offset is derived from the pinned a6xx_gmu.xml A8XX dword offset 0x1f840
++ *    and the SM8750 DT layout: (0x1f840 << 2) - (gmu 0x03d37000 - gpu
++ *    0x03d00000) = 0x47100 for the low word and 0x47104 for the high word.
+  *  - CP window: dword register indices in the GPU register window, from
+- *    a6xx.xml CP_ALWAYS_ON_COUNTER at 0x0980 for A6XX..A7XX.
++ *    a6xx.xml CP_ALWAYS_ON_COUNTER at 0x08e7 for A8XX-.
+  * The caller binds exactly one already powered window; this object performs no
+  * power, reset or window discovery. Reads retry while the high word changes,
+  * so a counter rollover cannot return a torn value; exceeding the retry bound
