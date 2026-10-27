@@ -62,6 +62,9 @@ INCLUDES = [
     'kits/AdrenoPM4',
     'kits/AdrenoFirmware',
     'kits/hummer',
+    # package/HummerAdrenoBringup.cpp lives in kits/hummer but includes
+    # NativeAdrenoGmuContext.h and friends, which sit in the driver directory.
+    'drivers/NativeAdreno',
     '.cache/xnu-work/osfmk',
 ]
 
@@ -194,6 +197,13 @@ def sources():
         if not path.is_file():
             raise SystemExit('%s missing: package/ did not map to kits/hummer' % path)
         items.append((path, 'c'))
+    # The board's GMU bring-up probe: C++ because it calls the driver's
+    # NativeAdrenoGmuContextBringup / ShengGmuLoadAndStartHfi through their real
+    # headers rather than restating their layouts.
+    probe = ROOT / 'kits/hummer/HummerAdrenoBringup.cpp'
+    if not probe.is_file():
+        raise SystemExit('%s missing: package/ did not map to kits/hummer' % probe)
+    items.append((probe, 'cxx'))
     # glob() can hand back the same file twice through the two AdrenoFirmware
     # patterns; keep the first occurrence only.
     seen, unique = set(), []

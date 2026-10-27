@@ -213,6 +213,13 @@ kernel_args = [
   # TCM 可写、GMU 从没启动过），而且它会在 bsd_init 里 panic，挡住"驱动链进内核后
   # 能不能正常开机"这件事。要再量一次就把下面这行取消注释。
   # "hummer-adreno-probe=1",
+  # v155 GPU 第二步：真正把 GMU 拉起来（package/HummerAdrenoBringup.cpp）。
+  # 挂在 native_legacy_display_late_probe 里（IOKit 起来之后），流程是
+  # CX 上电 → GMU SMMU 上下文 → 载入 gen80000_gmu.bin → 释放 CM3，
+  # 最后必然 panic 把 FW_INIT_RESULT / HFI 状态留在屏上。
+  # bank/asid/slot 默认 2/1/2，sid 默认 5（设备树 qcom,gmu 的 iommus），
+  # 可用 hummer-adreno-bank/-asid/-slot/-sid 覆盖。
+  "hummer-adreno-bringup=1",
   # v120 实测（带 hummer-cpu=1 的延迟诊断屏）：
   #   HUMTOUCH cpu processor_count=6 avail=6 max=5 cpus_arg=6
   # 六核全部注册，SMP 通了，所以这里不再带诊断参数。需要再量一次就把
