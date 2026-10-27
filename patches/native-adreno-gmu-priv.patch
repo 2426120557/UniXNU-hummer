@@ -1,0 +1,21 @@
+diff --git a/NativeAdrenoGmuMemory.cpp b/NativeAdrenoGmuMemory.cpp
+index b7fc903..3431289 100644
+--- a/NativeAdrenoGmuMemory.cpp
++++ b/NativeAdrenoGmuMemory.cpp
+@@ -53,8 +53,14 @@ IOReturn NativeAdrenoGmuAllocator::mapInto(NativeAdrenoVm *vm)
+         layout_.log_iova,layout_.hfi_iova};
+     for(size_t index=0;index<5;++index) {
+         /* a6xx_gmu.c maps the icache MAP_PRIV and every buffer without NOEXEC; here only the icache, which
+-         * the GMU executes from, is executable, and the data buffers stay execute-never. */
+-        const unsigned permissions=index?3u:15u;
++         * the GMU executes from, is executable, and the data buffers stay execute-never.
++         * ArmSmmu4KPrivileged on every buffer, not just the icache: the descriptor leaves
++         * AP[1] (bit 6) set when it is absent, and AArch64 forbids a privileged instruction
++         * fetch from a page unprivileged code may write. hummer v159 loaded its firmware and
++         * released the CM3 with the data buffers alone carrying that bit, but the annibale
++         * port (same SoC, same firmware) had to clear it before the GMU could fetch at all,
++         * so no GMU payload is left unprivileged-writable. */
++        const unsigned permissions=index?11u:15u;
+         const IOReturn status=vm->map(objects[index],0,iovas[index],permissions,0,2,&handles_[index]);
+         if(status) {
+             for(size_t previous=0;previous<index;++previous)

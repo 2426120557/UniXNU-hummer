@@ -63,16 +63,29 @@
 #define REG_GMU_AHB_FENCE_RANGE_0       UINT32_C(0x23b11)
 #define REG_GMU_AO_HOST_INTERRUPT_STATUS UINT32_C(0x23b05)
 #define REG_GMU_MRC_GBIF_QOS_CTRL       UINT32_C(0x1f50b)
+/* gen8_gmu_register_config(): the GMU's own power state and its two FAL
+ * interfaces, all three written before the CM3 is released. Absent from the
+ * SM8550 kit's A7XX order; the annibale port (SM8750, same register file) does
+ * all three and its GMU started with them. */
+#define REG_GMU_RPMH_POWER_STATE        UINT32_C(0x1f7e9)
 /* Generation-specific (A8XX variants). */
 #define REG_GMU_GENERAL_8               UINT32_C(0x1f9c8)
 #define REG_GMU_GENERAL_9               UINT32_C(0x1f9c9)
 #define REG_GMU_GENERAL_10              UINT32_C(0x1f9ca)
-#define REG_GPU_GMU_CX_GMU_CX_FAL_INTF  UINT32_C(0x1f7ec)
-#define REG_GPU_GMU_CX_GMU_CX_FALNEXT_INTF UINT32_C(0x1f7ed)
+#define REG_GMU_CX_FAL_INTF             UINT32_C(0x1f7ec)
+#define REG_GMU_CX_FALNEXT_INTF         UINT32_C(0x1f7ed)
+/* The GMU's crystal counter: it has to tick for the firmware to have run at
+ * all, so the loader prints how far it moved while the CM3 was out of reset. */
+#define REG_GMU_ALWAYS_ON_LO            UINT32_C(0x1f840)
 
 /* --- GPU window registers used before the GMU is running (a6xx.xml) ----- */
 #define REG_GBIF_QSB_SIDE0              UINT32_C(0x3c03)
 #define REG_GBIF_CX_CONFIG              UINT32_C(0x3c00)
+/* GEN8_GBIF_HALT, dword 0x3c45: bit 3 releases the GMU's bus interface. The
+ * annibale port clears it as part of gen8_gmu_register_config (right after the
+ * four QSB sides, CX config and the MRC QoS word); without it the GMU has no
+ * path to the memory its firmware lives in. */
+#define REG_GPU_GBIF_HALT               UINT32_C(0x3c45)
 /* --- RSCC window registers (a6xx_gmu.xml; no variants, so shared) ------- */
 /* Word 0x0101 -> byte 0x404 inside the rscc aperture.  The loader reads it to
  * refuse a board whose RSC sequencer is still busy. */
@@ -84,12 +97,15 @@
  * against the platform's discovery; nothing is guessed here. */
 #define SHENG_GMU_CHIP_ID               UINT32_C(0x44050001)
 /* The word written to GMU_GENERAL_10, which the firmware reads back to learn
- * which chip it runs on.  The pinned catalog sets this explicitly per chip
- * (gen80300 -> gmu_chipid 0x8030000) rather than deriving it from the PCI-ish
- * chip id, so gen80000 follows the same pattern: 0x8000000.  INFERRED, not
- * published for this exact part; if the firmware refuses to signal
- * FW_INIT_RESULT this is the first value to try changing. */
-#define SHENG_GMU_FW_CHIP_ID            UINT32_C(0x8000000)
+ * which chip it runs on.  0x08000000 was INFERRED from the catalog's pattern
+ * (gen80300 -> gmu_chipid 0x8030000), i.e. gen80000 -> patch level 0.
+ * v160 replaces it with the one actually observed on this silicon's twin: the
+ * annibale port (SM8750, live DT gen8_0_1, chip ID 0x44050001 -- the very id
+ * the v142 probe read from this board) writes 0x08000100 there, which is
+ * major 8 / minor 0 / patch 1 in the vendor's ADRENO_GMU_REV encoding
+ * (bits 31:8).  hummer never got its CM3 to signal FW_INIT_RESULT with
+ * 0x08000000, so the patch level now matches the part. */
+#define SHENG_GMU_FW_CHIP_ID            UINT32_C(0x08000100)
 
 /* --- Aperture geometry -------------------------------------------------- */
 #define SHENG_GMU_CORE_GPU_DELTA        UINT32_C(0x37000)
@@ -101,6 +117,8 @@
 #define SHENG_GMU_GBIF_QSB_SIDE_VALUE   UINT32_C(0x71e20)
 #define SHENG_GMU_GBIF_CX_CONFIG_VALUE  UINT32_C(0x20023000)
 #define SHENG_GMU_MRC_QOS_VALUE         UINT32_C(0x33)
+/* GEN8_GBIF_HALT bit 3. */
+#define SHENG_GMU_GBIF_HALT_RELEASE     UINT32_C(0x8)
 
 /* --- Fatal conditions (bitfields of the two status registers) ----------- */
 /* GMU_AO_HOST_INTERRUPT_STATUS: WDOG_BITE 0, FENCE_ERR 3, HOST_AHB_BUS_ERROR 5. */

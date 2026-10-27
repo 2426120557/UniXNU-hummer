@@ -51,6 +51,11 @@ typedef struct {
     uint32_t complete_hash_verified,memory_changed,reset_verified;
     uint32_t firmware_init_result,hfi_status,firmware_ready_observed,hfi_ready_observed;
     uint32_t ao_fault_status,cm3_fault_status;
+    /* The firmware's own version word at the end of DTCM (it decides which
+     * FW_INIT_RESULT to expect) and how many crystal ticks the GMU's always-on
+     * counter made while the CM3 was out of reset. A counter that does not move
+     * means the GMU had no clock, which no amount of waiting would fix. */
+    uint32_t dtcm_version,ao_delta;
     uint32_t resources_must_retain;
     uint8_t complete_sha256[32];
 } ShengGmuResult;

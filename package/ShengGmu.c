@@ -55,7 +55,9 @@ static ShengGmuStatus poll(ShengGmuDevice *d,uint32_t reg,uint32_t mask,
     last=start;
     for(unsigned i=0;i<budget;++i) {
         if(d->services.now_us(d->services.cookie,&now) || now<last)return ShengGmuClockError;
-        if(now-start>=10000)return ShengGmuTimeout;
+        /* 100 ms, the budget the annibale port gives its CM3 (adreno8_wait_for
+         * ..., 100). 10 ms cut the poll off after 56 reads on v159. */
+        if(now-start>=100000)return ShengGmuTimeout;
         last=now;++r->poll_reads;
         ShengGmuStatus fault=check_faults(d,r);if(fault!=ShengGmuSuccess)return fault;
         if(core_read(d,reg,observed,r))return ShengGmuIoError;
@@ -145,8 +147,9 @@ ShengGmuStatus ShengGmuLoadAndStartHfi(ShengGmuDevice *d,const ShengGmuConfig *c
     /* A7XX raised the FAL votes and enabled TCM retention here.  a6xx_gmu.c
      * does the former for A8XX through the A8XX register pair, and skips
      * retention entirely, so there is no cx_misc access on this path. */
-    if(core_write(d,REG_GPU_GMU_CX_GMU_CX_FALNEXT_INTF,1,r) ||
-        core_write(d,REG_GPU_GMU_CX_GMU_CX_FAL_INTF,1,r)) {status=ShengGmuIoError;goto failed;}
+    if(core_write(d,REG_GMU_RPMH_POWER_STATE,0xf,r) ||
+        core_write(d,REG_GMU_CX_FALNEXT_INTF,1,r) ||
+        core_write(d,REG_GMU_CX_FAL_INTF,1,r)) {status=ShengGmuIoError;goto failed;}
     /* All shared allocations are real owned coherent memory, not simulated
      * GMU addresses. Zero only after actual stopped/idle checks above. */
     const ShengGmuMemory *memory[]={&c->icache,&c->dummy,&c->debug,&c->log};
@@ -218,11 +221,14 @@ ShengGmuStatus ShengGmuLoadAndStartHfi(ShengGmuDevice *d,const ShengGmuConfig *c
             status=ShengGmuIoError;goto failed;
         }
     if(write32(d,ShengGmuGpu,REG_GBIF_CX_CONFIG*4,SHENG_GMU_GBIF_CX_CONFIG_VALUE,r) ||
-        core_write(d,REG_GMU_MRC_GBIF_QOS_CTRL,SHENG_GMU_MRC_QOS_VALUE,r)) {
+        core_write(d,REG_GMU_MRC_GBIF_QOS_CTRL,SHENG_GMU_MRC_QOS_VALUE,r) ||
+        /* The GMU reaches its icache, log and HFI through this interface. */
+        write32(d,ShengGmuGpu,REG_GPU_GBIF_HALT*4,SHENG_GMU_GBIF_HALT_RELEASE,r)) {
         status=ShengGmuIoError;goto failed;
     }
     if(core_write(d,REG_GMU_SYS_BUS_CONFIG,1,r) || core_write(d,REG_GMU_ICACHE_CONFIG,1,r) ||
         core_write(d,REG_GMU_DCACHE_CONFIG,1,r) || core_read(d,REG_GMU_CM3_DTCM_START+0xff8,&value,r)) {status=ShengGmuIoError;goto failed;}
+    r->dtcm_version=value;
     uint32_t mask=value<=UINT32_C(0x20010004)?UINT32_MAX:0x1ff;
     uint32_t ready=mask==UINT32_MAX?UINT32_C(0xbabeface):0x100;
     if(core_write(d,REG_GMU_CM3_SYSRESET,1,r) || core_write(d,REG_GMU_GENERAL_9,0,r) ||
@@ -241,7 +247,11 @@ ShengGmuStatus ShengGmuLoadAndStartHfi(ShengGmuDevice *d,const ShengGmuConfig *c
     r->reset_verified=0;
     if(core_write(d,REG_GMU_CM3_SYSRESET,0,r) || d->io.barrier(d->io.cookie)) {status=ShengGmuIoError;goto failed;}
     r->phase=5;
+    uint32_t ao_before=0,ao_after=0;
+    (void)core_read(d,REG_GMU_ALWAYS_ON_LO,&ao_before,r);
     status=poll(d,REG_GMU_CM3_FW_INIT_RESULT,mask,ready,c->poll_budget,&r->firmware_init_result,r);
+    (void)core_read(d,REG_GMU_ALWAYS_ON_LO,&ao_after,r);
+    r->ao_delta=ao_after-ao_before;
     if(status!=ShengGmuSuccess)goto failed;
     r->firmware_ready_observed=1;
     if(core_write(d,REG_GMU_HFI_CTRL_INIT,1,r) || d->io.barrier(d->io.cookie)) {status=ShengGmuIoError;goto failed;}

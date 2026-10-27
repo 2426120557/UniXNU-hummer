@@ -57,8 +57,26 @@ extern "C" const uint64_t native_adreno_firmware_image_size;
 #define HU_GDSC_SW_COLLAPSE (1u << 0)
 #define HU_GDSC_HW_CONTROL  (1u << 1)
 
+/* GPUCC clock branches. The annibale port (SM8750: same gpucc base 0x3d90000,
+ * same offsets) refuses to start a GMU before its crystal branch (cxo) and the
+ * GMU's own branch (cx_gmu) are both enabled and no longer report "off": with
+ * the branch gated the CM3 has no clock and no firmware handshake can ever
+ * complete. v159 only raised the CX power domain and never looked at these. */
+#define HU_GPUCC_CX_CBCR       0x90e4u
+#define HU_GPUCC_CX_GMU_CBCR   0x90d4u
+#define HU_GPUCC_AHB_CBCR      0x90bcu
+#define HU_GPUCC_MEMNOC_CBCR   0x90f4u
+#define HU_CBCR_ENABLE         (1u << 0)
+#define HU_CBCR_OFF            (1u << 31)
+
 #define HU_SMMU_BASE  0x3da0000ULL
 #define HU_SMMU_BYTES 0x40000ULL
+/* The context bank's fault page, relative to the bank's base: FSR, FAR (low),
+ * FSYNR0. FSR_FAULT clears every bit by writing ones. */
+#define HU_CB_FSR     0x58u
+#define HU_CB_FAR_LO  0x60u
+#define HU_CB_FSYNR0  0x68u
+#define HU_CB_FSR_FAULT 0xc00001feu
 
 #define HU_RD(base, off)    (*(volatile uint32_t *)(uintptr_t)((base) + (off)))
 #define HU_WR(base, off, v) (*(volatile uint32_t *)(uintptr_t)((base) + (off)) = (uint32_t)(v))
@@ -187,6 +205,33 @@ static int hu_bank_taken(const hu_smmu_view *v, unsigned bank)
 	return 0;
 }
 
+/* What the two clock branches and the GMU's context bank looked like, kept in
+ * file scope so the final panic can print them: one boot shows one screen. */
+static uint32_t hu_cxo_before, hu_cxo_after, hu_gmuclk_before, hu_gmuclk_after;
+static uint32_t hu_ahb_after, hu_memnoc_after, hu_cxo_enabled, hu_gmuclk_enabled;
+static uint32_t hu_cb_offset, hu_cb_fsr, hu_cb_far, hu_cb_syn, hu_cb_sctlr;
+
+/* Turn a GPUCC branch on if it is not already running, the way the annibale
+ * port's adreno8_clock_on does: read-modify-write bit 0, then wait for bit 31
+ * to fall. Returns the register after the attempt. */
+static uint32_t hu_branch_on(vm_offset_t gpucc, unsigned offset, uint32_t *changed)
+{
+	const uint32_t before = HU_RD(gpucc, offset);
+	if ((before & HU_CBCR_ENABLE) && !(before & HU_CBCR_OFF))
+		return before;
+	HU_WR(gpucc, offset, before | HU_CBCR_ENABLE);
+	uint32_t value = before;
+	for (unsigned i = 0; i < 5000; ++i) {
+		value = HU_RD(gpucc, offset);
+		if (!(value & HU_CBCR_OFF))
+			break;
+		IODelay(10);
+	}
+	if (changed)
+		*changed = 1;
+	return value;
+}
+
 /* Which payloads the CPU sees through their own (cacheable) kernel mapping. The
  * io submap refused the 16 MiB icache on v157 (kmem_alloc failed with KERN_NO_SPACE
  * inside ml_io_map), so that one falls back to NativeAdrenoGmuPayload.cpu and has to
@@ -227,6 +272,20 @@ extern "C" void hummer_adreno_bringup_probe(void)
 	boot_progress_stage("adreno-gmu: cx");
 	if (!cx_power_up(&cx_before, &cx_after))
 		panic("hummer gmu: CX did not come up gdscr=%08x -> %08x", cx_before, cx_after);
+
+	/* CX power alone does not clock the GMU. Both branches are read, and each
+	 * one that is gated is enabled here; the annibale port treats a branch that
+	 * stays off as a reason to stop before touching the firmware. */
+	vm_offset_t gpucc = ml_io_map(HU_GPUCC_BASE, HU_GPUCC_SIZE);
+	if (!gpucc)
+		panic("hummer gmu: gpucc unmappable");
+	hu_cxo_before = HU_RD(gpucc, HU_GPUCC_CX_CBCR);
+	hu_gmuclk_before = HU_RD(gpucc, HU_GPUCC_CX_GMU_CBCR);
+	hu_cxo_after = hu_branch_on(gpucc, HU_GPUCC_CX_CBCR, &hu_cxo_enabled);
+	hu_gmuclk_after = hu_branch_on(gpucc, HU_GPUCC_CX_GMU_CBCR, &hu_gmuclk_enabled);
+	hu_ahb_after = HU_RD(gpucc, HU_GPUCC_AHB_CBCR);
+	hu_memnoc_after = HU_RD(gpucc, HU_GPUCC_MEMNOC_CBCR);
+	boot_progress_stage("adreno-gmu: clocks");
 
 	boot_progress_stage("adreno-gmu: mmio");
 	vm_offset_t gmu = ml_io_map(sheng_gmu_window_physical[ShengGmuCore],
@@ -344,6 +403,23 @@ extern "C" void hummer_adreno_bringup_probe(void)
 		    scan.live_map[2].slot, scan.live_map[2].smr, scan.live_map[2].s2cr,
 		    scan.live_map[3].slot, scan.live_map[3].smr, scan.live_map[3].s2cr);
 
+	/* The context bank's fault registers are the only place a failed fetch by the
+	 * GMU shows up: the GMU's own status words stayed clean on v159 while the
+	 * firmware never started. The annibale port saw CB2 FSR=0x8 / FAR=0x4000 /
+	 * FSYNR0=0xd0063 there -- a privileged instruction read denied on the very
+	 * first page of the icache -- and needed the leaf PTEs' AP[1] cleared to get
+	 * past it. Clear the bank's faults before the load so whatever the panic
+	 * prints belongs to this attempt. The bank's base is the kit's own layout:
+	 * (pages + bank) * stride, both from IDR1. */
+	const unsigned cb_shift = (scan.id1 >> 31) ? 16 : 12;
+	const uint64_t cb_pages = 1ull << (((scan.id1 >> 28) & 7) + 1);
+	const uint64_t cb_base = (cb_pages + bank) * (1ull << cb_shift);
+	if (cb_base + 0x7f8 <= HU_SMMU_BYTES) {
+		hu_cb_offset = static_cast<uint32_t>(cb_base);
+		HU_WR(smmu, hu_cb_offset + HU_CB_FSR, HU_CB_FSR_FAULT);
+		(void)HU_RD(smmu, hu_cb_offset + HU_CB_FSR);
+	}
+
 	ShengGmuConfig config{};
 	config.chip_id = SHENG_GMU_CHIP_ID;
 	config.firmware = native_adreno_firmware_image;
@@ -397,18 +473,30 @@ extern "C" void hummer_adreno_bringup_probe(void)
 	ShengGmuResult result{};
 	const ShengGmuStatus status = ShengGmuLoadAndStartHfi(&hummer_gmu_device, &config, &result);
 
-	panic("hummer gmu: status=%u phase=%u fw_result=%08x hfi=%08x "
-	      "fw_ready=%u hfi_ready=%u hash=%u reset=%u ao=%08x cm3=%08x "
-	      "poll=%u w=%u r=%u uc=%u cc=%u\n"
-	      "ctx bank=%u asid=%u slot=%u sid=%u ttbr0=%llx spans=%u\n"
+	if (hu_cb_offset) {
+		hu_cb_sctlr = HU_RD(smmu, hu_cb_offset);
+		hu_cb_fsr = HU_RD(smmu, hu_cb_offset + HU_CB_FSR);
+		hu_cb_far = HU_RD(smmu, hu_cb_offset + HU_CB_FAR_LO);
+		hu_cb_syn = HU_RD(smmu, hu_cb_offset + HU_CB_FSYNR0);
+	}
+
+	panic("hummer gmu: status=%u phase=%u fw=%08x hfi=%08x fwrdy=%u hfirdy=%u "
+	      "hash=%u reset=%u\n"
+	      "poll=%u ao=%08x cm3=%08x dtcm=%08x aod=%u uc=%u cc=%u\n"
+	      "cb fsr=%08x far=%08x syn=%08x sctlr=%08x off=%x\n"
+	      "clk cxo=%08x/%08x gmu=%08x/%08x ahb=%08x noc=%08x\n"
+	      "ctx bank=%u asid=%u slot=%u sid=%u spans=%u ttbr0=%llx\n"
 	      "iou: %llx %llx %llx %llx %llx",
 	    status, result.phase, result.firmware_init_result, result.hfi_status,
 	    result.firmware_ready_observed, result.hfi_ready_observed,
 	    result.complete_hash_verified, result.reset_verified,
-	    result.ao_fault_status, result.cm3_fault_status,
-	    result.poll_reads, result.write_attempts, result.read_attempts,
-	    uncached, cacheable,
-	    bank, asid, slot, sid, (unsigned long long)report.ttbr0, report.spans,
+	    result.poll_reads, result.ao_fault_status, result.cm3_fault_status,
+	    result.dtcm_version, result.ao_delta, uncached, cacheable,
+	    hu_cb_fsr, hu_cb_far, hu_cb_syn, hu_cb_sctlr, hu_cb_offset,
+	    hu_cxo_before, hu_cxo_after, hu_gmuclk_before, hu_gmuclk_after,
+	    hu_ahb_after, hu_memnoc_after,
+	    bank, asid, slot, sid, report.spans,
+	    (unsigned long long)report.ttbr0,
 	    (unsigned long long)payloads[0].iova, (unsigned long long)payloads[1].iova,
 	    (unsigned long long)payloads[2].iova, (unsigned long long)payloads[3].iova,
 	    (unsigned long long)payloads[4].iova);
