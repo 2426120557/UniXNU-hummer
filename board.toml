@@ -66,6 +66,10 @@ archives = [
   # hummer 触屏（S3910 @ GENI SPI4）；触发点在 scripts/pmgr/ShengPlatformPower.cpp
   # 的 sheng_pmgr_run() 末尾（弱引用）。默认不跑（hummer-touch=0）。
   "build-hummer-touch.py",
+  # USB CDC 调试控制台（nabu 的 QcomXnuUsbDebug 移植，profile soc/Sm8750.h）。
+  # 这一轮只编不链：先证明模块能对 xnu-10063 编过，下一轮再补 XNU 控制台钩子
+  # （patches/xnu/）并把 libHummerUsbCdc.a force-load 进内核。
+  "build-hummer-usbcdc.py",
   # GPU bring-up 第一步：Adreno 830 (a8xx) 寄存器活性探针归档（package/HummerAdrenoProbe.c
   # 经 CI 的 package→kits/hummer 映射后编译；引擎 build-xnu-4k-baseline.sh 在
   # CONFIG_XNU_ADRENO_FIRMWARE_PROBE=y 时 force-load 它，bsd_init 钩子调用
