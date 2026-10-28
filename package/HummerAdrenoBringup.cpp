@@ -622,6 +622,21 @@ extern "C" void hummer_adreno_bringup_probe(void)
 		qcom_usb_debug_get_status(&usb);
 	}
 
+	/* v171: both DMA backends die on the same two bits (ID0 bit30, ID2 bit12),
+	 * one reporting Unsupported and the other UnknownSmmu. That is a statement
+	 * about what 0x15000000 answers, not about routing, so read the raw geometry
+	 * here instead of inferring it: SMMUv2 puts sCR0 at 0x00, ID0..ID2 at
+	 * 0x20..0x28 and sACR at 0x30. All-zero means the block was not clocked. */
+	vm_offset_t apps_smmu = ml_io_map(0x15000000ULL, 0x1000ULL);
+	uint32_t sid0 = 0, sid1 = 0, sid2 = 0, sscr0 = 0, ssacr = 0;
+	if (apps_smmu) {
+		sid0 = HU_RD(apps_smmu, 0x20u);
+		sid1 = HU_RD(apps_smmu, 0x24u);
+		sid2 = HU_RD(apps_smmu, 0x28u);
+		sscr0 = HU_RD(apps_smmu, 0x00u);
+		ssacr = HU_RD(apps_smmu, 0x30u);
+	}
+
 	panic("hummer gmu: status=%u phase=%u fw=%08x hfi=%08x fwrdy=%u hfirdy=%u "
 	      "hash=%u reset=%u\n"
 	      "poll=%u ao=%08x cm3=%08x dtcm=%08x aod=%u uc=%u cc=%u\n"
@@ -637,6 +652,7 @@ extern "C" void hummer_adreno_bringup_probe(void)
 	      "hfi6 skip=%u %08x/%08x/%x fin=%08x/%08x\n"
 	      "usb arg=%u p0=%u ri=%d ph=%u er=%u qr=%u\n"
 	      "usb2 dr=%u ds=%u bk=%u ta=%x tb=%x\n"
+	      "smmu id0=%08x id1=%08x id2=%08x scr0=%08x sacr=%08x\n"
 	      "iou: %llx %llx %llx %llx %llx",
 	    status, result.phase, result.firmware_init_result, result.hfi_status,
 	    result.firmware_ready_observed, result.hfi_ready_observed,
@@ -667,6 +683,7 @@ extern "C" void hummer_adreno_bringup_probe(void)
 	    usb_arg, usb_phase0, usb_retry, usb.phase, usb.error, usb.qcom_result,
 	    usb.domain_result, usb.domain_stage, usb.domain_bank,
 	    usb.trace_a, usb.trace_b,
+	    sid0, sid1, sid2, sscr0, ssacr,
 	    (unsigned long long)payloads[0].iova, (unsigned long long)payloads[1].iova,
 	    (unsigned long long)payloads[2].iova, (unsigned long long)payloads[3].iova,
 	    (unsigned long long)payloads[4].iova);
