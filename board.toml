@@ -121,6 +121,10 @@ skip_setup_tool = "scripts/seed-data-skip-setup.py"
 skip_setup_args = ["--no-auto-dim"]
 kernel_args = [
   "-v", "serial=0", "debug=0x14e", "cpus=6", "kt_fixed_zones=240",
+  # USB CDC 调试控制台（M2）。qcom-usb-debug=1 才会初始化 DWC3 并把 PE_kputc
+  # 接到 USB；主机侧应看到 USB\VID_1209&PID_316D\QCOMXNUUSBDEBUG 的 COM 口。
+  # 没接 USB 时它只是几个失败的寄存器读，不影响启动。
+  "qcom-usb-debug=1",
   # 根镜像所在分区：编译期由 GccUfs.h 的 UFS_ROOT_PARTITION 决定——SM8750 构建
   # (-DNATIVE_UFS_SM8750=1) 已经锁成 "unixnu"，所以这里不用、也不能用启动参数覆盖。
   "native-ufs-root=1", "native-ufs-diagnostics=1", "sheng-pmgr=2",

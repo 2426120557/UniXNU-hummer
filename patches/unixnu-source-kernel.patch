@@ -4024,3 +4024,508 @@ new file mode 100644
 + extern void cs_validate_page(
 + 	struct vnode *vp,
 + 	memory_object_t pager,
+diff --git a/patches/xnu/zzzzzzzz-usb-cdc-console.patch b/patches/xnu/zzzzzzzz-usb-cdc-console.patch
+new file mode 100644
+index 0000000..5a70705
+--- /dev/null
++++ b/patches/xnu/zzzzzzzz-usb-cdc-console.patch
+@@ -0,0 +1,227 @@
++diff --git a/osfmk/console/serial_console.c b/osfmk/console/serial_console.c
++index 715c545..840a9d6 100644
++--- a/osfmk/console/serial_console.c
+++++ b/osfmk/console/serial_console.c
++@@ -47,6 +47,9 @@
++ #include <kern/cpu_data.h>
++ #include <kern/sched_prim.h>
++ #include <libkern/section_keywords.h>
+++#if XNU_QCOM_USB_DEBUG
+++#include <QcomXnuUsbDebug.h>
+++#endif
++ 
++ #if __arm64__
++ #include <machine/machine_routines.h>
++@@ -531,6 +534,19 @@ console_write(char *str, int size)
++ 
++ 	assert(str != NULL);
++ 
+++#if XNU_QCOM_USB_DEBUG
+++	/* Capture raw formatted bytes before the original ring can reject them.
+++	 * The native API accepts at most 16 KiB per call; submit every chunk so
+++	 * a long console write does not lose its suffix to that call budget.
+++	 */
+++	for (int offset = 0; offset < size;) {
+++		int bytes = size - offset;
+++		if (bytes > 16384) bytes = 16384;
+++		(void)qcom_usb_debug_write(str + offset, (size_t)bytes);
+++		offset += bytes;
+++	}
+++#endif
+++
++ 	char *write_ptr = NULL;
++ 	int chunk_size = CPU_CONS_BUF_SIZE;
++ 	int i = 0;
++@@ -614,6 +630,10 @@ console_write_unbuffered(char c)
++ 		return;
++ 	}
++ 
+++#if XNU_QCOM_USB_DEBUG
+++	/* Tee raw bytes once, before the selected console's CRLF expansion. */
+++	qcom_usb_debug_putc(c);
+++#endif
++ 	_cnputc(c, true);
++ }
++ 
++diff --git a/osfmk/console/serial_general.c b/osfmk/console/serial_general.c
++index b1ca47a..ba8509e 100644
++--- a/osfmk/console/serial_general.c
+++++ b/osfmk/console/serial_general.c
++@@ -169,7 +169,11 @@ console_printbuf_putc(int ch, void * arg)
++ 		 * if boot-arg 'drain_uart_sync=1' is set, then
++ 		 * drain all the buffer right now and append new ch
++ 		 */
++-		if (serialmode & SERIALMODE_SYNCDRAIN) {
+++		/* USB logging must not inherit newline-free printbuf truncation. */
+++#if !XNU_QCOM_USB_DEBUG
+++		if (serialmode & SERIALMODE_SYNCDRAIN)
+++#endif
+++		{
++ 			info->str[info->pos] = '\0';
++ 			console_write(info->str, info->pos);
++ 			info->pos            = 0;
++diff --git a/osfmk/kern/debug.c b/osfmk/kern/debug.c
++index 275d865..2c89ae5 100644
++--- a/osfmk/kern/debug.c
+++++ b/osfmk/kern/debug.c
++@@ -1127,6 +1127,10 @@ panic_with_thread_context(unsigned int reason, void *ctx, uint64_t debugger_opti
++ }
++ #endif /* defined (__x86_64__) */
++ 
+++#if XNU_QCOM_USB_DEBUG
+++#include <QcomXnuUsbDebug.h>
+++#endif
+++
++ #pragma clang diagnostic push
++ #pragma clang diagnostic ignored "-Wmissing-noreturn"
++ void
++@@ -1242,6 +1246,9 @@ panic_trap_to_debugger(const char *panic_format_str, va_list *panic_args, unsign
++ void
++ panic_spin_forever(void)
++ {
+++#if XNU_QCOM_USB_DEBUG
+++	qcom_usb_debug_panic_drain();
+++#endif
++ 	for (;;) {
++ #if defined(__arm__) || defined(__arm64__)
++ 		/* On arm32, which doesn't have a WFE timeout, this may not return.  But that should be OK on this path. */
++diff --git a/osfmk/kern/printf.c b/osfmk/kern/printf.c
++index d092099..9427b22 100644
++--- a/osfmk/kern/printf.c
+++++ b/osfmk/kern/printf.c
++@@ -914,14 +914,30 @@ vprintf(const char *fmt, va_list ap)
++ 	return vprintf_internal(fmt, ap, __builtin_return_address(0));
++ }
++ 
+++#if XNU_QCOM_USB_DEBUG
+++#include <QcomXnuUsbDebug.h>
+++#endif
+++
++ void
++ consdebug_putc(char c)
++ {
+++	#if XNU_QCOM_USB_DEBUG
+++	/* A PE console fallback supplies the one console/USB emission below.
+++	 * Other routes are captured centrally, or here if console is disabled.
+++	 */
+++	const bool usb_via_pe_console = !console_is_serial() && !disable_serial_output &&
+++	    PE_kputc == console_write_unbuffered;
+++	if (disableConsoleOutput && !usb_via_pe_console) qcom_usb_debug_putc(c);
+++	if (!usb_via_pe_console)
+++#endif
++ 	console_write_char(c);
++ 
++ 	debug_putc(c);
++ 
++ 	if (!console_is_serial() && !disable_serial_output && !boot_progress_active()) {
+++#if XNU_QCOM_USB_DEBUG
+++		if (PE_kputc && PE_kputc != qcom_usb_debug_putc)
+++#endif
++ 		PE_kputc(c);
++ 	}
++ }
++@@ -929,11 +945,23 @@ consdebug_putc(char c)
++ void
++ consdebug_putc_unbuffered(char c)
++ {
+++	#if XNU_QCOM_USB_DEBUG
+++	/* A PE console fallback supplies the one console/USB emission below.
+++	 * Other routes are captured centrally, or here if console is disabled.
+++	 */
+++	const bool usb_via_pe_console = !console_is_serial() && !disable_serial_output &&
+++	    PE_kputc == console_write_unbuffered;
+++	if (disableConsoleOutput && !usb_via_pe_console) qcom_usb_debug_putc(c);
+++	if (!usb_via_pe_console)
+++#endif
++ 	console_write_unbuffered(c);
++ 
++ 	debug_putc(c);
++ 
++ 	if (!console_is_serial() && !disable_serial_output && !boot_progress_active()) {
+++#if XNU_QCOM_USB_DEBUG
+++		if (PE_kputc && PE_kputc != qcom_usb_debug_putc)
+++#endif
++ 		PE_kputc(c);
++ 	}
++ }
++diff --git a/pexpert/arm/pe_kprintf.c b/pexpert/arm/pe_kprintf.c
++index 3c440ec..b2c9435 100644
++--- a/pexpert/arm/pe_kprintf.c
+++++ b/pexpert/arm/pe_kprintf.c
++@@ -13,6 +13,10 @@
++ #include <kern/simple_lock.h>
++ #include <os/log_private.h>
++ #include <libkern/section_keywords.h>
+++#if XNU_QCOM_USB_DEBUG
+++#include <QcomXnuUsbDebug.h>
+++#endif
+++
++ 
++ /* Globals */
++ typedef void (*PE_kputc_t)(char);
++@@ -27,6 +31,24 @@ SECURITY_READ_ONLY_LATE(bool) disable_kprintf_output = true;
++ SECURITY_READ_ONLY_LATE(bool) disable_iolog_serial_output = false;
++ SECURITY_READ_ONLY_LATE(bool) enable_dklog_serial_output = false;
++ 
+++#if XNU_QCOM_USB_DEBUG
+++static bool qcom_usb_debug_kprintf_requested;
+++static void
+++qcom_usb_tee(char c)
+++{
+++	/* The fallback console sink performs its own raw USB tee. */
+++	if (PE_kputc == console_write_unbuffered) {
+++		PE_kputc(c);
+++		return;
+++	}
+++	qcom_usb_debug_putc(c);
+++	if (PE_kputc && PE_kputc != qcom_usb_debug_putc) PE_kputc(c);
+++}
+++#define QCOM_USB_DEBUG_KPRINTF_PUTC qcom_usb_tee
+++#else
+++#define QCOM_USB_DEBUG_KPRINTF_PUTC PE_kputc
+++#endif
+++
++ static SIMPLE_LOCK_DECLARE(kprintf_lock, 0);
++ 
++ static void serial_putc_crlf(char c);
++@@ -51,6 +73,11 @@ PE_init_kprintf_config(void)
++ 		disable_kprintf_output = false;
++ 	}
++ #endif
+++#if XNU_QCOM_USB_DEBUG
+++	/* Defer requested verbose output until the early sink is installed. */
+++	qcom_usb_debug_kprintf_requested = !disable_kprintf_output;
+++	disable_kprintf_output = true;
+++#endif
++ }
++ // Do this early, so other code can depend on whether kprintf is enabled.
++ STARTUP(TUNABLES, STARTUP_RANK_LAST, PE_init_kprintf_config);
++@@ -70,6 +97,10 @@ PE_init_kprintf(void)
++ 		 */
++ 		PE_kputc = console_write_unbuffered;
++ 	}
+++#if XNU_QCOM_USB_DEBUG
+++	if (qcom_usb_debug_init()) PE_kputc = qcom_usb_debug_putc;
+++	disable_kprintf_output = !qcom_usb_debug_kprintf_requested;
+++#endif
++ }
++ STARTUP(KPRINTF, STARTUP_RANK_FIRST, PE_init_kprintf);
++ 
++@@ -80,7 +111,7 @@ _kprintf(const char *format, ...)
++ 	va_list         listp;
++ 
++ 	va_start(listp, format);
++-	_doprnt_log(format, &listp, PE_kputc, 16);
+++	_doprnt_log(format, &listp, QCOM_USB_DEBUG_KPRINTF_PUTC, 16);
++ 	va_end(listp);
++ }
++ #define MP_DEBUG_KPRINTF(x...)  _kprintf(x)
++@@ -123,7 +154,7 @@ kprintf(const char *fmt, ...)
++ 			cpu_last_locked = cpu_number();
++ 		}
++ 
++-		_doprnt_log(fmt, &listp, PE_kputc, 16);
+++		_doprnt_log(fmt, &listp, QCOM_USB_DEBUG_KPRINTF_PUTC, 16);
++ 
++ 		simple_unlock(&kprintf_lock);
++ 
+diff --git a/patches/xnu/zzzzzzzz-usb-cdc-worker.patch b/patches/xnu/zzzzzzzz-usb-cdc-worker.patch
+new file mode 100644
+index 0000000..489d719
+--- /dev/null
++++ b/patches/xnu/zzzzzzzz-usb-cdc-worker.patch
+@@ -0,0 +1,238 @@
++diff --git a/bsd/kern/bsd_init.c b/bsd/kern/bsd_init.c
++index 23805ea..c9e13dc 100644
++--- a/bsd/kern/bsd_init.c
+++++ b/bsd/kern/bsd_init.c
++@@ -109,6 +109,12 @@
++ #include <kern/zalloc.h>
++ #include <kern/ux_handler.h>            /* for ux_handler_setup() */
++ #include <kern/sched_hygiene.h>
+++#if XNU_QCOM_USB_DEBUG
+++#include <QcomXnuUsbDebug.h>
+++#include <kern/cpu_number.h>
+++#include <kern/processor.h>
+++#include <kern/debug.h>
+++#endif
++ 
++ #if (DEVELOPMENT || DEBUG)
++ #include <kern/debug.h>
++@@ -1296,11 +1302,220 @@ bsdinit_task(void)
++ 	lock_trace = 1;
++ }
++ 
+++#if XNU_QCOM_USB_DEBUG
+++/* These real Mach-private declarations (kern/sched_prim.h and kern/thread.h)
+++ * are hidden from BSD_BUILD; keep their exact Darwin22 prototypes here rather
+++ * than changing the BSD translation unit's MACH_KERNEL_PRIVATE header ABI.
+++ */
+++extern processor_t thread_bind(processor_t processor);
+++extern void thread_terminate_self(void);
+++
+++/* Late scheduler service for the existing core: no new device initialization,
+++ * DMA allocation, IRQ handler, filesystem or display-driver dependency.
+++ * States: 0 unstarted, 1 creating, 2 running, 3 start/bind failure, 4 stopped.
+++ */
+++static unsigned int qcom_usb_worker_state;
+++static volatile kern_return_t qcom_usb_worker_start_result;
+++/* Reboot states: 0 unstarted, 1 creating, 2 active, 3 start failure, 4 ended. */
+++static unsigned int qcom_usb_reboot_state;
+++
+++static void
+++qcom_usb_worker_wait(void)
+++{
+++	uint64_t deadline;
+++
+++	/* Unlike delay_for_interval, this never selects a CPU-latency spin path.
+++	 * Called with normal thread preemption/interrupt state, outside USB guards.
+++	 */
+++	clock_interval_to_deadline(5, NSEC_PER_MSEC, &deadline);
+++	if (assert_wait_deadline((event_t)&qcom_usb_worker_state,
+++	    THREAD_UNINT, deadline) == THREAD_WAITING) {
+++		thread_block(THREAD_CONTINUE_NULL);
+++	}
+++}
+++
+++/* The USB worker remains live while this separate normal thread waits for the
+++ * acknowledged frame and queued console bytes to leave the CDC transport.
+++ * It reaches reboot_kernel through the regular APFS sync/unmount path.
+++ */
+++static void
+++qcom_usb_reboot_worker(void *argument __unused, wait_result_t result __unused)
+++{
+++	processor_t processor = cpu_to_processor(master_cpu);
+++	int reboot_result;
+++
+++	thread_set_thread_name(current_thread(), "qcom-usb-reboot");
+++	if (processor == PROCESSOR_NULL) {
+++		qcom_usb_debug_control_reboot_failed(-1);
+++		goto out;
+++	}
+++	thread_bind(processor);
+++	thread_block(THREAD_CONTINUE_NULL);
+++	if (cpu_number() != master_cpu) {
+++		qcom_usb_debug_control_reboot_failed(-2);
+++		goto out;
+++	}
+++	if (!qcom_usb_debug_wait_drained(2000)) {
+++		qcom_usb_debug_control_reboot_failed(-3);
+++		goto out;
+++	}
+++	if (!qcom_usb_debug_control_arm_reboot()) {
+++		qcom_usb_debug_control_reboot_failed(-4);
+++		goto out;
+++	}
+++	reboot_result = reboot_kernel(0, NULL);
+++	/* reboot_kernel only returns on failure; clear the request and report it. */
+++	qcom_usb_debug_control_reboot_failed(reboot_result ? reboot_result : -5);
+++
+++out:
+++	__atomic_store_n(&qcom_usb_reboot_state, 4u, __ATOMIC_RELEASE);
+++	thread_bind(PROCESSOR_NULL);
+++	thread_terminate_self();
+++}
+++
+++static void
+++qcom_usb_start_reboot_once(void)
+++{
+++	thread_t thread = THREAD_NULL;
+++	unsigned int state, running = 1u;
+++	kern_return_t result;
+++
+++	if (!qcom_usb_debug_control_take_reboot()) {
+++		return;
+++	}
+++	for (;;) {
+++		state = __atomic_load_n(&qcom_usb_reboot_state, __ATOMIC_ACQUIRE);
+++		if (state != 0u && state != 3u && state != 4u) {
+++			/* A live request remains strictly single-instance. A previous
+++			 * completed failure (3/4) is safe to reuse for a fresh request.
+++			 */
+++			qcom_usb_debug_control_reboot_failed(-6);
+++			return;
+++		}
+++		if (__atomic_compare_exchange_n(&qcom_usb_reboot_state, &state, 1u,
+++		    0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) break;
+++	}
+++	result = kernel_thread_start(qcom_usb_reboot_worker, NULL, &thread);
+++	if (result == KERN_SUCCESS) {
+++		/* The child can finish before this parent update. A successful CAS
+++		 * records the live request; a failed CAS retains the child's terminal
+++		 * state so a later accepted request can safely retry.
+++		 */
+++		(void)__atomic_compare_exchange_n(&qcom_usb_reboot_state, &running,
+++		    2u, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
+++		thread_deallocate(thread);
+++	} else {
+++		__atomic_store_n(&qcom_usb_reboot_state, 3u, __ATOMIC_RELEASE);
+++		qcom_usb_debug_control_reboot_failed(result);
+++		kprintf("QCOM USB REBOOT start failed kr=%d\n", result);
+++	}
+++}
+++
+++static void
+++qcom_usb_worker(void *argument __unused, wait_result_t result __unused)
+++{
+++	struct qcom_usb_debug_status status = {0};
+++	processor_t processor = cpu_to_processor(master_cpu);
+++	int control_enabled = 0;
+++	int control_active = 0;
+++
+++	thread_set_thread_name(current_thread(), "qcom-usb-debug");
+++	/* Match sched_prim.c's master-processor binding and migration sequence.
+++	 * The master CPU need not be logical CPU zero on a future SMP handoff.
+++	 */
+++	if (processor == PROCESSOR_NULL) {
+++		__atomic_store_n(&qcom_usb_worker_state, 3u, __ATOMIC_RELEASE);
+++		kprintf("QCOM USB WORKER master processor missing cpu=%d\n", master_cpu);
+++		goto stopped;
+++	}
+++	thread_bind(processor);
+++	thread_block(THREAD_CONTINUE_NULL);
+++	if (cpu_number() != master_cpu) {
+++		__atomic_store_n(&qcom_usb_worker_state, 3u, __ATOMIC_RELEASE);
+++		kprintf("QCOM USB WORKER bind failed cpu=%d master=%d\n", cpu_number(), master_cpu);
+++		goto stopped;
+++	}
+++
+++	qcom_usb_debug_get_status(&status);
+++	if (status.phase != QCOM_USB_DEBUG_ACTIVE) {
+++		kprintf("QCOM USB WORKER unavailable phase=%u error=%u\n", status.phase, status.error);
+++		goto stopped;
+++	}
+++	__atomic_store_n(&qcom_usb_worker_state, 2u, __ATOMIC_RELEASE);
+++	kprintf("QCOM USB WORKER active cpu=%d period_ms=5 buffer=%llu\n",
+++	    cpu_number(), status.buffer_capacity);
+++	/* The short boot argument is evaluated only here, in the normal worker
+++	 * context. Default profiles install no callback and consume no action.
+++	 */
+++	if (PE_parse_boot_argn("qcom-usb-ctl", &control_enabled, sizeof(control_enabled)) &&
+++	    control_enabled == 1) {
+++		if (!qcom_usb_debug_control_start()) {
+++			kprintf("QCOM USB CONTROL unavailable\n");
+++		} else {
+++			control_active = 1;
+++			qcom_usb_debug_get_status(&status);
+++			kprintf("QCOM USB CONTROL active hook=%u\n", status.control_hook_owned);
+++		}
+++	}
+++	for (;;) {
+++		/* The panic hook retains its separate bounded polling drain. */
+++		if (panic_active()) {
+++			break;
+++		}
+++		qcom_usb_debug_get_status(&status);
+++		if (status.phase != QCOM_USB_DEBUG_ACTIVE) {
+++			break;
+++		}
+++		qcom_usb_debug_poll();
+++		if (control_active) {
+++			qcom_usb_start_reboot_once();
+++		}
+++		qcom_usb_worker_wait();
+++	}
+++
+++stopped:
+++	if (__atomic_load_n(&qcom_usb_worker_state, __ATOMIC_ACQUIRE) != 3u) {
+++		__atomic_store_n(&qcom_usb_worker_state, 4u, __ATOMIC_RELEASE);
+++	}
+++	thread_bind(PROCESSOR_NULL);
+++	thread_terminate_self();
+++}
+++
+++static void
+++qcom_usb_start_worker_once(void)
+++{
+++	thread_t thread = THREAD_NULL;
+++	unsigned int expected = 0;
+++	int enabled = 0;
+++	kern_return_t result;
+++
+++	if (!PE_parse_boot_argn("qcom-usb-debug", &enabled, sizeof(enabled)) || enabled != 1) {
+++		return;
+++	}
+++	if (!__atomic_compare_exchange_n(&qcom_usb_worker_state, &expected, 1u,
+++	    0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+++		return;
+++	}
+++	result = kernel_thread_start(qcom_usb_worker, NULL, &thread);
+++	qcom_usb_worker_start_result = result;
+++	if (result == KERN_SUCCESS) {
+++		thread_deallocate(thread);
+++	} else {
+++		__atomic_store_n(&qcom_usb_worker_state, 3u, __ATOMIC_RELEASE);
+++		/* A logger worker failure must not panic or abort the iOS startup. */
+++		kprintf("QCOM USB WORKER start failed kr=%d\n", result);
+++	}
+++}
+++#endif /* XNU_QCOM_USB_DEBUG */
+++
++ kern_return_t
++ bsd_autoconf(void)
++ {
++ 	kprintf("bsd_autoconf: calling kminit\n");
++ 	kminit();
+++#if XNU_QCOM_USB_DEBUG
+++	qcom_usb_start_worker_once();
+++#endif
++ 
++ 	/*
++ 	 * Early startup for bsd pseudodevices.
+diff --git a/scripts/build-xnu-4k-baseline.sh b/scripts/build-xnu-4k-baseline.sh
+index e56c360..814ad49 100755
+--- a/scripts/build-xnu-4k-baseline.sh
++++ b/scripts/build-xnu-4k-baseline.sh
+@@ -733,6 +733,11 @@ PY_BINDINGS
+     KERNEL_ARCHIVE_DEPENDENCIES="$KERNEL_ARCHIVE_DEPENDENCIES $ROOT/build/boot-progress/libBootProgress.a"
+   fi
+   KERNEL_EXTRA_ARCHIVES="$KERNEL_EXTRA_ARCHIVES ${XNU_EXTRA_LD_ARCHIVES:-}"
++  # hummer: the USB CDC debug console archive, when this board built it.
++  if [ -f "$ROOT/build/hummer-usbcdc/libHummerUsbCdc.a" ]; then
++    KERNEL_EXTRA_ARCHIVES="$KERNEL_EXTRA_ARCHIVES -Wl,-force_load,$ROOT/build/hummer-usbcdc/libHummerUsbCdc.a"
++    KERNEL_ARCHIVE_DEPENDENCIES="$KERNEL_ARCHIVE_DEPENDENCIES $ROOT/build/hummer-usbcdc/libHummerUsbCdc.a"
++  fi
+   EXTRA_MAKE_ARGS+=("LD_KERNEL_ARCHIVES=$KERNEL_EXTRA_ARCHIVES")
+   EXTRA_MAKE_ARGS+=("XNU_EXTERNAL_KERNEL_ARCHIVES=$KERNEL_ARCHIVE_DEPENDENCIES")
+ fi
+@@ -774,6 +779,11 @@ if not stamp.exists() or stamp.read_text() != identity:
+     stamp.write_text(identity)
+ PY
+ EXTRA_CFLAGS="$EXTRA_CFLAGS -DXNU_BOOT_PROGRESS=$BOOT_PROGRESS -DXNU_EARLY_BOOT_PROGRESS=$EARLY_BOOT_PROGRESS"
++# hummer: compile the six console units with the USB CDC hooks, and let them
++# find the module header in the board kit.
++if [ -d "$ROOT/kits/hummer/usbcdc/include" ]; then
++  EXTRA_CFLAGS="$EXTRA_CFLAGS -DXNU_QCOM_USB_DEBUG=1 -I$ROOT/kits/hummer/usbcdc/include"
++fi
+ make -C .cache/xnu-work "${XNU_BUILD_TARGET:-build}" SDKROOT="${XNU_SDKROOT:-iphoneos}" ARCH_CONFIGS=ARM64 \
+   MACHINE_CONFIGS=BCM2837 KERNEL_CONFIGS=DEVELOPMENT \
+   ARCH_STRING_FOR_CURRENT_MACHINE_CONFIG=arm64 LARGE_MEMORY_DEFINE=-UARM_LARGE_MEMORY \
