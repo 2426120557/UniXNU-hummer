@@ -690,6 +690,16 @@ int qcom_usb_debug_init(void)
         if (usb_diag_enabled && native.status.phase == QCOM_USB_DEBUG_NOT_INITIALIZED) {
             fail(QCOM_USB_DEBUG_ACQUIRE_REFUSED, 0);
             diag_reset(12u + 4u * native.status.error);
+        } else if (native.status.phase == QCOM_USB_DEBUG_NOT_INITIALIZED) {
+            /* hummer (local change): the silent `return 0` here is why v166
+             * looked like "the console was never built". acquire() refuses when
+             * the caller is not master_cpu, and at PE_init_kprintf time that
+             * comparison still has to be trusted. Record the refusal and both
+             * operands so the board's probe can print them. */
+            native.status.phase = QCOM_USB_DEBUG_REFUSED;
+            native.status.error = QCOM_USB_DEBUG_ACQUIRE_REFUSED;
+            native.status.trace_a = (uint32_t)cpu_number();
+            native.status.trace_b = (uint32_t)master_cpu;
         }
         return 0;
     }

@@ -612,6 +612,15 @@ extern "C" void hummer_adreno_bringup_probe(void)
 	qcom_usb_debug_get_status(&usb);
 	uint32_t usb_arg = 0;
 	(void)PE_parse_boot_argn("qcom-usb-debug", &usb_arg, sizeof(usb_arg));
+	/* If the early call refused, try once from here: this probe runs long after
+	 * CPU data, the scheduler and IOKit exist, so a different answer separates
+	 * "wrong moment" from "wrong hardware state". */
+	const uint32_t usb_phase0 = usb.phase;
+	int usb_retry = 0;
+	if (usb.phase == QCOM_USB_DEBUG_NOT_INITIALIZED) {
+		usb_retry = qcom_usb_debug_init();
+		qcom_usb_debug_get_status(&usb);
+	}
 
 	panic("hummer gmu: status=%u phase=%u fw=%08x hfi=%08x fwrdy=%u hfirdy=%u "
 	      "hash=%u reset=%u\n"
@@ -626,7 +635,8 @@ extern "C" void hummer_adreno_bringup_probe(void)
 	      "hfi4 pwr=%08x,%08x,%08x,%08x,%08x,%08x\n"
 	      "hfi5 g2h=%08x,%08x,%08x,%08x,%08x,%08x\n"
 	      "hfi6 skip=%u %08x/%08x/%x fin=%08x/%08x\n"
-	      "usb arg=%u ph=%u er=%u qr=%u dr=%u ds=%u bk=%u lt=%u tr=%u\n"
+	      "usb arg=%u p0=%u ri=%d ph=%u er=%u qr=%u\n"
+	      "usb2 dr=%u ds=%u bk=%u ta=%x tb=%x\n"
 	      "iou: %llx %llx %llx %llx %llx",
 	    status, result.phase, result.firmware_init_result, result.hfi_status,
 	    result.firmware_ready_observed, result.hfi_ready_observed,
@@ -654,8 +664,9 @@ extern "C" void hummer_adreno_bringup_probe(void)
 	    hummer_gmu_device.hfi.skipped, hummer_gmu_device.hfi.skipped_header,
 	    hummer_gmu_device.hfi.skipped_ret, hummer_gmu_device.hfi.skipped_code,
 	    pwr_after, gmu2host,
-	    usb_arg, usb.phase, usb.error, usb.qcom_result, usb.domain_result,
-	    usb.domain_stage, usb.domain_bank, usb.last_trace, usb.traces,
+	    usb_arg, usb_phase0, usb_retry, usb.phase, usb.error, usb.qcom_result,
+	    usb.domain_result, usb.domain_stage, usb.domain_bank,
+	    usb.trace_a, usb.trace_b,
 	    (unsigned long long)payloads[0].iova, (unsigned long long)payloads[1].iova,
 	    (unsigned long long)payloads[2].iova, (unsigned long long)payloads[3].iova,
 	    (unsigned long long)payloads[4].iova);
