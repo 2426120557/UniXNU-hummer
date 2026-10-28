@@ -38,6 +38,9 @@
 #include "NativeAdrenoGmuContext.h"
 #include "NativeAdrenoKernelTime.h"
 #include "NativeAdrenoSha256.h"
+/* v167: the USB CDC console module's status block, so this probe can report why
+ * the console never enumerated (see the panic at the end of the probe). */
+#include "QcomXnuUsbDebug.h"
 
 /* This translation unit is C++, so the kernel's C entry points must be declared
  * with C linkage or the reference is emitted mangled and the link fails with
@@ -598,6 +601,18 @@ extern "C" void hummer_adreno_bringup_probe(void)
 		hu_cb_syn = HU_RD(smmu, hu_cb_offset + HU_CB_FSYNR0);
 	}
 
+	/* --- v167: why did the USB CDC console not enumerate? ---------------------
+	 * v166 built and linked the console (the module's symbols resolved), the boot
+	 * arg is in UNIXNU.TOM, yet no COM port ever appeared. qcom_usb_debug_init()
+	 * runs from PE_init_kprintf -- far earlier than this probe -- and on failure
+	 * it only records why in its own status block. Nothing prints that, and a
+	 * failed init is silent by design (it must not disturb boot). So the probe
+	 * that already panics once per boot asks the module what happened. */
+	static qcom_usb_debug_status usb{};
+	qcom_usb_debug_get_status(&usb);
+	uint32_t usb_arg = 0;
+	(void)PE_parse_boot_argn("qcom-usb-debug", &usb_arg, sizeof(usb_arg));
+
 	panic("hummer gmu: status=%u phase=%u fw=%08x hfi=%08x fwrdy=%u hfirdy=%u "
 	      "hash=%u reset=%u\n"
 	      "poll=%u ao=%08x cm3=%08x dtcm=%08x aod=%u uc=%u cc=%u\n"
@@ -611,6 +626,7 @@ extern "C" void hummer_adreno_bringup_probe(void)
 	      "hfi4 pwr=%08x,%08x,%08x,%08x,%08x,%08x\n"
 	      "hfi5 g2h=%08x,%08x,%08x,%08x,%08x,%08x\n"
 	      "hfi6 skip=%u %08x/%08x/%x fin=%08x/%08x\n"
+	      "usb arg=%u ph=%u er=%u qr=%u dr=%u ds=%u bk=%u lt=%u tr=%u\n"
 	      "iou: %llx %llx %llx %llx %llx",
 	    status, result.phase, result.firmware_init_result, result.hfi_status,
 	    result.firmware_ready_observed, result.hfi_ready_observed,
@@ -638,6 +654,8 @@ extern "C" void hummer_adreno_bringup_probe(void)
 	    hummer_gmu_device.hfi.skipped, hummer_gmu_device.hfi.skipped_header,
 	    hummer_gmu_device.hfi.skipped_ret, hummer_gmu_device.hfi.skipped_code,
 	    pwr_after, gmu2host,
+	    usb_arg, usb.phase, usb.error, usb.qcom_result, usb.domain_result,
+	    usb.domain_stage, usb.domain_bank, usb.last_trace, usb.traces,
 	    (unsigned long long)payloads[0].iova, (unsigned long long)payloads[1].iova,
 	    (unsigned long long)payloads[2].iova, (unsigned long long)payloads[3].iova,
 	    (unsigned long long)payloads[4].iova);

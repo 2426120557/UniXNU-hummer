@@ -93,7 +93,10 @@ cpp_command += ['-Wall', '-Wextra', '-Wno-unused-parameter',
                 # panic screen); ++ on a volatile is deprecated in C++20.
                 '-Wno-deprecated-volatile',
                 '-I', str(ROOT / '.cache/xnu-work/osfmk'),
-                '-I', str(ROOT / 'kits/hummer'), '-I', str(ROOT / 'drivers/NativeGeniSpi')]
+                '-I', str(ROOT / 'kits/hummer'), '-I', str(ROOT / 'drivers/NativeGeniSpi'),
+                # v167: the probe reports the USB CDC module's status, so it needs
+                # QcomXnuUsbDebug.h from the vendored module.
+                '-I', str(ROOT / 'kits/hummer/usbcdc/include')]
 if cpp_command and cpp_command[0] in ('clang', 'clang++'):
     cpp_command = ['xcrun', '--sdk', 'iphoneos', cpp_command[0]] + cpp_command[1:]
 (OUT / 'compile-command.json').write_text(json.dumps(cpp_command, indent=2) + '\n')
