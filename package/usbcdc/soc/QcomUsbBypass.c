@@ -46,7 +46,7 @@ QUSB_RESULT QcomUsbBypassPlan(QUSB_READ32 read32, void *cookie, QUSB_U64 dma,
 {
   QUSB_U32 id0, id1, id2, cr0, smr, s2cr, i, shift, bits, mask, id;
   QUSB_U32 streams, banks, pages, matches = 0;
-  unsigned char used[128];
+  unsigned char used[256];   /* SM8750: IDR0 reports 132 streams */
   QUSB_BYPASS_LEASE plan;
 
   if (!read32 || !lease || !bytes) return QusbBadArgument;
@@ -72,8 +72,8 @@ QUSB_RESULT QcomUsbBypassPlan(QUSB_READ32 read32, void *cookie, QUSB_U64 dma,
   streams = id0 & 255u;
   banks = id1 & 255u;
   pages = 1u << (((id1 >> 28) & 7u) + 1u);
-  if ((id1 >> 31) || !streams || streams > 128u || pages > 128u ||
-      banks < 2u || banks > 128u || (pages + banks) * 4096u > 0xd0000u)
+  if ((id1 >> 31) || !streams || streams > 256u || pages > 128u ||
+      banks < 2u || banks > 256u || (pages + banks) * 4096u > 0xd0000u)
     return QusbUnknownSmmu;
   plan.pages = pages;
 
@@ -185,7 +185,7 @@ QUSB_RESULT QcomUsbBypassRestore(QUSB_READ32 read32, QUSB_WRITE32 write32,
 int QcomUsbBypassWriteAllowed(const QUSB_BYPASS_LEASE *lease,
                               QUSB_U64 address, QUSB_U32 value)
 {
-  if (!lease || !lease->active || lease->bank >= 128u) return 0;
+  if (!lease || !lease->active || lease->bank >= 256u) return 0;
   if (lease->phase == 1u) {
     if ((lease->changed & 1u) && address == cb_address(lease) && value == 0u) return 1;
     if ((lease->changed & 4u) && address == cba2r_address(lease) && value == 1u) return 1;

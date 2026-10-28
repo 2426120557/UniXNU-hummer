@@ -80,8 +80,8 @@ static QUSB_U64 reg_value(const QUSB_DOMAIN_LEASE *l,QUSB_U32 i)
 static int lease_shape(const QUSB_DOMAIN_LEASE *l)
 {
   QUSB_U32 i,shift,pages,bits1,bits2;
-  if(!l||l->magic!=MAGIC||l->active!=1||!l->stream_count||l->stream_count>128||
-     !l->bank_count||l->bank_count>128||l->index>=l->stream_count||l->cb>=l->bank_count||
+  if(!l||l->magic!=MAGIC||l->active!=1||!l->stream_count||l->stream_count>256||
+     !l->bank_count||l->bank_count>256||l->index>=l->stream_count||l->cb>=l->bank_count||
      l->cb<((l->id1>>16)&255U)||
      l->extended_stream_ids>1||l->enable_attempted>1||l->tlb_released>1||l->tlb_poisoned>1||
      l->tcr2_bound>1||l->tcr2_view_owned>1||l->tcr2_capture_pending>1||
@@ -214,7 +214,7 @@ static QUSB_DOMAIN_RESULT tlb_sync(const QUSB_DOMAIN_PLATFORM *p,QUSB_DOMAIN_LEA
 
 /* Scans the complete supported NS table. No other stream may cover SID40. */
 static QUSB_DOMAIN_RESULT scan(const QUSB_DOMAIN_PLATFORM *p,QUSB_DOMAIN_LEASE *l,
-                               unsigned char used[128],int installed)
+                               unsigned char used[256],int installed)
 {
   QUSB_U32 i,smr,s2cr,mask,id,matches=0,first=0xffffffffU,oldsmr=0,olds2cr=0;
   for(i=0;i<l->stream_count;i++) {
@@ -245,7 +245,7 @@ QUSB_DOMAIN_RESULT QcomUsbDomainInstall(const QUSB_DOMAIN_PLATFORM *p,void *cpu,
                                        QUSB_DOMAIN_LEASE *l)
 {
   QUSB_U32 i,j,v,cr2,shift,pages,ns2,chosen=0xffffffffU,bits,ps;
-  QUSB_U64 tt0,tt1,used_asid[256],value;unsigned char used[128];
+  QUSB_U64 tt0,tt1,used_asid[256],value;unsigned char used[256];
   QUSB_DOMAIN_RESULT r;
   if(!platform_ok(p)||!l||l->active)return QusbDomainBadArgument;
   zero(l,sizeof(*l));zero(used,sizeof(used));zero(used_asid,sizeof(used_asid));
@@ -257,7 +257,7 @@ QUSB_DOMAIN_RESULT QcomUsbDomainInstall(const QUSB_DOMAIN_PLATFORM *p,void *cpu,
      !p->read32(p->cookie,QUSB_SMMU_BASE+8,&cr2))return QusbDomainReadFailed;
   l->stream_count=l->id0&255U;l->bank_count=l->id1&255U;
   l->extended_stream_ids=(l->original_cr0>>3)&1U;
-  if(!l->stream_count||l->stream_count>128||!l->bank_count||l->bank_count>128||
+  if(!l->stream_count||l->stream_count>256||!l->bank_count||l->bank_count>256||
      !(l->id0&(1U<<30))||!(l->id0&(1U<<27))||!(l->id2&(1U<<12))||
      (l->original_cr0&0x401U)!=0x400U||(cr2&0xa0000000U)||
      (l->extended_stream_ids&&!(l->id0&(1U<<8))))return QusbDomainUnsupported;

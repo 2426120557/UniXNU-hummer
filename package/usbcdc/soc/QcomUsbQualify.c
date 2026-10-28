@@ -86,7 +86,7 @@ QUSB_RESULT QcomUsbQualifyIdentityDma(QUSB_READ32 read32, void *cookie,
    * falsely requiring implementation revision 2.
    */
   if (!(state->id0 & 0x60000000U) || !(state->id1 & 255U) ||
-      (state->id1 & 255U) > 128U || (state->id0 & 255U) > 128U)
+      (state->id1 & 255U) > 256U || (state->id0 & 255U) > 256U)
     return QusbUnknownSmmu;
   state->extended_stream_ids = (state->scr0 >> 3) & 1U;
   /* Arm IHI0062D.c 2.3.5: CLIENTPD bypasses the Stream mapping table and
@@ -194,7 +194,7 @@ static QUSB_RESULT core_halted(QUSB_READ32 read32, void *cookie)
 static int valid_lease(const QUSB_DMA_LEASE *lease)
 {
   if (!lease || lease->active != 1U || lease->new_entry > 1U ||
-      !lease->stream_count || lease->stream_count > 128U ||
+      !lease->stream_count || lease->stream_count > 256U ||
       lease->index >= lease->stream_count || lease->extended_stream_ids > 1U ||
       lease->smr != (lease->extended_stream_ids ? QUSB_STREAM_ID :
                                                 (0x80000000U | QUSB_STREAM_ID)) ||
