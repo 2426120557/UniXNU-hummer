@@ -49,15 +49,17 @@
 /* DT iommus = <&apps_smmu 0x40 0x0> on usb@a600000. (Same SID as SM8550.) */
 #define QUD_STREAM_ID 0x40u
 
-/* Whether ABL pre-routed this SID is exactly what the first boot reports. If it
- * did not, the private translated domain installs instead and this stays 0. */
-#define QUD_DMA_PREFER_IDENTITY 0
+/* v169 的真机答案：私有翻译域被拒，dr=3 = QusbDomainUnsupported —— 不是流表
+ * 冲突，而是 QcomUsbDmaDomain.c 的几何检查（IDR0/IDR2/CR0 那组位）不通过，
+ * 说明固件把 SMMU 留在了"未交出所有权"的状态。这正是 nabu 遇到的那一类，
+ * 那边的答案是继承路线而不是私有域。 */
+#define QUD_DMA_PREFER_IDENTITY 1
 
-/* Same Qualcomm SMMUv500 firmware family as SM8150/SM8550: if it refuses
- * S2CR.TYPE=BYPASS (reads back as FAULT), the bypass context bank route is the
- * one this board's UFS takeover already uses. Switch this on only after a boot
- * shows the identity lease being refused. */
-#define QUD_DMA_BYPASS_BANK 0
+/* 而且这一代固件不接受 S2CR.TYPE=BYPASS（SM8150 写 0x00010003 读回
+ * 0x00020003），所以按 nabu 最终可用的组合、也就是本板 UFS 接管用的办法：
+ * 走固件预留的 bypass context bank —— SCTLR=0、CBAR=S1_TRANS_S2_BYPASS、
+ * CBA2R.VA64=1，S2CR 用普通 TYPE=TRANSLATE 指向那个 bank。 */
+#define QUD_DMA_BYPASS_BANK 1
 
 /* Private translated-domain IOVA: free choice, 2 MiB aligned, below 4 GiB. */
 #define QUD_DMA_IOVA 0x90000000ULL
