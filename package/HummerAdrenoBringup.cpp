@@ -11,8 +11,9 @@
  * This probe takes the next step: build the GMU's own SMMU context, map its
  * payloads at the addresses a6xx_gmu.c uses, load the pinned gen80000_gmu.bin,
  * release the CM3 and -- since v163 -- talk HFI to the firmware that is now
- * running: the performance table, IFPC off, CORE_FW_START, START, and from v164 a
- * DCVS vote.  It stops once the GX rail's state after that conversation is known.
+ * running: the performance table, IFPC off, CORE_FW_START and START, plus a DCVS
+ * vote that has been opt-in (hummer-usb-dcvs=1) since v165 hung on it.  It stops
+ * once the GX rail's state after that conversation is known.
  *
  * Why it runs from native_legacy_display_late_probe() instead of the bsd_init
  * hook: the context bring-up allocates real memory through
@@ -506,19 +507,21 @@ extern "C" void hummer_adreno_bringup_probe(void)
 		for (unsigned i = 0; i < 3; ++i)
 			hfi_table[i] = hummer_gmu_device.hfi.shared[i];
 
-	/* --- v164: the vote, and what each message actually returned. -------------
-	 * v163 proved the transport and the ids: 15/11/14/10 each came back
-	 * AdrenoHfiSuccess with firmware error 0, yet GX stayed off (pwr2=3). That is
-	 * exactly what a table with no votes in it earns -- nothing asked the firmware
-	 * for a frequency, so it never raised the rail. This boot adds message 30
-	 * (DCVS) with a real level, and keeps the evidence v163 threw away:
-	 *   - the ACK payload and word count of every message (only the status was
-	 *     printed before),
-	 *   - the kit's skip counters, which is where an unsolicited firmware message
-	 *     (a MSG_TO_HOST after START, say) ends up,
-	 *   - PWR_CLK_STATUS and GMU2HOST_INTR_INFO after each message instead of once
-	 *     at the end, so the step that flips GX can be named even when the answer
-	 *     is "none of them". */
+	/* --- v165: make the talk visible, and put the vote behind a switch. -------
+	 * v164 hung: the screen stopped at "adreno-gmu: load fw" and never reached the
+	 * panic that ends this probe, so the wedge is somewhere after that line --
+	 * where v164 printed nothing at all. v164 added three things to v163 and only
+	 * one of them can stall a bus: message 30 (DCVS). A payload the firmware does
+	 * not like can fault the CM3, and every later GMU register read then waits
+	 * forever; the per-step PWR_CLK_STATUS/GMU2HOST reads v164 added are exactly
+	 * such accesses. So:
+	 *   - DCVS becomes opt-in (hummer-usb-dcvs=1). The default boot sends only the
+	 *     four messages v163 proved and prints what it learned; steps[4].status
+	 *     stays 99 ("not attempted") so the report cannot be misread as success.
+	 *   - a boot_progress_stage() names each step before it runs, so a hang leaves
+	 *     its own name on the screen instead of the generic "load fw".
+	 *   - the per-step reads stay: they are the observation, and without DCVS they
+	 *     only touch the state v163 already read safely. */
 	struct hu_hfi_step {
 		unsigned id;
 		const uint32_t *payload;
@@ -552,12 +555,20 @@ extern "C" void hummer_adreno_bringup_probe(void)
 		{ 11, ifpc, 3, AdrenoHfiSuccess, 0, 0, 0, 0, 0 },
 		{ 14, &handle, 1, AdrenoHfiSuccess, 0, 0, 0, 0, 0 },
 		{ 10, perf, 0, AdrenoHfiSuccess, 0, 0, 0, 0, 0 },
-		{ 30, dcvs, 1, AdrenoHfiSuccess, 0, 0, 0, 0, 0 },
+		{ 30, dcvs, 1, (AdrenoHfiStatus)99, 0, 0, 0, 0, 0 },   /* 99 = not attempted */
 	};
+	static const char *const step_stage[5] = {
+		"adreno-gmu: hfi 15", "adreno-gmu: hfi 11", "adreno-gmu: hfi 14",
+		"adreno-gmu: hfi 10", "adreno-gmu: hfi 30",
+	};
+	uint32_t dcvs_enabled = 0;
+	(void)PE_parse_boot_argn("hummer-usb-dcvs", &dcvs_enabled, sizeof(dcvs_enabled));
+	const unsigned step_count = dcvs_enabled ? 5u : 4u;
 	const uint32_t pwr_before = pwr_clk;
 	const uint32_t g2h_before = gmu_word(REG_GMU_GMU2HOST_INTR_INFO);
-	for (unsigned i = 0; i < 5; ++i) {
+	for (unsigned i = 0; i < step_count; ++i) {
 		hu_hfi_step &s = steps[i];
+		boot_progress_stage(step_stage[i]);
 		for (unsigned k = 0; k < 16; ++k)
 			ack[k] = 0;         /* a failed poll leaves the buffer untouched */
 		s.status = AdrenoHfiExchange(&hummer_gmu_device.hfi, s.id, s.payload, s.words,
@@ -568,10 +579,15 @@ extern "C" void hummer_adreno_bringup_probe(void)
 		s.pwr = gmu_word(REG_GMU_PWR_CLK_STATUS);
 		s.g2h = gmu_word(REG_GMU_GMU2HOST_INTR_INFO);
 	}
-	/* GX will not appear inside a 10 ms poll budget even when the vote is accepted:
-	 * the firmware has to place its own requests first. Give it a second. */
-	for (unsigned i = 0; i < 10; ++i)
-		IODelay(100000);
+	boot_progress_stage("adreno-gmu: hfi done");
+	if (dcvs_enabled) {
+		/* GX will not appear inside a 10 ms poll budget even when the vote is
+		 * accepted: the firmware has to place its own requests first. */
+		boot_progress_stage("adreno-gmu: hfi settle");
+		for (unsigned i = 0; i < 10; ++i)
+			IODelay(100000);
+	}
+	boot_progress_stage("adreno-gmu: hfi read");
 	const uint32_t pwr_after = gmu_word(REG_GMU_PWR_CLK_STATUS);
 	const uint32_t gmu2host = gmu_word(REG_GMU_GMU2HOST_INTR_INFO);
 
