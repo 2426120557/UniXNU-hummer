@@ -643,15 +643,15 @@ extern "C" void hummer_adreno_bringup_probe(void)
 	const uint32_t sbanks = sid1 & 255u;
 	const uint32_t spages = 1u << (((sid1 >> 28) & 7u) + 1u);
 
-	/* v177: now that the CDC console actually works, the report does not have to
-	 * kill the boot to be readable. Default is a plain kprintf -- it reaches the
-	 * USB console and the machine keeps running, so a capture started at any time
-	 * still sees it. hummer-adreno-panic=1 restores the old screen-only panic. */
+	/* v179: kprintf routes through _doprnt_log, whose encoder asserts that a
+	 * single literal argument fits in a command (arg_size <= UINT8_MAX). The full
+	 * report above is ~800 bytes, so printing it in one call panics inside
+	 * libkern/os/log_encode.c. Each line below is well under that limit. */
 	uint32_t want_panic = 0;
 	(void)PE_parse_boot_argn("hummer-adreno-panic", &want_panic, sizeof(want_panic));
-#define HU_REPORT(...) do { if (want_panic) panic(__VA_ARGS__); else kprintf(__VA_ARGS__); } while (0)
 
-	HU_REPORT("hummer gmu: status=%u phase=%u fw=%08x hfi=%08x fwrdy=%u hfirdy=%u "
+	if (want_panic)
+		panic("hummer gmu: status=%u phase=%u fw=%08x hfi=%08x fwrdy=%u hfirdy=%u "
 	      "hash=%u reset=%u\n"
 	      "poll=%u ao=%08x cm3=%08x dtcm=%08x aod=%u uc=%u cc=%u\n"
 	      "cb fsr=%08x far=%08x syn=%08x sctlr=%08x off=%x\n"
@@ -703,5 +703,33 @@ extern "C" void hummer_adreno_bringup_probe(void)
 	    (unsigned long long)payloads[0].iova, (unsigned long long)payloads[1].iova,
 	    (unsigned long long)payloads[2].iova, (unsigned long long)payloads[3].iova,
 	    (unsigned long long)payloads[4].iova);
-#undef HU_REPORT
+	else {
+		/* One kprintf per line: every literal here stays far below the log
+		 * encoder's per-command limit, unlike the ~800-byte block above. */
+		kprintf("hummer gmu: status=%u phase=%u fw=%08x hfi=%08x pwr=%08x ctrl=%08x\n",
+		    status, result.phase, result.firmware_init_result, result.hfi_status,
+		    pwr_clk, hfi_ctrl);
+		kprintf("hfi2 15=%d/%x 11=%d/%x 14=%d/%x 10=%d/%x 30=%d/%x\n",
+		    steps[0].status, steps[0].error, steps[1].status, steps[1].error,
+		    steps[2].status, steps[2].error, steps[3].status, steps[3].error,
+		    steps[4].status, steps[4].error);
+		kprintf("hfi3 n=%u,%u,%u,%u,%u ack=%08x,%08x,%08x,%08x,%08x\n",
+		    (unsigned)steps[0].ack_words, (unsigned)steps[1].ack_words,
+		    (unsigned)steps[2].ack_words, (unsigned)steps[3].ack_words,
+		    (unsigned)steps[4].ack_words,
+		    steps[0].ack0, steps[1].ack0, steps[2].ack0, steps[3].ack0, steps[4].ack0);
+		kprintf("hfi6 skip=%u %08x/%08x/%x fin=%08x/%08x\n",
+		    hummer_gmu_device.hfi.skipped, hummer_gmu_device.hfi.skipped_header,
+		    hummer_gmu_device.hfi.skipped_ret, hummer_gmu_device.hfi.skipped_code,
+		    pwr_after, gmu2host);
+		kprintf("usb arg=%u p0=%u ri=%d ph=%u er=%u qr=%u\n",
+		    usb_arg, usb_phase0, usb_retry, usb.phase, usb.error, usb.qcom_result);
+		kprintf("usb2 dr=%u ds=%u bk=%u ta=%x tb=%x ev=%x\n",
+		    usb.domain_result, usb.domain_stage, usb.domain_bank,
+		    usb.trace_a, usb.trace_b, usb.last_poll_events);
+		kprintf("smmu id0=%08x id1=%08x id2=%08x scr0=%08x sacr=%08x\n",
+		    sid0, sid1, sid2, sscr0, ssacr);
+		kprintf("smmu2 str=%u bk=%u pg=%u cr0b0=%u tag=%s\n",
+		    sstreams, sbanks, spages, sscr0 & 1u, "v173-256");
+	}
 }
