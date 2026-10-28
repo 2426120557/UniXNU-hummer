@@ -39,7 +39,9 @@ SOURCES = [
     MODULE / 'kernel/QcomXnuUsbDebug.c',
     MODULE / 'kernel/QcomUsbScreenshot.c',
 ]
-INCLUDES = [MODULE / 'include', MODULE / 'soc', MODULE / 'usb', MODULE / 'kernel']
+# QUD_SOC_HEADER is "soc/Sm8750.h", i.e. relative to the module root, so the
+# module root itself has to be on the include path (QcomUsbSoc.h:12 includes it).
+INCLUDES = [MODULE, MODULE / 'include', MODULE / 'soc', MODULE / 'usb', MODULE / 'kernel']
 
 
 def run(command, cwd):
