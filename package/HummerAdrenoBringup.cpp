@@ -9,10 +9,10 @@
  *   v148  the GMU's DTCM is writable from the kernel.
  *
  * This probe takes the next step: build the GMU's own SMMU context, map its
- * payloads at the addresses a6xx_gmu.c uses, load the pinned gen80000_gmu.bin and
- * release the CM3.  It stops at "firmware signalled FW_INIT_RESULT and the HFI
- * controller reports ready" -- the last point reachable without the A8XX HFI
- * table format, which the pinned AdrenoFirmware kit does not implement.
+ * payloads at the addresses a6xx_gmu.c uses, load the pinned gen80000_gmu.bin,
+ * release the CM3 and -- since v163 -- talk HFI to the firmware that is now
+ * running: the performance table, IFPC off, CORE_FW_START, START, and from v164 a
+ * DCVS vote.  It stops once the GX rail's state after that conversation is known.
  *
  * Why it runs from native_legacy_display_late_probe() instead of the bsd_init
  * hook: the context bring-up allocates real memory through
@@ -506,16 +506,19 @@ extern "C" void hummer_adreno_bringup_probe(void)
 		for (unsigned i = 0; i < 3; ++i)
 			hfi_table[i] = hummer_gmu_device.hfi.shared[i];
 
-	/* --- v163: talk to the running firmware. ---------------------------------
-	 * annibale's order, with their message ids (checked against adreno8_hfi.c):
-	 *   15  the A8XX performance table (gen8 moved it off 11 in HFI 2.6.1)
-	 *   11  {9,0,0}  disable ordinary HFI IFPC
-	 *   14  {0}      CORE_FW_START with handle 0
-	 *   10  {}       START; the only one with a five second budget
-	 *   30  DCVS, only after START, not attempted yet
-	 * The votes in this first table are deliberately zero: this boot proves the
-	 * message id and the word layout are what the firmware wants, before any
-	 * cmd-db ARC arithmetic is trusted. */
+	/* --- v164: the vote, and what each message actually returned. -------------
+	 * v163 proved the transport and the ids: 15/11/14/10 each came back
+	 * AdrenoHfiSuccess with firmware error 0, yet GX stayed off (pwr2=3). That is
+	 * exactly what a table with no votes in it earns -- nothing asked the firmware
+	 * for a frequency, so it never raised the rail. This boot adds message 30
+	 * (DCVS) with a real level, and keeps the evidence v163 threw away:
+	 *   - the ACK payload and word count of every message (only the status was
+	 *     printed before),
+	 *   - the kit's skip counters, which is where an unsolicited firmware message
+	 *     (a MSG_TO_HOST after START, say) ends up,
+	 *   - PWR_CLK_STATUS and GMU2HOST_INTR_INFO after each message instead of once
+	 *     at the end, so the step that flips GX can be named even when the answer
+	 *     is "none of them". */
 	struct hu_hfi_step {
 		unsigned id;
 		const uint32_t *payload;
@@ -523,6 +526,9 @@ extern "C" void hummer_adreno_bringup_probe(void)
 		AdrenoHfiStatus status;
 		uint32_t error;
 		size_t ack_words;
+		uint32_t ack0;
+		uint32_t pwr;
+		uint32_t g2h;
 	};
 	uint32_t perf[5 + 2 * 3 + 2 + 3 * 2];
 	size_t np = 0;
@@ -539,19 +545,33 @@ extern "C" void hummer_adreno_bringup_probe(void)
 	perf[np++] = 0; perf[np++] = 650000;
 	static const uint32_t ifpc[3] = { 9, 0, 0 };
 	static uint32_t handle = 0;
+	static uint32_t dcvs[1] = { 1 };   /* level 1: the 160 MHz entry above, by index */
 	static uint32_t ack[16];
-	hu_hfi_step steps[4] = {
-		{ 15, perf, np, AdrenoHfiSuccess, 0, 0 },
-		{ 11, ifpc, 3, AdrenoHfiSuccess, 0, 0 },
-		{ 14, &handle, 1, AdrenoHfiSuccess, 0, 0 },
-		{ 10, perf, 0, AdrenoHfiSuccess, 0, 0 },
+	hu_hfi_step steps[5] = {
+		{ 15, perf, np, AdrenoHfiSuccess, 0, 0, 0, 0, 0 },
+		{ 11, ifpc, 3, AdrenoHfiSuccess, 0, 0, 0, 0, 0 },
+		{ 14, &handle, 1, AdrenoHfiSuccess, 0, 0, 0, 0, 0 },
+		{ 10, perf, 0, AdrenoHfiSuccess, 0, 0, 0, 0, 0 },
+		{ 30, dcvs, 1, AdrenoHfiSuccess, 0, 0, 0, 0, 0 },
 	};
-	for (unsigned i = 0; i < 4; ++i) {
+	const uint32_t pwr_before = pwr_clk;
+	const uint32_t g2h_before = gmu_word(REG_GMU_GMU2HOST_INTR_INFO);
+	for (unsigned i = 0; i < 5; ++i) {
 		hu_hfi_step &s = steps[i];
+		for (unsigned k = 0; k < 16; ++k)
+			ack[k] = 0;         /* a failed poll leaves the buffer untouched */
 		s.status = AdrenoHfiExchange(&hummer_gmu_device.hfi, s.id, s.payload, s.words,
-		    s.id == 10 ? 50000u : 10000u, hfi_wait_once, ack, 16, &s.ack_words,
-		    &s.error);
+		    (s.id == 10 || s.id == 30) ? 50000u : 10000u, hfi_wait_once, ack, 16,
+		    &s.ack_words, &s.error);
+		if (s.ack_words > 0)
+			s.ack0 = ack[0];
+		s.pwr = gmu_word(REG_GMU_PWR_CLK_STATUS);
+		s.g2h = gmu_word(REG_GMU_GMU2HOST_INTR_INFO);
 	}
+	/* GX will not appear inside a 10 ms poll budget even when the vote is accepted:
+	 * the firmware has to place its own requests first. Give it a second. */
+	for (unsigned i = 0; i < 10; ++i)
+		IODelay(100000);
 	const uint32_t pwr_after = gmu_word(REG_GMU_PWR_CLK_STATUS);
 	const uint32_t gmu2host = gmu_word(REG_GMU_GMU2HOST_INTR_INFO);
 
@@ -570,7 +590,11 @@ extern "C" void hummer_adreno_bringup_probe(void)
 	      "ctx bank=%u asid=%u slot=%u sid=%u spans=%u ttbr0=%llx\n"
 	      "hfi ver=%08x q=%08x %08x %08x pwr=%08x ctrl=%08x\n"
 	      "log=%u %08x %08x %08x %08x\n"
-	      "hfi2 15=%d/%x 11=%d/%x 14=%d/%x 10=%d/%x pwr2=%08x g2h=%08x"
+	      "hfi2 15=%d/%x 11=%d/%x 14=%d/%x 10=%d/%x 30=%d/%x\n"
+	      "hfi3 n=%u,%u,%u,%u,%u ack=%08x,%08x,%08x,%08x,%08x\n"
+	      "hfi4 pwr=%08x,%08x,%08x,%08x,%08x,%08x\n"
+	      "hfi5 g2h=%08x,%08x,%08x,%08x,%08x,%08x\n"
+	      "hfi6 skip=%u %08x/%08x/%x fin=%08x/%08x\n"
 	      "iou: %llx %llx %llx %llx %llx",
 	    status, result.phase, result.firmware_init_result, result.hfi_status,
 	    result.firmware_ready_observed, result.hfi_ready_observed,
@@ -586,6 +610,17 @@ extern "C" void hummer_adreno_bringup_probe(void)
 	    log_written, log_words[0], log_words[1], log_words[2], log_words[3],
 	    steps[0].status, steps[0].error, steps[1].status, steps[1].error,
 	    steps[2].status, steps[2].error, steps[3].status, steps[3].error,
+	    steps[4].status, steps[4].error,
+	    (unsigned)steps[0].ack_words, (unsigned)steps[1].ack_words,
+	    (unsigned)steps[2].ack_words, (unsigned)steps[3].ack_words,
+	    (unsigned)steps[4].ack_words,
+	    steps[0].ack0, steps[1].ack0, steps[2].ack0, steps[3].ack0, steps[4].ack0,
+	    pwr_before, steps[0].pwr, steps[1].pwr, steps[2].pwr, steps[3].pwr,
+	    steps[4].pwr,
+	    g2h_before, steps[0].g2h, steps[1].g2h, steps[2].g2h, steps[3].g2h,
+	    steps[4].g2h,
+	    hummer_gmu_device.hfi.skipped, hummer_gmu_device.hfi.skipped_header,
+	    hummer_gmu_device.hfi.skipped_ret, hummer_gmu_device.hfi.skipped_code,
 	    pwr_after, gmu2host,
 	    (unsigned long long)payloads[0].iova, (unsigned long long)payloads[1].iova,
 	    (unsigned long long)payloads[2].iova, (unsigned long long)payloads[3].iova,
