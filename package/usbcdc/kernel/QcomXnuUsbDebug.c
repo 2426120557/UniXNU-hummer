@@ -858,6 +858,20 @@ int qcom_usb_debug_init(void)
              * TYPE=TRANSLATE S2CR. Reads of these registers do not return the
              * written value, so the verdict is left to real DMA traffic. */
             native.status.dma_mode = QCOM_USB_DEBUG_DMA_BYPASS_BANK;
+            /* v174 (hummer): publish what *this* module reads through its own
+             * physical_read, so the board's probe can compare it with the same
+             * registers read from its own mapping. A zero here while the probe
+             * reads real values means the module's SMMU window is wrong, not the
+             * SMMU content. */
+            {
+                QUSB_U32 mcr0 = 0, mid0 = 0, mid2 = 0;
+                (void)physical_read(0, QUSB_SMMU_BASE, &mcr0);
+                (void)physical_read(0, QUSB_SMMU_BASE + 0x20u, &mid0);
+                (void)physical_read(0, QUSB_SMMU_BASE + 0x28u, &mid2);
+                native.status.trace_a = mcr0;
+                native.status.trace_b = mid0;
+                native.status.last_poll_events = mid2;
+            }
             dma_result = QcomUsbBypassPlan(physical_read, 0, native.status.dma_pa,
                                            (QUSB_U32)sizeof(usb_dma), &native.bypass_lease);
             if (dma_result == QusbQualified)

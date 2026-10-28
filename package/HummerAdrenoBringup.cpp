@@ -657,7 +657,7 @@ extern "C" void hummer_adreno_bringup_probe(void)
 	      "hfi5 g2h=%08x,%08x,%08x,%08x,%08x,%08x\n"
 	      "hfi6 skip=%u %08x/%08x/%x fin=%08x/%08x\n"
 	      "usb arg=%u p0=%u ri=%d ph=%u er=%u qr=%u\n"
-	      "usb2 dr=%u ds=%u bk=%u ta=%x tb=%x\n"
+	      "usb2 dr=%u ds=%u bk=%u ta=%x tb=%x ev=%x\n"
 	      "smmu id0=%08x id1=%08x id2=%08x scr0=%08x sacr=%08x\n"
 	      "smmu2 str=%u bk=%u pg=%u cr0b0=%u tag=%s\n"
 	      "iou: %llx %llx %llx %llx %llx",
@@ -689,7 +689,7 @@ extern "C" void hummer_adreno_bringup_probe(void)
 	    pwr_after, gmu2host,
 	    usb_arg, usb_phase0, usb_retry, usb.phase, usb.error, usb.qcom_result,
 	    usb.domain_result, usb.domain_stage, usb.domain_bank,
-	    usb.trace_a, usb.trace_b,
+	    usb.trace_a, usb.trace_b, usb.last_poll_events,
 	    sid0, sid1, sid2, sscr0, ssacr,
 	    sstreams, sbanks, spages, sscr0 & 1u, "v173-256",
 	    (unsigned long long)payloads[0].iova, (unsigned long long)payloads[1].iova,
