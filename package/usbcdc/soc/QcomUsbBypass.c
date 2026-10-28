@@ -76,8 +76,13 @@ QUSB_RESULT QcomUsbBypassPlan(QUSB_READ32 read32, void *cookie, QUSB_U64 dma,
   streams = id0 & 255u;
   banks = id1 & 255u;
   pages = 1u << (((id1 >> 28) & 7u) + 1u);
+  /* SM8750: IDR1[30:28] = 6, so pages = 128 and the last context bank sits at
+   * (128 + 83) * 4096 = 0xD2000. The upstream 0xd0000 cap was tighter than the
+   * window this profile maps, and rejected a layout that fits. Bound the
+   * registers by the mapped window instead of a constant -- cb_address() below
+   * indexes exactly (pages + bank) * 4096 from QUSB_SMMU_BASE. */
   if ((id1 >> 31) || !streams || streams > 256u || pages > 128u ||
-      banks < 2u || banks > 256u || (pages + banks) * 4096u > 0xd0000u)
+      banks < 2u || banks > 256u || (pages + banks) * 4096u > QUSB_SMMU_BYTES)
     return QusbUnknownSmmu;
   plan.pages = pages;
 
