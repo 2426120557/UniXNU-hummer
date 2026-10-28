@@ -4026,10 +4026,10 @@ new file mode 100644
 + 	memory_object_t pager,
 diff --git a/patches/xnu/zzzzzzzz-usb-cdc-console.patch b/patches/xnu/zzzzzzzz-usb-cdc-console.patch
 new file mode 100644
-index 0000000..a4aa7ee
+index 0000000..5a70705
 --- /dev/null
 +++ b/patches/xnu/zzzzzzzz-usb-cdc-console.patch
-@@ -0,0 +1,230 @@
+@@ -0,0 +1,227 @@
 +diff --git a/osfmk/console/serial_console.c b/osfmk/console/serial_console.c
 +index 715c545..840a9d6 100644
 +--- a/osfmk/console/serial_console.c
@@ -4118,18 +4118,15 @@ index 0000000..a4aa7ee
 + #if defined(__arm__) || defined(__arm64__)
 + 		/* On arm32, which doesn't have a WFE timeout, this may not return.  But that should be OK on this path. */
 +diff --git a/osfmk/kern/printf.c b/osfmk/kern/printf.c
-+index d092099..16f1216 100644
++index d092099..9427b22 100644
 +--- a/osfmk/kern/printf.c
 ++++ b/osfmk/kern/printf.c
-+@@ -914,14 +914,33 @@ vprintf(const char *fmt, va_list ap)
++@@ -914,14 +914,30 @@ vprintf(const char *fmt, va_list ap)
 + 	return vprintf_internal(fmt, ap, __builtin_return_address(0));
 + }
 + 
 ++#if XNU_QCOM_USB_DEBUG
 ++#include <QcomXnuUsbDebug.h>
-++/* 10063 keeps this in serial_console.c and only video_console.c declares it;
-++ * the console tee needs it to know when the ring is refusing output. */
-++extern int disableConsoleOutput;
 ++#endif
 ++
 + void
@@ -4155,7 +4152,7 @@ index 0000000..a4aa7ee
 + 		PE_kputc(c);
 + 	}
 + }
-+@@ -929,11 +948,23 @@ consdebug_putc(char c)
++@@ -929,11 +945,23 @@ consdebug_putc(char c)
 + void
 + consdebug_putc_unbuffered(char c)
 + {
@@ -4524,6 +4521,91 @@ index e56c360..814ad49 100755
      stamp.write_text(identity)
  PY
  EXTRA_CFLAGS="$EXTRA_CFLAGS -DXNU_BOOT_PROGRESS=$BOOT_PROGRESS -DXNU_EARLY_BOOT_PROGRESS=$EARLY_BOOT_PROGRESS"
++# hummer: compile the six console units with the USB CDC hooks, and let them
++# find the module header in the board kit.
++if [ -d "$ROOT/kits/hummer/usbcdc/include" ]; then
++  EXTRA_CFLAGS="$EXTRA_CFLAGS -DXNU_QCOM_USB_DEBUG=1 -I$ROOT/kits/hummer/usbcdc/include"
++fi
+ make -C .cache/xnu-work "${XNU_BUILD_TARGET:-build}" SDKROOT="${XNU_SDKROOT:-iphoneos}" ARCH_CONFIGS=ARM64 \
+   MACHINE_CONFIGS=BCM2837 KERNEL_CONFIGS=DEVELOPMENT \
+   ARCH_STRING_FOR_CURRENT_MACHINE_CONFIG=arm64 LARGE_MEMORY_DEFINE=-UARM_LARGE_MEMORY \
+diff --git a/patches/xnu/zzzzzzzz-usb-cdc-console.patch b/patches/xnu/zzzzzzzz-usb-cdc-console.patch
+index 5a70705..b84c351 100644
+--- a/patches/xnu/zzzzzzzz-usb-cdc-console.patch
++++ b/patches/xnu/zzzzzzzz-usb-cdc-console.patch
+@@ -86,15 +86,18 @@ index 275d865..2c89ae5 100644
+  #if defined(__arm__) || defined(__arm64__)
+  		/* On arm32, which doesn't have a WFE timeout, this may not return.  But that should be OK on this path. */
+ diff --git a/osfmk/kern/printf.c b/osfmk/kern/printf.c
+-index d092099..9427b22 100644
++index d092099..57f4fad 100644
+ --- a/osfmk/kern/printf.c
+ +++ b/osfmk/kern/printf.c
+-@@ -914,14 +914,30 @@ vprintf(const char *fmt, va_list ap)
++@@ -914,9 +914,25 @@ vprintf(const char *fmt, va_list ap)
+  	return vprintf_internal(fmt, ap, __builtin_return_address(0));
+  }
+  
+ +#if XNU_QCOM_USB_DEBUG
+ +#include <QcomXnuUsbDebug.h>
+++/* 10063 keeps this in serial_console.c and only video_console.c declares it;
+++ * the console tee needs it to know when the ring is refusing output. */
+++extern int disableConsoleOutput;
+ +#endif
+ +
+  void
+@@ -112,15 +115,7 @@ index d092099..9427b22 100644
+  	console_write_char(c);
+  
+  	debug_putc(c);
+- 
+- 	if (!console_is_serial() && !disable_serial_output && !boot_progress_active()) {
+-+#if XNU_QCOM_USB_DEBUG
+-+		if (PE_kputc && PE_kputc != qcom_usb_debug_putc)
+-+#endif
+- 		PE_kputc(c);
+- 	}
+- }
+-@@ -929,11 +945,23 @@ consdebug_putc(char c)
++@@ -929,6 +945,15 @@ consdebug_putc(char c)
+  void
+  consdebug_putc_unbuffered(char c)
+  {
+@@ -136,14 +131,6 @@ index d092099..9427b22 100644
+  	console_write_unbuffered(c);
+  
+  	debug_putc(c);
+- 
+- 	if (!console_is_serial() && !disable_serial_output && !boot_progress_active()) {
+-+#if XNU_QCOM_USB_DEBUG
+-+		if (PE_kputc && PE_kputc != qcom_usb_debug_putc)
+-+#endif
+- 		PE_kputc(c);
+- 	}
+- }
+ diff --git a/pexpert/arm/pe_kprintf.c b/pexpert/arm/pe_kprintf.c
+ index 3c440ec..b2c9435 100644
+ --- a/pexpert/arm/pe_kprintf.c
+diff --git a/scripts/build-xnu-4k-baseline.sh b/scripts/build-xnu-4k-baseline.sh
+index 814ad49..a8856ed 100755
+--- a/scripts/build-xnu-4k-baseline.sh
++++ b/scripts/build-xnu-4k-baseline.sh
+@@ -738,6 +738,11 @@ PY_BINDINGS
+     KERNEL_EXTRA_ARCHIVES="$KERNEL_EXTRA_ARCHIVES -Wl,-force_load,$ROOT/build/hummer-usbcdc/libHummerUsbCdc.a"
+     KERNEL_ARCHIVE_DEPENDENCIES="$KERNEL_ARCHIVE_DEPENDENCIES $ROOT/build/hummer-usbcdc/libHummerUsbCdc.a"
+   fi
++  # hummer: the USB CDC debug console archive, when this board built it.
++  if [ -f "$ROOT/build/hummer-usbcdc/libHummerUsbCdc.a" ]; then
++    KERNEL_EXTRA_ARCHIVES="$KERNEL_EXTRA_ARCHIVES -Wl,-force_load,$ROOT/build/hummer-usbcdc/libHummerUsbCdc.a"
++    KERNEL_ARCHIVE_DEPENDENCIES="$KERNEL_ARCHIVE_DEPENDENCIES $ROOT/build/hummer-usbcdc/libHummerUsbCdc.a"
++  fi
+   EXTRA_MAKE_ARGS+=("LD_KERNEL_ARCHIVES=$KERNEL_EXTRA_ARCHIVES")
+   EXTRA_MAKE_ARGS+=("XNU_EXTERNAL_KERNEL_ARCHIVES=$KERNEL_ARCHIVE_DEPENDENCIES")
+ fi
+@@ -784,6 +789,11 @@ EXTRA_CFLAGS="$EXTRA_CFLAGS -DXNU_BOOT_PROGRESS=$BOOT_PROGRESS -DXNU_EARLY_BOOT_
+ if [ -d "$ROOT/kits/hummer/usbcdc/include" ]; then
+   EXTRA_CFLAGS="$EXTRA_CFLAGS -DXNU_QCOM_USB_DEBUG=1 -I$ROOT/kits/hummer/usbcdc/include"
+ fi
 +# hummer: compile the six console units with the USB CDC hooks, and let them
 +# find the module header in the board kit.
 +if [ -d "$ROOT/kits/hummer/usbcdc/include" ]; then
