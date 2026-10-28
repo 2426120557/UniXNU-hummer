@@ -29,7 +29,6 @@
  */
 #include <IOKit/IOLib.h>
 #include <kern/debug.h>
-#include <kern/printf.h>
 #include <pexpert/pexpert.h>
 #include <arm/machine_routines.h>
 
