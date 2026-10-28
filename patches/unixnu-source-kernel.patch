@@ -4259,12 +4259,12 @@ index 0000000..5a70705
 + 
 diff --git a/patches/xnu/zzzzzzzz-usb-cdc-worker.patch b/patches/xnu/zzzzzzzz-usb-cdc-worker.patch
 new file mode 100644
-index 0000000..489d719
+index 0000000..b9dae78
 --- /dev/null
 +++ b/patches/xnu/zzzzzzzz-usb-cdc-worker.patch
-@@ -0,0 +1,238 @@
+@@ -0,0 +1,262 @@
 +diff --git a/bsd/kern/bsd_init.c b/bsd/kern/bsd_init.c
-+index 23805ea..c9e13dc 100644
++index 23805ea..2e1a712 100644
 +--- a/bsd/kern/bsd_init.c
 ++++ b/bsd/kern/bsd_init.c
 +@@ -109,6 +109,12 @@
@@ -4280,7 +4280,7 @@ index 0000000..489d719
 + 
 + #if (DEVELOPMENT || DEBUG)
 + #include <kern/debug.h>
-+@@ -1296,11 +1302,220 @@ bsdinit_task(void)
++@@ -1296,11 +1302,244 @@ bsdinit_task(void)
 + 	lock_trace = 1;
 + }
 + 
@@ -4420,8 +4420,32 @@ index 0000000..489d719
 ++
 ++	qcom_usb_debug_get_status(&status);
 ++	if (status.phase != QCOM_USB_DEBUG_ACTIVE) {
-++		kprintf("QCOM USB WORKER unavailable phase=%u error=%u\n", status.phase, status.error);
-++		goto stopped;
+++		/* hummer: the board initialises the console from its display late probe,
+++		 * which runs after this thread starts. Waiting for ACTIVE instead of giving
+++		 * up here is what keeps the TX ring pumped; terminal states still stop the
+++		 * worker at once. Bounded: 12000 * 5 ms = 60 s. */
+++		unsigned int spins;
+++		for (spins = 0; spins < 12000u; spins++) {
+++			if (panic_active()) {
+++				break;
+++			}
+++			if (status.phase == QCOM_USB_DEBUG_REFUSED ||
+++			    status.phase == QCOM_USB_DEBUG_DISABLED ||
+++			    status.phase == QCOM_USB_DEBUG_STOPPED ||
+++			    status.phase == QCOM_USB_DEBUG_IO_FAILED) {
+++				break;
+++			}
+++			qcom_usb_worker_wait();
+++			qcom_usb_debug_get_status(&status);
+++			if (status.phase == QCOM_USB_DEBUG_ACTIVE) {
+++				break;
+++			}
+++		}
+++		if (status.phase != QCOM_USB_DEBUG_ACTIVE) {
+++			kprintf("QCOM USB WORKER unavailable phase=%u error=%u\n",
+++			    status.phase, status.error);
+++			goto stopped;
+++		}
 ++	}
 ++	__atomic_store_n(&qcom_usb_worker_state, 2u, __ATOMIC_RELEASE);
 ++	kprintf("QCOM USB WORKER active cpu=%d period_ms=5 buffer=%llu\n",
