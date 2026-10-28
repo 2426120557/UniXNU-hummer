@@ -4026,10 +4026,10 @@ new file mode 100644
 + 	memory_object_t pager,
 diff --git a/patches/xnu/zzzzzzzz-usb-cdc-console.patch b/patches/xnu/zzzzzzzz-usb-cdc-console.patch
 new file mode 100644
-index 0000000..5a70705
+index 0000000..a4aa7ee
 --- /dev/null
 +++ b/patches/xnu/zzzzzzzz-usb-cdc-console.patch
-@@ -0,0 +1,227 @@
+@@ -0,0 +1,230 @@
 +diff --git a/osfmk/console/serial_console.c b/osfmk/console/serial_console.c
 +index 715c545..840a9d6 100644
 +--- a/osfmk/console/serial_console.c
@@ -4118,15 +4118,18 @@ index 0000000..5a70705
 + #if defined(__arm__) || defined(__arm64__)
 + 		/* On arm32, which doesn't have a WFE timeout, this may not return.  But that should be OK on this path. */
 +diff --git a/osfmk/kern/printf.c b/osfmk/kern/printf.c
-+index d092099..9427b22 100644
++index d092099..16f1216 100644
 +--- a/osfmk/kern/printf.c
 ++++ b/osfmk/kern/printf.c
-+@@ -914,14 +914,30 @@ vprintf(const char *fmt, va_list ap)
++@@ -914,14 +914,33 @@ vprintf(const char *fmt, va_list ap)
 + 	return vprintf_internal(fmt, ap, __builtin_return_address(0));
 + }
 + 
 ++#if XNU_QCOM_USB_DEBUG
 ++#include <QcomXnuUsbDebug.h>
+++/* 10063 keeps this in serial_console.c and only video_console.c declares it;
+++ * the console tee needs it to know when the ring is refusing output. */
+++extern int disableConsoleOutput;
 ++#endif
 ++
 + void
@@ -4152,7 +4155,7 @@ index 0000000..5a70705
 + 		PE_kputc(c);
 + 	}
 + }
-+@@ -929,11 +945,23 @@ consdebug_putc(char c)
++@@ -929,11 +948,23 @@ consdebug_putc(char c)
 + void
 + consdebug_putc_unbuffered(char c)
 + {
