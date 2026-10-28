@@ -44,6 +44,10 @@ static QUSB_U64 smr_address(const QUSB_BYPASS_LEASE *l)
 QUSB_RESULT QcomUsbBypassPlan(QUSB_READ32 read32, void *cookie, QUSB_U64 dma,
                               QUSB_U32 bytes, QUSB_BYPASS_LEASE *lease)
 {
+  /* grep-able proof that this object made it into the kernel image; a stale
+   * prepared tree would keep the old limit and is otherwise indistinguishable
+   * from a genuine SMMU rejection on the panic screen. */
+  static const char qusb_bypass_build[] __attribute__((used)) = "QUSB-BYPASS-256";
   QUSB_U32 id0, id1, id2, cr0, smr, s2cr, i, shift, bits, mask, id;
   QUSB_U32 streams, banks, pages, matches = 0;
   unsigned char used[256];   /* SM8750: IDR0 reports 132 streams */

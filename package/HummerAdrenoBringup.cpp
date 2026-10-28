@@ -636,6 +636,12 @@ extern "C" void hummer_adreno_bringup_probe(void)
 		sscr0 = HU_RD(apps_smmu, 0x00u);
 		ssacr = HU_RD(apps_smmu, 0x30u);
 	}
+	/* The same numbers the bypass planner derives, computed here so a stale
+	 * module object (old 128-entry limit) is visible as "planner should have
+	 * accepted this" instead of being mistaken for another SMMU rejection. */
+	const uint32_t sstreams = sid0 & 255u;
+	const uint32_t sbanks = sid1 & 255u;
+	const uint32_t spages = 1u << (((sid1 >> 28) & 7u) + 1u);
 
 	panic("hummer gmu: status=%u phase=%u fw=%08x hfi=%08x fwrdy=%u hfirdy=%u "
 	      "hash=%u reset=%u\n"
@@ -653,6 +659,7 @@ extern "C" void hummer_adreno_bringup_probe(void)
 	      "usb arg=%u p0=%u ri=%d ph=%u er=%u qr=%u\n"
 	      "usb2 dr=%u ds=%u bk=%u ta=%x tb=%x\n"
 	      "smmu id0=%08x id1=%08x id2=%08x scr0=%08x sacr=%08x\n"
+	      "smmu2 str=%u bk=%u pg=%u cr0b0=%u tag=%s\n"
 	      "iou: %llx %llx %llx %llx %llx",
 	    status, result.phase, result.firmware_init_result, result.hfi_status,
 	    result.firmware_ready_observed, result.hfi_ready_observed,
@@ -684,6 +691,7 @@ extern "C" void hummer_adreno_bringup_probe(void)
 	    usb.domain_result, usb.domain_stage, usb.domain_bank,
 	    usb.trace_a, usb.trace_b,
 	    sid0, sid1, sid2, sscr0, ssacr,
+	    sstreams, sbanks, spages, sscr0 & 1u, "v173-256",
 	    (unsigned long long)payloads[0].iova, (unsigned long long)payloads[1].iova,
 	    (unsigned long long)payloads[2].iova, (unsigned long long)payloads[3].iova,
 	    (unsigned long long)payloads[4].iova);
