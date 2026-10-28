@@ -172,6 +172,22 @@ static void release(uint64_t saved_daif)
     __atomic_store_n(&usb_busy, 0u, __ATOMIC_RELEASE);
     __asm__ volatile("msr daif, %0" :: "r"(saved_daif) : "memory");
 }
+/* hummer fix: ml_io_map() reaches the kernel allocator (kmem_alloc/zalloc),
+ * and XNU refuses to allocate while interrupts are masked (zalloc.c:6932,
+ * "Calling {k,z}alloc from interrupt disabled context isn't allowed").
+ * acquire() has masked DAIF before this is reached, so map each window with
+ * PSTATE.I/F forced enabled (bits 6/7 of the DAIF field cleared) and then
+ * restore the caller's prior DAIF.  usb_busy is already held, so no other
+ * producer can enter the init body; a console hook that fires during the
+ * brief unmask re-masks itself (backlog_write) before touching the ring. */
+static vm_offset_t io_map_irq_on(uint64_t daif, vm_offset_t phys, vm_size_t bytes)
+{
+    const uint64_t on = daif & ~(uint64_t)0xc0;   /* clear PSTATE.I and .F */
+    __asm__ volatile("msr daif, %0" :: "r"(on) : "memory");
+    vm_offset_t va = ml_io_map(phys, bytes);
+    __asm__ volatile("msr daif, %0" :: "r"(daif) : "memory");
+    return va;
+}
 static size_t backlog_write(const void *bytes, size_t count)
 {
     uint64_t flags;
@@ -751,11 +767,11 @@ int qcom_usb_debug_init(void)
     }
     native.status.dma_iova = QUSB_DOMAIN_IOVA;
     diag_checkpoint(QCOM_USB_DEBUG_DIAG_MAP_GCC);
-    native.gcc_va = ml_io_map((vm_offset_t)QUSB_GCC_BASE, GCC_BYTES);
+    native.gcc_va = io_map_irq_on(flags, (vm_offset_t)QUSB_GCC_BASE, GCC_BYTES);
     diag_checkpoint(QCOM_USB_DEBUG_DIAG_MAP_USB);
-    native.usb_va = ml_io_map((vm_offset_t)QUSB_DWC3_BASE, USB_BYTES);
+    native.usb_va = io_map_irq_on(flags, (vm_offset_t)QUSB_DWC3_BASE, USB_BYTES);
     diag_checkpoint(QCOM_USB_DEBUG_DIAG_MAP_SMMU);
-    native.smmu_va = ml_io_map((vm_offset_t)QUSB_SMMU_BASE, QUSB_SMMU_BYTES);
+    native.smmu_va = io_map_irq_on(flags, (vm_offset_t)QUSB_SMMU_BASE, QUSB_SMMU_BYTES);
     if (!native.gcc_va || !native.usb_va || !native.smmu_va) {
         fail(QCOM_USB_DEBUG_MAP_FAILED, 0); goto out;
     }
@@ -769,7 +785,7 @@ int qcom_usb_debug_init(void)
             QCOM_PREPARE_RESULT prepared;
             uint32_t stage = 0, readback = 0;
 
-            native.phy_va = ml_io_map((vm_offset_t)QUD_PHY_BASE, PHY_MAP_BYTES);
+            native.phy_va = io_map_irq_on(flags, (vm_offset_t)QUD_PHY_BASE, PHY_MAP_BYTES);
             if (!native.phy_va) {
                 fail(QCOM_USB_DEBUG_MAP_FAILED, 0); goto out;
             }
