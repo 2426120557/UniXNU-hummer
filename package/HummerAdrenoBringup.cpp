@@ -29,6 +29,7 @@
  */
 #include <IOKit/IOLib.h>
 #include <kern/debug.h>
+#include <kern/printf.h>
 #include <pexpert/pexpert.h>
 #include <arm/machine_routines.h>
 
@@ -643,7 +644,15 @@ extern "C" void hummer_adreno_bringup_probe(void)
 	const uint32_t sbanks = sid1 & 255u;
 	const uint32_t spages = 1u << (((sid1 >> 28) & 7u) + 1u);
 
-	panic("hummer gmu: status=%u phase=%u fw=%08x hfi=%08x fwrdy=%u hfirdy=%u "
+	/* v177: now that the CDC console actually works, the report does not have to
+	 * kill the boot to be readable. Default is a plain kprintf -- it reaches the
+	 * USB console and the machine keeps running, so a capture started at any time
+	 * still sees it. hummer-adreno-panic=1 restores the old screen-only panic. */
+	uint32_t want_panic = 0;
+	(void)PE_parse_boot_argn("hummer-adreno-panic", &want_panic, sizeof(want_panic));
+#define HU_REPORT(...) do { if (want_panic) panic(__VA_ARGS__); else kprintf(__VA_ARGS__); } while (0)
+
+	HU_REPORT("hummer gmu: status=%u phase=%u fw=%08x hfi=%08x fwrdy=%u hfirdy=%u "
 	      "hash=%u reset=%u\n"
 	      "poll=%u ao=%08x cm3=%08x dtcm=%08x aod=%u uc=%u cc=%u\n"
 	      "cb fsr=%08x far=%08x syn=%08x sctlr=%08x off=%x\n"
@@ -695,4 +704,5 @@ extern "C" void hummer_adreno_bringup_probe(void)
 	    (unsigned long long)payloads[0].iova, (unsigned long long)payloads[1].iova,
 	    (unsigned long long)payloads[2].iova, (unsigned long long)payloads[3].iova,
 	    (unsigned long long)payloads[4].iova);
+#undef HU_REPORT
 }
