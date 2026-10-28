@@ -4259,12 +4259,12 @@ index 0000000..5a70705
 + 
 diff --git a/patches/xnu/zzzzzzzz-usb-cdc-worker.patch b/patches/xnu/zzzzzzzz-usb-cdc-worker.patch
 new file mode 100644
-index 0000000..b9dae78
+index 0000000..eaa716e
 --- /dev/null
 +++ b/patches/xnu/zzzzzzzz-usb-cdc-worker.patch
-@@ -0,0 +1,262 @@
+@@ -0,0 +1,259 @@
 +diff --git a/bsd/kern/bsd_init.c b/bsd/kern/bsd_init.c
-+index 23805ea..2e1a712 100644
++index 23805ea..1e67c8a 100644
 +--- a/bsd/kern/bsd_init.c
 ++++ b/bsd/kern/bsd_init.c
 +@@ -109,6 +109,12 @@
@@ -4280,7 +4280,7 @@ index 0000000..b9dae78
 + 
 + #if (DEVELOPMENT || DEBUG)
 + #include <kern/debug.h>
-+@@ -1296,11 +1302,244 @@ bsdinit_task(void)
++@@ -1296,11 +1302,241 @@ bsdinit_task(void)
 + 	lock_trace = 1;
 + }
 + 
@@ -4407,15 +4407,13 @@ index 0000000..b9dae78
 ++	 */
 ++	if (processor == PROCESSOR_NULL) {
 ++		__atomic_store_n(&qcom_usb_worker_state, 3u, __ATOMIC_RELEASE);
-++		kprintf("QCOM USB WORKER master processor missing cpu=%d\n", master_cpu);
-++		goto stopped;
+++		panic("QCOM USB WORKER master processor missing cpu=%d", master_cpu);
 ++	}
 ++	thread_bind(processor);
 ++	thread_block(THREAD_CONTINUE_NULL);
 ++	if (cpu_number() != master_cpu) {
 ++		__atomic_store_n(&qcom_usb_worker_state, 3u, __ATOMIC_RELEASE);
-++		kprintf("QCOM USB WORKER bind failed cpu=%d master=%d\n", cpu_number(), master_cpu);
-++		goto stopped;
+++		panic("QCOM USB WORKER bind failed cpu=%d master=%d", cpu_number(), master_cpu);
 ++	}
 ++
 ++	qcom_usb_debug_get_status(&status);
@@ -4442,9 +4440,8 @@ index 0000000..b9dae78
 ++			}
 ++		}
 ++		if (status.phase != QCOM_USB_DEBUG_ACTIVE) {
-++			kprintf("QCOM USB WORKER unavailable phase=%u error=%u\n",
+++			panic("QCOM USB WORKER unavailable phase=%u error=%u",
 ++			    status.phase, status.error);
-++			goto stopped;
 ++		}
 ++	}
 ++	__atomic_store_n(&qcom_usb_worker_state, 2u, __ATOMIC_RELEASE);
@@ -4508,8 +4505,8 @@ index 0000000..b9dae78
 ++		thread_deallocate(thread);
 ++	} else {
 ++		__atomic_store_n(&qcom_usb_worker_state, 3u, __ATOMIC_RELEASE);
-++		/* A logger worker failure must not panic or abort the iOS startup. */
-++		kprintf("QCOM USB WORKER start failed kr=%d\n", result);
+++		/* hummer (temporary): a silent worker failure is undebuggable here. */
+++		panic("QCOM USB WORKER start failed kr=%d", result);
 ++	}
 ++}
 ++#endif /* XNU_QCOM_USB_DEBUG */
