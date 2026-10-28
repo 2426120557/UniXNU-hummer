@@ -129,6 +129,10 @@ kernel_args = [
   # 只在显式传 -enable_kprintf_spam 时才把它关掉。没有这个参数，串口只能拿到
   # init 之前那一段，之后（含 worker 和探针报告）全部静音。
   "-enable_kprintf_spam",
+  # v182：kprintf 走 CPU ring + worker 泵，而 worker 到底有没有在跑目前看不到；
+  # panic drain 是同步路径，不依赖 worker，所以先让探针 panic 一次，把
+  # usb/ph/er/dr/ds 那几行完整送到串口。
+  "hummer-adreno-panic=1",
   # 根镜像所在分区：编译期由 GccUfs.h 的 UFS_ROOT_PARTITION 决定——SM8750 构建
   # (-DNATIVE_UFS_SM8750=1) 已经锁成 "unixnu"，所以这里不用、也不能用启动参数覆盖。
   "native-ufs-root=1", "native-ufs-diagnostics=1", "sheng-pmgr=2",
