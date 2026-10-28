@@ -125,6 +125,10 @@ kernel_args = [
   # 接到 USB；主机侧应看到 USB\VID_1209&PID_316D\QCOMXNUUSBDEBUG 的 COM 口。
   # 没接 USB 时它只是几个失败的寄存器读，不影响启动。
   "qcom-usb-debug=1",
+  # DEVELOPMENT 构建里 disable_kprintf_output 默认是 true：PE_init_kprintf_config
+  # 只在显式传 -enable_kprintf_spam 时才把它关掉。没有这个参数，串口只能拿到
+  # init 之前那一段，之后（含 worker 和探针报告）全部静音。
+  "-enable_kprintf_spam",
   # 根镜像所在分区：编译期由 GccUfs.h 的 UFS_ROOT_PARTITION 决定——SM8750 构建
   # (-DNATIVE_UFS_SM8750=1) 已经锁成 "unixnu"，所以这里不用、也不能用启动参数覆盖。
   "native-ufs-root=1", "native-ufs-diagnostics=1", "sheng-pmgr=2",
