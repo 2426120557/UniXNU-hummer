@@ -262,6 +262,13 @@ static int gmu_flush(void *, const void *bytes, size_t length)
 	return 0;
 }
 
+/* One poll of the HFI response queue: 100 us, as the annibale port does. */
+static int hfi_wait_once(void *)
+{
+	IODelay(100);
+	return 0;
+}
+
 extern "C" void hummer_adreno_bringup_probe(void)
 {
 	uint32_t enabled = 0;
@@ -499,6 +506,55 @@ extern "C" void hummer_adreno_bringup_probe(void)
 		for (unsigned i = 0; i < 3; ++i)
 			hfi_table[i] = hummer_gmu_device.hfi.shared[i];
 
+	/* --- v163: talk to the running firmware. ---------------------------------
+	 * annibale's order, with their message ids (checked against adreno8_hfi.c):
+	 *   15  the A8XX performance table (gen8 moved it off 11 in HFI 2.6.1)
+	 *   11  {9,0,0}  disable ordinary HFI IFPC
+	 *   14  {0}      CORE_FW_START with handle 0
+	 *   10  {}       START; the only one with a five second budget
+	 *   30  DCVS, only after START, not attempted yet
+	 * The votes in this first table are deliberately zero: this boot proves the
+	 * message id and the word layout are what the firmware wants, before any
+	 * cmd-db ARC arithmetic is trusted. */
+	struct hu_hfi_step {
+		unsigned id;
+		const uint32_t *payload;
+		size_t words;
+		AdrenoHfiStatus status;
+		uint32_t error;
+		size_t ack_words;
+	};
+	uint32_t perf[5 + 2 * 3 + 2 + 3 * 2];
+	size_t np = 0;
+	perf[np++] = 0;                 /* the table's version */
+	perf[np++] = 1;                 /* HFI_TABLE_GPU_PERF */
+	perf[np++] = 2;                 /* two 3D-core speeds: off, then 160 MHz */
+	perf[np++] = 3;                 /* three words each: vote, dependency, kHz */
+	perf[np++] = 0; perf[np++] = 0; perf[np++] = 0;
+	perf[np++] = 0; perf[np++] = 0; perf[np++] = 160000;
+	perf[np++] = 3;                 /* the GMU's own three speeds */
+	perf[np++] = 2;                 /* two words each: vote, kHz */
+	perf[np++] = 0; perf[np++] = 0;
+	perf[np++] = 0; perf[np++] = 500000;
+	perf[np++] = 0; perf[np++] = 650000;
+	static const uint32_t ifpc[3] = { 9, 0, 0 };
+	static uint32_t handle = 0;
+	static uint32_t ack[16];
+	hu_hfi_step steps[4] = {
+		{ 15, perf, np, AdrenoHfiSuccess, 0, 0 },
+		{ 11, ifpc, 3, AdrenoHfiSuccess, 0, 0 },
+		{ 14, &handle, 1, AdrenoHfiSuccess, 0, 0 },
+		{ 10, perf, 0, AdrenoHfiSuccess, 0, 0 },
+	};
+	for (unsigned i = 0; i < 4; ++i) {
+		hu_hfi_step &s = steps[i];
+		s.status = AdrenoHfiExchange(&hummer_gmu_device.hfi, s.id, s.payload, s.words,
+		    s.id == 10 ? 50000u : 10000u, hfi_wait_once, ack, 16, &s.ack_words,
+		    &s.error);
+	}
+	const uint32_t pwr_after = gmu_word(REG_GMU_PWR_CLK_STATUS);
+	const uint32_t gmu2host = gmu_word(REG_GMU_GMU2HOST_INTR_INFO);
+
 	if (hu_cb_offset) {
 		hu_cb_sctlr = HU_RD(smmu, hu_cb_offset);
 		hu_cb_fsr = HU_RD(smmu, hu_cb_offset + HU_CB_FSR);
@@ -514,6 +570,7 @@ extern "C" void hummer_adreno_bringup_probe(void)
 	      "ctx bank=%u asid=%u slot=%u sid=%u spans=%u ttbr0=%llx\n"
 	      "hfi ver=%08x q=%08x %08x %08x pwr=%08x ctrl=%08x\n"
 	      "log=%u %08x %08x %08x %08x\n"
+	      "hfi2 15=%d/%x 11=%d/%x 14=%d/%x 10=%d/%x pwr2=%08x g2h=%08x"
 	      "iou: %llx %llx %llx %llx %llx",
 	    status, result.phase, result.firmware_init_result, result.hfi_status,
 	    result.firmware_ready_observed, result.hfi_ready_observed,
@@ -527,6 +584,9 @@ extern "C" void hummer_adreno_bringup_probe(void)
 	    (unsigned long long)report.ttbr0,
 	    hfi_version, hfi_table[0], hfi_table[1], hfi_table[2], pwr_clk, hfi_ctrl,
 	    log_written, log_words[0], log_words[1], log_words[2], log_words[3],
+	    steps[0].status, steps[0].error, steps[1].status, steps[1].error,
+	    steps[2].status, steps[2].error, steps[3].status, steps[3].error,
+	    pwr_after, gmu2host,
 	    (unsigned long long)payloads[0].iova, (unsigned long long)payloads[1].iova,
 	    (unsigned long long)payloads[2].iova, (unsigned long long)payloads[3].iova,
 	    (unsigned long long)payloads[4].iova);
