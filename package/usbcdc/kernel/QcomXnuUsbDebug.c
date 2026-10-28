@@ -159,7 +159,14 @@ static int deadline_expired(void)
 }
 static int acquire(uint64_t *saved_daif)
 {
-    if (cpu_number() != master_cpu) return 0;
+    /* hummer (local change): the first init runs at PE_init_kprintf
+     * (STARTUP_SUB_KPRINTF), which is *before* arm_init() assigns master_cpu,
+     * so this comparison is meaningless there and used to refuse silently --
+     * the console then only came up at the board's late display probe. Only the
+     * boot CPU executes that early startup hook, and usb_busy still serialises
+     * every later caller, so the CPU test is skipped for the very first init. */
+    if (native.status.phase != QCOM_USB_DEBUG_NOT_INITIALIZED &&
+        cpu_number() != master_cpu) return 0;
     __asm__ volatile("mrs %0, daif\nmsr daifset, #3" : "=r"(*saved_daif) :: "memory");
     if (__atomic_exchange_n(&usb_busy, 1u, __ATOMIC_ACQUIRE)) {
         __asm__ volatile("msr daif, %0" :: "r"(*saved_daif) : "memory");
