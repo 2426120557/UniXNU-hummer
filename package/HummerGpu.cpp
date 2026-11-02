@@ -150,6 +150,9 @@ struct State {
     NativeAdrenoSubmit submit;
     NativeAdrenoTimer timer;
     size_t bank_offset[2]{};
+    /* The formatted ZAP verdict; stage() stores a pointer, so it has to outlive
+     * the call. */
+    char zap_line[80]{};
     unsigned smmu_context=0;
     unsigned initial=0,bandwidth=0;
     uint32_t soc_id=0,soc_code=0,speed_bin=0,speed_used=0,speed_fallback=0;
@@ -258,10 +261,21 @@ IOReturn authenticate(void *) {
         stage("GPU ZAP image missing",0);
         return kIOReturnUnsupported;
     }
-    if(Sm8750GpuZapLoad(&scm_io,sm8750_gpu_zap_metadata,size_t(sm8750_gpu_zap_metadata_size),
-        sm8750_gpu_zap_payload,size_t(sm8750_gpu_zap_payload_size),g.zap_metadata.mapping(),
-        g.zap_metadata.spans()[0].physical,g.zap.cpu,&g.zap_result))return kIOReturnIOError;
-    return kIOReturnSuccess;
+    const bool refused=Sm8750GpuZapLoad(&scm_io,sm8750_gpu_zap_metadata,
+        size_t(sm8750_gpu_zap_metadata_size),sm8750_gpu_zap_payload,
+        size_t(sm8750_gpu_zap_payload_size),g.zap_metadata.mapping(),
+        g.zap_metadata.spans()[0].physical,g.zap.cpu,&g.zap_result)!=0;
+    /* PAS answers in the SCM result registers, not in this return code: a
+     * refusal arrives as transport 0 with a nonzero result, or as a phase that
+     * stopped short of 3, while the call itself looks fine. So fold the four
+     * numbers into the one line the panel shows -- otherwise "GPU ZAP secure
+     * exit" plus an errno is all a failed boot would say about it. */
+    snprintf(g.zap_line,sizeof(g.zap_line),"GPU ZAP %s p%u a%u t%x r%x c%u",
+             refused?"REFUSED":"ok",g.zap_result.phase,g.zap_result.authenticated,
+             unsigned(g.zap_result.scm.transport),unsigned(g.zap_result.scm.result),
+             g.zap_result.scm.calls);
+    stage(g.zap_line,unsigned(g.zap_result.scm.result));
+    return refused?kIOReturnIOError:kIOReturnSuccess;
 }
 int snapshot(Window &window,NativeAdrenoMemory &memory) {
     if(memory.allocate(window.bytes,40,false,window.bytes))return -1;
