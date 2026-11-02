@@ -23,19 +23,21 @@ def prepare(device=DEVICE, source=None):
         # The volume key needs a consumer usage the engine's keyboard report cannot carry,
         # so report 4 and its board entry point live in the NativeHidInput submodule.
         ('native-keys.patch', 'NativeHidInput'),
-        # The GPU driver as pinned is an A740 build: its CP, RBBM, perfctr, always-on
-        # counter and power-up register lists are A6XX..A7XX. hummer is an Adreno 830
-        # (gen8_0_0), where those blocks moved, so the driver is retargeted in place.
-        # Inert until CONFIG_XNU_NATIVE_ADRENO is on.
-        ('native-adreno-a830.patch', 'NativeAdreno'),
-        # NativeAdrenoGmuContextPayloads has to hand the board the payloads' own
-        # kernel mapping: re-mapping 16 MiB of icache through the io submap fails on
-        # this kernel (v157), and the GMU context already owns a CPU view of it.
-        ('native-adreno-payload-cpu.patch', 'NativeAdreno'),
-        # No GMU payload may be left writable by unprivileged code: AArch64
-        # forbids a privileged instruction fetch from such a page, and the GMU
-        # fetches its firmware's external part through this context.
-        ('native-adreno-gmu-priv.patch', 'NativeAdreno'))]
+        # The whole A830 backend, taken from the OnePlus 13T port: CP init and its
+        # self-test, the GPU/GMU SMMU contexts with the A830 address layout, the
+        # A830 register bring-up (NativeAdrenoA830HwInit), the ring with gen8
+        # fences, preemption, the published user client, and the ABI v2 the Metal
+        # frontend speaks. It replaces the three small patches this board used
+        # while the driver was still being retargeted by hand.
+        ('adreno-a830.patch', 'NativeAdreno'))]
+    # The backend above is written against a newer driver than this engine pins.
+    # Moving the submodule forward is part of adopting it: at the pinned revision
+    # the driver has no NativeAdrenoPreempt.cpp, an ABI v1 user client and no A830
+    # address layout, so the patch cannot apply there at all. The engine itself
+    # does not reference the driver outside its own submodule.
+    driver_revisions = {
+        'NativeAdreno': 'a9a2cbb43b89d672e2921e19721a6438b738b17f',
+    }
     # Kit patches land in kits/<module>, not drivers/<module>. The HFI kit as pinned
     # only speaks the A6xx/A7xx performance table; gen8 moved it to message 15 with
     # per-level dependent votes, and an A8XX configuration cannot even be validated
@@ -48,6 +50,7 @@ def prepare(device=DEVICE, source=None):
     # hit the cache and reused the previous tree - v127c shipped the exact machine code of
     # v127b, down to the same pc and far, because the tree was never rebuilt.
     digest = hashlib.sha256(patch.read_bytes())
+    digest.update(repr(sorted(driver_revisions.items())).encode())
     for path, _ in driver_patches + kit_patches:
         if path.is_file():
             digest.update(path.read_bytes())
@@ -91,6 +94,14 @@ def prepare(device=DEVICE, source=None):
             git('-c', 'protocol.file.allow=always', 'submodule', 'update', '--init', '--recursive', cwd=tree)
         git('apply', '--check', patch, cwd=tree)
         git('apply', patch, cwd=tree)
+        for module, revision in driver_revisions.items():
+            directory = tree / 'drivers' / module
+            if not directory.is_dir():
+                raise ValueError('driver_revisions names an absent module: ' + module)
+            if subprocess.run(['git', 'cat-file', '-e', revision + '^{commit}'], cwd=directory,
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode:
+                git('fetch', 'origin', revision, cwd=directory)
+            git('checkout', '--detach', revision, cwd=directory)
         for driver_patch, module in driver_patches:
             if driver_patch.is_file():
                 git('apply', '--check', driver_patch, cwd=tree / 'drivers' / module)

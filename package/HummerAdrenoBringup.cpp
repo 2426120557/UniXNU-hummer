@@ -1,5 +1,13 @@
 /* SPDX-License-Identifier: BSD-2-Clause-Patent */
 /*
+ * SUPERSEDED in v185 by package/HummerGpu.cpp, which runs the whole stack (GPUCC
+ * power, SMMU, GMU+HFI, CP, ZAP, the ring, publish, Metal) and is what
+ * scripts/build-hummer-adreno-kits.py compiles. This file is no longer in that
+ * archive; it is kept because it is the only place that prints the raw GMU/HFI
+ * state per message, which is what a regression in the cold start needs. To fall
+ * back to it, put it back in DRIVER_SOURCES' place in the build script and point
+ * scripts/stage7/Stage7Probe.cpp at hummer_adreno_bringup_probe().
+ *
  * hummer: GMU bring-up probe (Adreno 830 / gen8_0_0).
  *
  * What the register probes already established on this board:

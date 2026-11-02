@@ -9,8 +9,12 @@ The engine links exactly one archive for the GPU:
 At this engine revision there is no component system and no
 scripts/build-arm-driver.py, so the whole archive is assembled here:
 
-  drivers/NativeAdreno/*.cpp        the driver (GMU, SMMU context, VM, ring,
-                                    submit, IRQ, CP init, user client, service)
+  drivers/NativeAdreno/*.cpp        the driver backend, an explicit 19-file list
+                                    (see DRIVER_SOURCES): CP init, GPU/GMU
+                                    contexts, SMMU tables, VM, ring, submit,
+                                    IRQ, preempt, user client, publish
+  drivers/NativeAdreno/NativeAdrenoA830HwInit.cpp
+                                    the A830 register bring-up the backend drives
   kits/AdrenoFirmware/*.c           HFI transport, startup protocol, ARC votes,
                                     firmware segment planner
   kits/ArmSmmu4K/*.c                native 4 KiB SMMU tables, streams, live audit
@@ -18,13 +22,17 @@ scripts/build-arm-driver.py, so the whole archive is assembled here:
   kits/hummer/ShengGpuSmmu*.c       this board's SM8750 GPU SMMU stream routing
   kits/hummer/Sm8750Gmu*.c          the SM8750 GMU layer: cold firmware start,
                                     HFI startup, runtime OOB/DCVS, command-db
+  kits/hummer/Sm8750GpuPower.c      GPUCC power, GCC/GDSC, PLL, branch clocks
+  kits/hummer/Sm8750GpuSmmu.c       GPU SID 0/1 and GMU SID 5 route planning
+  kits/hummer/Sm8750GpuZap.c        secure CX init and PAS authentication
+  kits/hummer/Sm8750SocInfo.c       SMEM v12 socinfo, for the OPP profile
   kits/hummer/HummerGpuVotes.c      SM8750 speed-bin OPP policy -> A8XX HFI table
-  firmware.S                        the two pinned blobs as strong symbols
+  kits/hummer/HummerGpu.cpp         the board layer that drives all of the above
+  firmware.S                        the pinned blobs as strong symbols
 
-NativeAdrenoAccelerator.cpp and NativeAdrenoPublish.cpp are deliberately not
-compiled; see EXCLUDED below for why. Everything else in the list compiles
-against this revision -- the first CI run archived 49 objects and then failed only
-at the kernel link, on the three board symbols Publish.cpp wants.
+The driver's own board entry (NativeAdrenoService.cpp) is deliberately not
+compiled: this board starts the GPU itself, and linking both would duplicate
+symbols and give the machine two owners for one GPU. See DRIVER_SOURCES.
 
 The firmware images come from scripts/fetch-hummer-gpu-firmware.py, which verifies
 linux-firmware provenance by SHA-256; the blobs stay out of Git. They become the
@@ -63,8 +71,12 @@ INCLUDES = [
     'kits/AdrenoPM4',
     'kits/AdrenoFirmware',
     'kits/hummer',
-    # package/HummerAdrenoBringup.cpp lives in kits/hummer but includes
-    # NativeAdrenoGmuContext.h and friends, which sit in the driver directory.
+    # package/HummerGpu.cpp includes Sm8750GpuFirmware.h, which this script
+    # generates next to the assembly blob it describes.
+    'build/native-adreno',
+    # package/HummerGpu.cpp lives in kits/hummer but includes the driver's own
+    # headers (NativeAdrenoGpuContext.h and friends), which sit in the driver
+    # directory.
     'drivers/NativeAdreno',
     '.cache/xnu-work/osfmk',
 ]
@@ -72,17 +84,25 @@ INCLUDES = [
 # C symbols the archive must define, checked with nm before it is accepted.
 # C++ classes are checked by substring because nm prints mangled names.
 REQUIRED_C = [
-    # The board probe drives the SM8750 GMU layer adopted in v184.
+    # The board layer drives the SM8750 GPU stack adopted in v185.
     'Sm8750GmuColdStart',
     'Sm8750GmuLoadAndStartHfi',
     'Sm8750GmuGpuOob',
     'Sm8750GmuSetPerformance',
     'Sm8750GmuBindMmio',
     'Sm8750GmuCommandDbInputs',
+    'Sm8750GpuPowerOn',
+    'Sm8750GpuRailCommands',
+    'Sm8750GpuSmmuPrepare',
+    'Sm8750GpuZapLoad',
+    'Sm8750GpuSecureCxInit',
+    'Sm8750ScmCall',
+    'Sm8750SocInfoGpuCode',
     'HummerGpuBuildStartup',
     'AdrenoHfiGen8Votes',
+    'AdrenoHfiArcVotes',
     # The engine's own driver still references this board layer by name
-    # (NativeAdrenoService.cpp). It is not on the probe's path -- see v184 notes.
+    # (NativeAdrenoService.cpp). It is not on the board layer's path.
     'ShengGmuColdStart',
     'ShengGmuLoadAndStartHfi',
     'ShengGmuBindMmio',
@@ -95,9 +115,10 @@ REQUIRED_C = [
     'AdrenoPM4Type7',
 ]
 REQUIRED_CLASSES = [
-    'NativeAdrenoService',
+    'NativeAdrenoGpuContext',
     'NativeAdrenoGmuContext',
     'NativeAdrenoRing',
+    'NativeAdrenoA830HwInit',
 ]
 
 
@@ -169,21 +190,9 @@ def audit_object(obj):
         raise SystemExit('%s: unexpected platform deployment %s' % (obj, deployment))
 
 
-# Two driver translation units are left out on purpose.
-#
-#   NativeAdrenoAccelerator.cpp  nothing references it, and it installs an
-#       IOAcceleratorES personality from a static initializer, which must not run
-#       during boot (the SM8550 board stages it separately for the same reason).
-#
-#   NativeAdrenoPublish.cpp      nothing references it either (native_adreno_
-#       service refuses to publish at this revision), and it needs three board
-#       symbols this kernel does not have: native_gop_handoff_memory and
-#       native_gop_handoff_call (the UEFI GOP -> scanout handoff provider) and
-#       boot_log_export_put (declared __attribute__((weak_import)), which a
-#       statically linked kernel still rejects). Its whole content is the
-#       AGXDeviceUserClient / NativeAdrenoGpuPublished pair behind the Metal
-#       publish path, so it comes back with that path, not before.
-EXCLUDED = {'NativeAdrenoAccelerator.cpp', 'NativeAdrenoPublish.cpp'}
+DRIVER_SOURCES = ('A830HwInit', 'CpInit', 'Cpu', 'GmuContext', 'GmuMemory', 'GpuContext',
+                  'Irq', 'Memory', 'Publish', 'Pwrup', 'Preempt', 'Ring', 'Sha256',
+                  'SmmuContext', 'SmmuMemory', 'Submit', 'Timer', 'UserClient', 'Vm')
 
 
 def sources():
@@ -192,9 +201,11 @@ def sources():
     driver = ROOT / 'drivers/NativeAdreno'
     if not driver.is_dir():
         raise SystemExit('%s missing: the NativeAdreno submodule is not checked out' % driver)
-    for path in sorted(driver.glob('NativeAdreno*.cpp')):
-        if path.name in EXCLUDED:
-            continue
+    for name in DRIVER_SOURCES:
+        path = driver / ('NativeAdreno' + name + '.cpp')
+        if not path.is_file():
+            raise SystemExit('%s missing: the driver revision in upstream.rev predates the '
+                             'A830 backend (see patches/adreno-a830.patch)' % path)
         items.append((path, 'cxx'))
     for pattern, directory in (('AdrenoFirmware*.c', 'kits/AdrenoFirmware'),
                                ('AdrenoHfi*.c', 'kits/AdrenoFirmware'),
@@ -205,18 +216,20 @@ def sources():
                 continue
             items.append((path, 'c'))
     for name in ('ShengGmu.c', 'ShengGpuSmmu.c', 'ShengGmuCommandDb.c',
-                 'Sm8750Gmu.c', 'Sm8750GmuCommandDb.c', 'HummerGpuVotes.c'):
+                 'Sm8750Gmu.c', 'Sm8750GmuCommandDb.c', 'HummerGpuVotes.c',
+                 'Sm8750GpuPower.c', 'Sm8750GpuSmmu.c', 'Sm8750GpuZap.c',
+                 'Sm8750SocInfo.c'):
         path = ROOT / 'kits/hummer' / name
         if not path.is_file():
             raise SystemExit('%s missing: package/ did not map to kits/hummer' % path)
         items.append((path, 'c'))
-    # The board's GMU bring-up probe: C++ because it calls the driver's
-    # NativeAdrenoGmuContextBringup / ShengGmuLoadAndStartHfi through their real
-    # headers rather than restating their layouts.
-    probe = ROOT / 'kits/hummer/HummerAdrenoBringup.cpp'
-    if not probe.is_file():
-        raise SystemExit('%s missing: package/ did not map to kits/hummer' % probe)
-    items.append((probe, 'cxx'))
+    # The board layer: GPUCC power, SMMU planning, GMU cold start, CP, ZAP and
+    # the Metal service. C++ because it drives the driver's real classes through
+    # their headers instead of restating their layouts.
+    board = ROOT / 'kits/hummer/HummerGpu.cpp'
+    if not board.is_file():
+        raise SystemExit('%s missing: package/ did not map to kits/hummer' % board)
+    items.append((board, 'cxx'))
     # glob() can hand back the same file twice through the two AdrenoFirmware
     # patterns; keep the first occurrence only.
     seen, unique = set(), []
@@ -233,8 +246,87 @@ def sources():
     return unique
 
 
+def zap_parts(data):
+    """Split a signed Qualcomm ZAP ELF into the two pieces PAS expects.
+
+    Ported from the OnePlus 13T port's prepare-gpu-firmware.py. The secure world
+    is handed the ELF header plus its single hash segment (the 0xfcc-byte
+    metadata blob) and, separately, the relocatable load segments packed into a
+    page-aligned 0x1000-byte payload. Anything that does not match that shape is
+    refused here rather than on the device, where a bad ZAP image can only show
+    up as an SCM failure.
+    """
+    if len(data) < 52 or data[:7] != b'\x7fELF\x01\x01\x01' or struct.unpack_from('<HHI', data, 16) != (2, 164, 1):
+        raise SystemExit('gen80000_zap.mbn: expected a little-endian Qualcomm ELF32 image')
+    phoff = struct.unpack_from('<I', data, 28)[0]
+    size, count = struct.unpack_from('<HH', data, 42)
+    if size != 32 or not 2 <= count <= 16 or phoff < 52 or phoff + count * size > len(data):
+        raise SystemExit('gen80000_zap.mbn: invalid program header table')
+    headers = [struct.unpack_from('<8I', data, phoff + i * size) for i in range(count)]
+    hashes = [p for p in headers if (p[6] >> 24) & 7 == 2]
+    loads = [p for p in headers if p[0] == 1 and (p[6] >> 24) & 7 != 2 and p[5]]
+    if headers[0][0] == 1 or len(hashes) != 1 or not loads:
+        raise SystemExit('gen80000_zap.mbn: missing metadata, hash or load segment')
+    head_bytes, hash_header = headers[0][4], hashes[0]
+    if head_bytes < phoff + count * size or head_bytes > len(data) or not hash_header[4] or \
+            hash_header[1] < head_bytes or hash_header[1] + hash_header[4] > len(data) or \
+            head_bytes + hash_header[4] > 0x4000:
+        raise SystemExit('gen80000_zap.mbn: invalid metadata extents')
+    low = min(p[3] for p in loads)
+    high = max((p[3] + p[5] + 0xfff) & ~0xfff for p in loads)
+    if low & 0xfff or high - low > 0x2000:
+        raise SystemExit('gen80000_zap.mbn: loads do not fit the 0x9b09a000 reservation')
+    payload = bytearray(high - low)
+    spans = []
+    for p in loads:
+        start, length = p[3] - low, p[5]
+        if not p[6] & (1 << 27) or p[4] > length or p[1] + p[4] > len(data) or \
+                p[3] + length > 0x100000000 or any(start < b and a < start + length for a, b in spans):
+            raise SystemExit('gen80000_zap.mbn: invalid or overlapping load segment')
+        spans.append((start, start + length))
+        payload[start:start + p[4]] = data[p[1]:p[1] + p[4]]
+    return data[:head_bytes] + data[hash_header[1]:hash_header[1] + hash_header[4]], bytes(payload)
+
+
+def write_firmware_header(images):
+    """The C++ board layer includes this instead of declaring the symbols."""
+    lines = ['/* Generated by build-hummer-adreno-kits.py. */', '#pragma once',
+             '#include <stdint.h>', '#ifdef __cplusplus', 'extern "C" {', '#endif']
+    for label, _, _ in images:
+        lines += ['extern const uint8_t %s[];' % label,
+                  'extern const uint64_t %s_size;' % label]
+    lines += ['#ifdef __cplusplus', '}', '#endif']
+    (OUT / 'Sm8750GpuFirmware.h').write_text('\n'.join(lines) + '\n')
+
+
 def firmware_assembly():
+    """Asm unit carrying every GPU blob, plus the header the board layer needs.
+
+    Two naming schemes live here on purpose. The engine's NativeAdreno driver
+    declares `native_adreno_firmware_image` / `native_adreno_sqe_firmware_image`
+    as strong symbols (its own defaults are weak), while the SM8750 board layer
+    from the OnePlus 13T port asks for `sm8750_gpu_gmu/sqe/aqe` and the two ZAP
+    halves. Both are emitted from the same pinned bytes rather than aliased, so a
+    toolchain that dislikes symbol aliases cannot quietly drop one of them.
+
+    AQE and ZAP are only present when the vendor firmware has been staged: the
+    kernel needs them to upload the CP's AQE microcode and to authenticate ZAP,
+    but neither exists in linux-firmware. They are optional here so the tree
+    still builds without them -- the board layer refuses at the CP step and says
+    which file is missing, instead of failing the whole kernel link.
+    """
     lines = ['.section __DATA_CONST,__const']
+    images = []
+
+    def emit(label, blob):
+        path = OUT / ('blob-' + label + '.bin')
+        path.write_bytes(blob)
+        lines.extend(['.p2align 12', '.globl _' + label, '_' + label + ':',
+                      '.incbin ' + json.dumps(str(path)), '_' + label + '_end:',
+                      '.p2align 3', '.globl _' + label + '_size', '_' + label + '_size:',
+                      '.quad _' + label + '_end-_' + label])
+        images.append((label, path, len(blob)))
+
     for label, name, digest in FIRMWARE_PINS:
         path = FIRMWARE / name
         if not path.is_file():
@@ -243,10 +335,29 @@ def firmware_assembly():
         actual = hashlib.sha256(blob).hexdigest()
         if actual != digest:
             raise SystemExit('%s: sha256 %s does not match its pin' % (name, actual))
-        lines += ['.p2align 12', '.globl ' + label, label + ':',
-                  '.incbin ' + json.dumps(str(path)), label + '_end:',
-                  '.p2align 3', '.globl ' + label + '_size', label + '_size:',
-                  '.quad ' + label + '_end-' + label]
+        emit(label, blob)
+
+    # The SM8750 board layer's own names for the same two images.
+    emit('sm8750_gpu_gmu', (FIRMWARE / 'qcom/gen80000_gmu.bin').read_bytes())
+    emit('sm8750_gpu_sqe', (FIRMWARE / 'qcom/gen80000_sqe.fw').read_bytes())
+
+    aqe = FIRMWARE / 'qcom/gen80000_aqe.fw'
+    if aqe.is_file():
+        emit('sm8750_gpu_aqe', aqe.read_bytes())
+    else:
+        print('hummer-adreno-kits: no gen80000_aqe.fw -- CP AQE upload will be skipped')
+
+    zap = FIRMWARE / 'qcom/gen80000_zap.mbn'
+    if zap.is_file():
+        metadata, payload = zap_parts(zap.read_bytes())
+        emit('sm8750_gpu_zap_metadata', metadata)
+        emit('sm8750_gpu_zap_payload', payload)
+    else:
+        print('hummer-adreno-kits: no gen80000_zap.mbn -- ZAP authentication will be skipped; '
+              'extract vendor/firmware/gen80000_zap.mbn from this device and run '
+              'scripts/fetch-hummer-gpu-firmware.py --vendor-dir <dir>')
+
+    write_firmware_header(images)
     source = OUT / 'firmware.S'
     source.write_text('\n'.join(lines) + '\n')
     obj = OUT / 'firmware.o'
@@ -258,13 +369,16 @@ def firmware_assembly():
 def build():
     if not RECORD_C.is_file() or not RECORD_CXX.is_file():
         raise SystemExit('compile records missing: run after the kernel object tree exists')
+    # First, because it writes Sm8750GpuFirmware.h, which the C++ board layer
+    # includes; compiling that unit before the header exists cannot work.
+    firmware = firmware_assembly()
     objects = []
     for path, kind in sources():
         obj = OUT / (path.stem + ('.o' if kind == 'cxx' else '.c.o'))
         replay(RECORD_CXX if kind == 'cxx' else RECORD_C, path, obj)
         audit_object(obj)
         objects.append(obj)
-    objects.append(firmware_assembly())
+    objects.append(firmware)
 
     archive = OUT / 'libNativeAdreno.a'
     archive.unlink(missing_ok=True)

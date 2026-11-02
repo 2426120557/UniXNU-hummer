@@ -109,8 +109,11 @@ static void startKeyState(void) {
     OSSafeReleaseNULL(service);
     progress("volatile key state failed",0);
 }
-// Defined in the GPU archive (package/HummerAdrenoBringup.cpp).
-extern "C" void hummer_adreno_bringup_probe(void);
+// Defined in the GPU archive (package/HummerGpu.cpp). It brings up the whole
+// stack -- GPUCC power, SMMU, GMU+HFI, CP, ZAP, the ring, and the Metal service
+// -- and reads hummer-adreno-bringup itself, so an unset argument costs one
+// PE_parse_boot_argn and nothing else.
+extern "C" int hummer_gpu_start(void);
 
 extern "C" void native_legacy_display_probe(void) {
     if(displayInitialized)return;
@@ -127,13 +130,12 @@ extern "C" void native_legacy_display_probe(void) {
     progress("display class initialized",pendingDisplay!=nullptr);
 }
 extern "C" void native_legacy_display_late_probe(void) {
-    // hummer: the GPU bring-up probe needs a live IOKit (the GMU context allocates
-    // real memory through IOBufferMemoryDescriptor), which the bsd_init hook does
-    // not have -- IOKitBSDInit runs from bsd_autoconf, long after vfsinit. This is
-    // the board's existing post-IOKit entry point, so the GPU work hangs here
-    // instead of costing another XNU patch. It reads hummer-adreno-bringup itself
-    // and returns at once when that is unset, so nothing changes without it.
-    hummer_adreno_bringup_probe();
+    // hummer: the GPU needs a live IOKit (the GMU context allocates real memory
+    // through IOBufferMemoryDescriptor), which the bsd_init hook does not have --
+    // IOKitBSDInit runs from bsd_autoconf, long after vfsinit. This is the board's
+    // existing post-IOKit entry point, so the GPU work hangs here instead of
+    // costing another XNU patch.
+    progress("GPU start",(uint32_t)hummer_gpu_start());
     // The offline HID source loads IOHIDFamily/IOHIDEventDriver itself whenever
     // offline-hid-input=1 is set, and only creates the device when that first load
     // succeeded - so it must run before anything else touches IOHID. Without that

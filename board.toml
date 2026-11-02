@@ -78,12 +78,16 @@ archives = [
   "build-hummer-adreno-probe.py",
   # GPU 驱动的归档（XNU_NATIVE_ADRENO=y 时引擎 force-load build/native-adreno/
   # libNativeAdreno.a）。两块按顺序跑：
-  #   1. 从 pin 的 linux-firmware（commit 5c57d481）下载 gen80000_gmu.bin 与
-  #      gen80000_sqe.fw 到 .cache/firmware/hummer-gpu/，逐个校验 SHA-256；
-  #      厂商 blob 不进 Git。
-  #   2. 编译 drivers/NativeAdreno（已按 patches/native-adreno-a830.patch 重定向到
-  #      A830）+ kits/AdrenoFirmware + kits/ArmSmmu4K + kits/AdrenoPM4 +
-  #      package/ 里的 SM8750 平台层，把两个固件 blob 作为强符号一起归档。
+  #   1. 从 pin 的 linux-firmware（commit 5c57d481）下载 gen80000_gmu.bin /
+  #      gen80000_sqe.fw / gen80000_aqe.fw 到 .cache/firmware/hummer-gpu/，
+  #      逐个校验 SHA-256；厂商 blob 不进 Git。gen80000_zap.mbn 只在 vendor
+  #      分区里，用 --vendor-dir 带进来（没有它 ZAP 认证跳过，其余照跑）。
+  #   2. 编译整个 A830 后端（unixnu 把 drivers/NativeAdreno 升到 a9a2cbb 并打
+  #      patches/adreno-a830.patch：CP/SQE、GPU+GMU SMMU 上下文、A830 寄存器
+  #      bring-up、ring、抢占、user client、ABI v2、发布层）+ kits/AdrenoFirmware
+  #      （A8XX 性能表）+ kits/ArmSmmu4K + kits/AdrenoPM4 + package/ 里的
+  #      SM8750 平台层（GPUCC 电源 / SMMU 规划 / ZAP / socinfo / OPP 票）与
+  #      HummerGpu.cpp，把固件作为强符号一起归档。
   "fetch-hummer-gpu-firmware.py",
   "build-hummer-adreno-kits.py",
 ]
@@ -229,12 +233,14 @@ kernel_args = [
   # TCM 可写、GMU 从没启动过），而且它会在 bsd_init 里 panic，挡住"驱动链进内核后
   # 能不能正常开机"这件事。要再量一次就把下面这行取消注释。
   # "hummer-adreno-probe=1",
-  # v155 GPU 第二步：真正把 GMU 拉起来（package/HummerAdrenoBringup.cpp）。
+  # v185 GPU 全链（package/HummerGpu.cpp，照抄一加 13T 那套 A830 实现）。
   # 挂在 native_legacy_display_late_probe 里（IOKit 起来之后），流程是
-  # CX 上电 → GMU SMMU 上下文 → 载入 gen80000_gmu.bin → 释放 CM3，
-  # 最后必然 panic 把 FW_INIT_RESULT / HFI 状态留在屏上。
-  # bank/asid/slot 默认 2/1/2，sid 默认 5（设备树 qcom,gmu 的 iommus），
-  # 可用 hummer-adreno-bank/-asid/-slot/-sid 覆盖。
+  # 板级输入（cmd-db + socinfo + QFPROM speed bin → 真 OPP 票）→ GPUCC 上电
+  # （GCC/GDSC/PLL/RCGR/分支时钟，含 CX/MX 的 RPMH 票）→ GPU SMMU 规划
+  # （SID 0/1 + GMU SID 5）→ 固件内存 → GMU 冷启动 + 整张 gen8 性能表 →
+  # CP 初始化 → ZAP 认证 → PM4 写一次 scratch 证明 ring 通 → 发布服务 →
+  # 加载 Metal 加速器。每一步在屏上留名字，卡住能看出卡在哪。
+  # 注意：hummer_gpu_start() 自己不 panic，失败只报状态并继续开机。
   "hummer-adreno-bringup=1",
   # v120 实测（带 hummer-cpu=1 的延迟诊断屏）：
   #   HUMTOUCH cpu processor_count=6 avail=6 max=5 cpus_arg=6
