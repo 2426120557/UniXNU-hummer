@@ -2,6 +2,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <stdarg.h>
+#include "PeripheralStatus.h"
 #ifndef BOOT_PROGRESS_TEST
 #include <pexpert/pexpert.h>
 #include <pexpert/arm64/boot.h>
@@ -29,7 +30,6 @@ extern void early_boot_progress_vectors_done(void);
 extern volatile int native_owner_cache_stage __attribute__((weak));
 extern volatile uint64_t native_ufs_block_reads __attribute__((weak));
 extern volatile uint64_t native_ufs_block_failures __attribute__((weak));
-extern volatile int native_ufs_root_step __attribute__((weak));
 extern unsigned vm_page_free_count;
 extern uint32_t memorystatus_available_pages;
 
@@ -42,7 +42,9 @@ static unsigned width, height, stride, column, row = 6;
 static uint64_t poll_count;
 static thread_call_t poll_call;
 static int display_owned, logo_visible;
-static int busy; // shortcut: single-core observer, add SMP synchronization before enabling more CPUs.
+static int busy;
+static unsigned console_lock, console_smp;
+static uint64_t panic_cpu;
 enum { SCALE = 3, CELL = 6 * SCALE, LINE = 14 * SCALE, LOG_TOP = 6 };
 enum { HISTORY = 8, STAGE_BYTES = 80 };
 static char stages[HISTORY][STAGE_BYTES], root_stage[STAGE_BYTES], root_detail[192];
@@ -57,6 +59,11 @@ extern int snprintf(char *, size_t, const char *, ...);
 static char storage_status[96];
 static char timer_status[96];
 static char display_status[96];
+static char peripheral_status[PAGANI_PERIPHERALS][80];
+static int peripheral_overlay, platform_overlay;
+extern unsigned processor_count, processor_avail_count;
+extern unsigned long gPhysSize;
+extern volatile uint32_t armcpu_core_timer[8], armcpu_core_sgi[8];
 
 static void barrier(void)
 {
@@ -65,7 +72,7 @@ static void barrier(void)
 #endif
 }
 
-static uint64_t irq_save(void)
+static uint64_t irq_disable(void)
 {
     uint64_t flags = 0;
 #ifndef BOOT_PROGRESS_TEST
@@ -74,13 +81,48 @@ static uint64_t irq_save(void)
     return flags;
 }
 
-static void irq_restore(uint64_t flags)
+static void irq_enable(uint64_t flags)
 {
 #ifndef BOOT_PROGRESS_TEST
     __asm__ volatile("msr daif, %0" :: "r"(flags) : "memory");
 #else
     (void)flags;
 #endif
+}
+
+static uint64_t console_cpu(void)
+{
+    uint64_t cpu = 0;
+#ifndef BOOT_PROGRESS_TEST
+    __asm__ volatile("mrs %0, mpidr_el1" : "=r"(cpu));
+#else
+    cpu = test_cpu;
+#endif
+    return (cpu & 0xff00ffffffULL) + 1;
+}
+
+static int panic_other_cpu(void)
+{
+    uint64_t owner = __atomic_load_n(&panic_cpu, __ATOMIC_ACQUIRE);
+    return owner && owner != console_cpu();
+}
+
+// Skip contended diagnostics; a stopped CPU must never block the panic screen.
+static uint64_t irq_save(void)
+{
+    uint64_t flags = irq_disable();
+    if (__atomic_load_n(&panic_cpu, __ATOMIC_ACQUIRE) ||
+        (console_smp && __atomic_exchange_n(&console_lock, 1, __ATOMIC_ACQUIRE))) {
+        irq_enable(flags);
+        return UINT64_MAX;
+    }
+    return flags;
+}
+
+static void irq_restore(uint64_t flags)
+{
+    if (console_smp) __atomic_store_n(&console_lock, 0, __ATOMIC_RELEASE);
+    irq_enable(flags);
 }
 
 static uint64_t frequency(void)
@@ -125,6 +167,7 @@ static int geometry(uintptr_t base, uint64_t w, uint64_t h, uint64_t pitch, uint
 
 static void clear_line(unsigned y)
 {
+    if (panic_other_cpu()) return;
     if ((display_owned || (logo_visible && y >= LOG_TOP * LINE)) && !panic_state) return;
     if (!framebuffer || y + LINE > height) return;
     for (unsigned dy = 0; dy < LINE; dy++) {
@@ -153,9 +196,10 @@ static void render_boot_logo(void)
     logo_visible = 1;
 }
 
-static void glyph(unsigned char c, unsigned x, unsigned y, uint32_t color)
+static void glyph_pixels(unsigned char c, unsigned x, unsigned y, uint32_t color)
 {
-    if (((display_owned || (logo_visible && y >= LOG_TOP * LINE)) && !panic_state) || !framebuffer || x + CELL > width || y + LINE > height) return;
+    if (panic_other_cpu()) return;
+    if (!framebuffer || x + CELL > width || y + LINE > height) return;
     if (c < 32 || c > 126) c = '?';
     uint64_t bits = font[c - 32];
     for (unsigned gy = 0; gy < 12; gy++) {
@@ -170,8 +214,15 @@ static void glyph(unsigned char c, unsigned x, unsigned y, uint32_t color)
     }
 }
 
+static void glyph(unsigned char c, unsigned x, unsigned y, uint32_t color)
+{
+    if ((display_owned || (logo_visible && y >= LOG_TOP * LINE)) && !panic_state) return;
+    glyph_pixels(c, x, y, color);
+}
+
 static void putc_raw(char c)
 {
+    if (panic_other_cpu()) return;
     if (!framebuffer) return;
     if (panic_state && row >= panic_limit) { panic_clipped = 1; return; }
     if (c == '\t') c = ' ';
@@ -219,10 +270,17 @@ void boot_progress_bind(uintptr_t base, unsigned w, unsigned h, unsigned pitch, 
     if ((column + 1) * CELL > width) column = 0;
 }
 
-// Single-core handoff: stop diagnostic drawing before the first system frame.
+// Stop diagnostic drawing before the first system frame.
 int boot_progress_display_handoff(void)
 {
-    uint64_t flags = irq_save();
+    uint64_t flags;
+    // A skipped handoff strands the pending swap; wait for the bounded writer.
+    while ((flags = irq_save()) == UINT64_MAX) {
+        if (__atomic_load_n(&panic_cpu, __ATOMIC_ACQUIRE)) return 0;
+#ifndef BOOT_PROGRESS_TEST
+        __asm__ volatile("yield" ::: "memory");
+#endif
+    }
     int ready = framebuffer && !panic_state && !busy;
     if (ready) { display_owned = 1; barrier(); }
     irq_restore(flags);
@@ -232,6 +290,7 @@ int boot_progress_display_handoff(void)
 void boot_progress_display_failed(void)
 {
     uint64_t flags = irq_save();
+    if (flags == UINT64_MAX) return;
     if (!panic_state) display_owned = 0;
     irq_restore(flags);
 }
@@ -241,6 +300,7 @@ int boot_progress_active(void) { return framebuffer != 0; }
 void boot_progress_putc(char c)
 {
     uint64_t flags = irq_save();
+    if (flags == UINT64_MAX) return;
     if (!busy && !panic_state) { busy = 1; putc_raw(c); barrier(); busy = 0; }
     irq_restore(flags);
 }
@@ -248,6 +308,7 @@ void boot_progress_putc(char c)
 void boot_progress_stage(const char *s)
 {
     uint64_t flags = irq_save();
+    if (flags == UINT64_MAX) return;
     if (!busy && !panic_state) {
         busy = 1;
         record_stage(s);
@@ -266,6 +327,7 @@ void boot_progress_stage(const char *s)
 void boot_progress_root(const char *stage, const char *detail, uint64_t value)
 {
     uint64_t flags = irq_save();
+    if (flags == UINT64_MAX) return;
     if (!panic_state && !busy) {
         busy = 1;
         copy_line(root_stage, sizeof(root_stage), stage);
@@ -295,12 +357,146 @@ void boot_progress_root(const char *stage, const char *detail, uint64_t value)
 void boot_progress_display_status(const char *detail, uint64_t value)
 {
     uint64_t flags = irq_save();
+    if (flags == UINT64_MAX) return;
     if (!panic_state && !busy) {
         copy_line(display_stage, sizeof(display_stage), detail);
         display_value = value;
     }
     irq_restore(flags);
     boot_progress_root("stage7", detail, value);
+}
+
+void boot_progress_peripheral(unsigned device, const char *stage, int32_t result, uint32_t value, uint64_t reports)
+{
+    if (device >= PAGANI_SPI) return;
+    static const char *names[] = {"KEYS", "TOUCH", "PANEL"};
+    uint64_t flags = irq_save();
+    if (flags == UINT64_MAX) return;
+    if (!panic_state) snprintf(peripheral_status[device], sizeof(peripheral_status[device]),
+        "%s %.18s r=%x v=%x n=%llu", names[device], stage ? stage : "?",
+        (unsigned)result, value, (unsigned long long)reports);
+    irq_restore(flags);
+}
+
+void boot_progress_touch_spi(uint32_t firmware, uint32_t disabled, uint32_t state, uint32_t irq, uint32_t tx, uint32_t rx)
+{
+    uint64_t flags = irq_save();
+    if (flags == UINT64_MAX) return;
+    if (!panic_state) {
+        snprintf(peripheral_status[PAGANI_SPI], sizeof(peripheral_status[PAGANI_SPI]),
+            "SPI fw=%x if=%x st=%x irq=%x", firmware, disabled, state, irq);
+        snprintf(peripheral_status[PAGANI_SPI_FIFO], sizeof(peripheral_status[PAGANI_SPI_FIFO]),
+            "SPI FIFO tx=%x rx=%x", tx, rx);
+    }
+    irq_restore(flags);
+}
+
+void boot_progress_touch_dma(uint32_t tx, uint32_t rx, uint32_t txin, uint32_t rxin)
+{
+    uint64_t flags = irq_save();
+    if (flags == UINT64_MAX) return;
+    if (!panic_state) snprintf(peripheral_status[PAGANI_SPI_FIFO], sizeof(peripheral_status[PAGANI_SPI_FIFO]),
+        "SPI DMA tx=%x rx=%x ti=%x ri=%x", tx, rx, txin, rxin);
+    irq_restore(flags);
+}
+
+void boot_progress_touch_read(uint32_t length, uint32_t head, uint32_t pins, uint32_t dma,
+                              uint32_t state, uint32_t txin, uint32_t rxin, uint32_t delay)
+{
+    uint64_t flags = irq_save();
+    if (flags == UINT64_MAX) return;
+    if (!panic_state) {
+        snprintf(peripheral_status[PAGANI_SPI], sizeof(peripheral_status[PAGANI_SPI]),
+            "SPI RX n=%x h=%08x a=%x/%x rst=%x", length, head, pins&1, (pins>>1)&1, (pins>>2)&3);
+        snprintf(peripheral_status[PAGANI_SPI_FIFO], sizeof(peripheral_status[PAGANI_SPI_FIFO]),
+            "SPI dma=%x ti=%x ri=%x st=%x dly=%x", dma, txin, rxin, state, delay);
+    }
+    irq_restore(flags);
+}
+
+void boot_progress_touch_power(uint32_t address, uint32_t hardware, uint32_t tcs, uint32_t state,
+                               uint32_t cmd0, uint32_t cmd1, uint32_t cmd2)
+{
+    uint64_t flags = irq_save();
+    if (flags == UINT64_MAX) return;
+    if (!panic_state) {
+        snprintf(peripheral_status[PAGANI_SPI], sizeof(peripheral_status[PAGANI_SPI]),
+            "PWR a=%x hw=%x t=%x", address, hardware, tcs);
+        snprintf(peripheral_status[PAGANI_SPI_FIFO], sizeof(peripheral_status[PAGANI_SPI_FIFO]),
+            "PWR st=%x c=%x/%x/%x", state, cmd0, cmd1, cmd2);
+    }
+    irq_restore(flags);
+}
+
+void boot_progress_touch_hid(uint32_t binding, uint32_t usage, uint32_t events, uint32_t digitizers,
+                             uint32_t edges, uint32_t input, uint64_t output, uint32_t mask)
+{
+    uint64_t flags = irq_save();
+    if (flags == UINT64_MAX) return;
+    if (!panic_state) {
+        snprintf(peripheral_status[PAGANI_SPI], sizeof(peripheral_status[PAGANI_SPI]),
+            "HID b=%x use=%x/%x ev=%u/%u e=%u", binding, usage>>16, usage&0xffff, events, digitizers, edges);
+        snprintf(peripheral_status[PAGANI_SPI_FIFO], sizeof(peripheral_status[PAGANI_SPI_FIFO]),
+            "XY in=%x/%x out=%x/%x mask=%x", input>>16, input&0xffff, (uint32_t)(output>>32), (uint32_t)output, mask);
+    }
+    irq_restore(flags);
+}
+
+void boot_progress_touch_smmu(uint32_t slot, uint32_t bank, uint32_t smr, uint32_t s2cr)
+{
+    uint64_t flags = irq_save();
+    if (flags == UINT64_MAX) return;
+    if (!panic_state) {
+        snprintf(peripheral_status[PAGANI_SPI], sizeof(peripheral_status[PAGANI_SPI]),
+            "SMMU slot=%x bank=%x", slot, bank);
+        snprintf(peripheral_status[PAGANI_SPI_FIFO], sizeof(peripheral_status[PAGANI_SPI_FIFO]),
+            "SMMU smr=%x s2cr=%x", smr, s2cr);
+    }
+    irq_restore(flags);
+}
+
+void boot_progress_peripheral_enable(int enabled)
+{
+    __atomic_store_n(&peripheral_overlay, enabled != 0, __ATOMIC_RELEASE);
+}
+
+void boot_progress_platform_enable(int enabled)
+{
+    __atomic_store_n(&platform_overlay, enabled != 0, __ATOMIC_RELEASE);
+}
+
+// Only the opted-in status rows may repaint after console handoff.
+void boot_progress_peripheral_frame(void)
+{
+    int platform = __atomic_load_n(&platform_overlay, __ATOMIC_ACQUIRE);
+    if (!platform && !__atomic_load_n(&peripheral_overlay, __ATOMIC_ACQUIRE)) return;
+    uint64_t flags = irq_save();
+    if (flags == UINT64_MAX) return;
+    if (!display_owned || panic_state || busy || !framebuffer) { irq_restore(flags); return; }
+    char line[80];
+    for (unsigned i = 0; i < (platform ? 2U : PAGANI_PERIPHERALS); i++) {
+        if (platform && i == 0) {
+            unsigned timer = 0, ipi = 0;
+            for (unsigned cpu = 0; cpu < 8; cpu++) {
+                if (__atomic_load_n(&armcpu_core_timer[cpu], __ATOMIC_RELAXED)) timer |= 1U << cpu;
+                if (__atomic_load_n(&armcpu_core_sgi[cpu], __ATOMIC_RELAXED)) ipi |= 1U << cpu;
+            }
+            snprintf(line, sizeof(line), "CPU reg=%u online=%u T=%02x I=%02x",
+                     processor_count, processor_avail_count, timer, ipi);
+        } else if (platform) {
+            snprintf(line, sizeof(line), "RAM MiB=%lu free=%u avail=%u", gPhysSize >> 20,
+                     vm_page_free_count >> 8, memorystatus_available_pages >> 8);
+        } else copy_line(line, sizeof(line), peripheral_status[i]);
+        if (!line[0]) continue;
+        unsigned at = 0;
+        for (unsigned x = 0; x + CELL <= width; x += CELL) {
+            if (panic_state) { irq_restore(flags); return; }
+            unsigned char c = line[at];
+            if (c) at++;
+            glyph_pixels(c ? c : ' ', x, (i + 4) * LINE, 0xffffffff);
+        }
+    }
+    barrier(); irq_restore(flags);
 }
 
 static void panic_halt(void)
@@ -337,7 +533,11 @@ void boot_progress_panic(const char *format, va_list *args, unsigned long caller
                          unsigned reason, uint64_t options)
 {
     if (!framebuffer) return;
-    uint64_t flags = irq_save();
+    uint64_t flags = irq_disable();
+    uint64_t owner = 0, cpu = console_cpu();
+    if (!__atomic_compare_exchange_n(&panic_cpu, &owner, cpu, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE) && owner != cpu) {
+        panic_halt(); return;
+    }
     if (panic_state) {
         panic_footer("NESTED PANIC: first message preserved"); panic_halt(); return;
     }
@@ -350,7 +550,7 @@ void boot_progress_panic(const char *format, va_list *args, unsigned long caller
     __asm__ volatile("mrs %0, tcr_el1" : "=r"(tcr));
     __asm__ volatile("mrs %0, ttbr1_el1" : "=r"(ttbr1));
 #endif
-    panic_open("OnePlus Ace 5 Pro / XNU PANIC");
+    panic_open("OnePlus 13T / XNU PANIC");
     text_raw("panic entry reached; values below are hexadecimal\n");
     value_raw("caller", caller); value_raw("MPIDR", mpidr);
     text_raw("last stage: "); text_raw(stage_count ? stages[(stage_count - 1) % HISTORY] : "none"); putc_raw('\n');
@@ -397,6 +597,7 @@ void boot_progress_panic(const char *format, va_list *args, unsigned long caller
 // No kernel services, stack protector, SIMD, or relocated pointers on this path.
 void early_boot_progress_init(boot_args *args)
 {
+    console_smp = 0; console_lock = 0; panic_cpu = 0;
     early_boot_args_pa = (uintptr_t)args;
     early_boot_phys_base = args->physBase;
     early_boot_virt_base = args->virtBase;
@@ -404,6 +605,8 @@ void early_boot_progress_init(boot_args *args)
     display_owned = 0; logo_visible = 0; panic_state = 0; stage_count = 0; root_sequence = 0; fault_valid = 0;
     poll_count = 0; display_value = 0;
     display_stage[0] = 0; exit_stage[0] = 0;
+    peripheral_overlay = 0; platform_overlay = 0;
+    for (unsigned i = 0; i < PAGANI_PERIPHERALS; i++) peripheral_status[i][0] = 0;
     boot_progress_panic_text[0] = 0;
     framebuffer = 0; column = 0; row = LOG_TOP; busy = 0;
     framebuffer_pa = 0;
@@ -414,7 +617,7 @@ void early_boot_progress_init(boot_args *args)
     framebuffer_pa = framebuffer;
     for (unsigned y = 0; y + LINE <= height; y += LINE) clear_line(y);
     unsigned saved = row;
-    row = 0; text_raw("OnePlus Ace 5 Pro / source XNU"); row = saved; column = 0;
+    row = 0; text_raw("OnePlus 13T / source XNU"); row = saved; column = 0;
     boot_progress_stage("S1: XNU entry, MMU off");
     value_raw("args PA", (uintptr_t)args);
     value_raw("RAM PA", args->physBase);
@@ -465,6 +668,7 @@ void early_boot_progress_vm_ready(void)
     uintptr_t mapped = framebuffer_pa ? ml_io_map_wcomb(framebuffer_pa, (uint64_t)stride * 4 * height) : 0;
     if (mapped) framebuffer = mapped;
     early_boot_progress_vectors_done();
+    console_smp = 1;
     early_boot_stage = 6;
     boot_progress_stage("S6: kernel VM and exception vectors ready");
 }
@@ -478,45 +682,22 @@ void boot_progress_init(void)
 }
 
 // The assembly fatal path re-enters with physical addresses and MMU/cache off.
-//
-// One row only. On hummer's panel this path can draw exactly one row of ~30 characters
-// before the rest of the console falls outside the visible area, so the readout is
-//   E<checkpoint> <MPIDR low 16>/<SPSR low 8> <ESR> <ELR low 32>
-// MPIDR says which core faulted (0000 = boot CPU, 0100..0500 = the secondaries), SPSR's
-// M[3:0] says at which exception level and stack it was running (05 = EL1h, 09 = EL2h,
-// 0d = EL3h), ESR 0 with FAR 0 is the AArch64 encoding for an undefined instruction.
-static void hex_fixed(uint64_t n, unsigned digits)
-{
-    for (int shift = (int)(digits * 4) - 4; shift >= 0; shift -= 4) {
-        unsigned digit = (unsigned)(n >> shift) & 15;
-        putc_raw((char)(digit < 10 ? '0' + digit : 'a' + digit - 10));
-    }
-}
-
 void early_boot_progress_fatal(boot_args *args, uint64_t esr, uint64_t elr, uint64_t far, uint64_t spsr, uint64_t stage)
 {
-    (void)far;
-    uint64_t mpidr = 0;
-#ifndef BOOT_PROGRESS_TEST
-    __asm__ volatile("mrs %0, mpidr_el1" : "=r"(mpidr));
-#endif
     early_boot_progress_init(args);
-    if (!framebuffer) panic_halt();
-    panic_state = 1; busy = 1; panic_clipped = 0;
-    panic_limit = height / LINE - 2;
-    row = 1; column = 0;
-    clear_line(row * LINE);
-    text_raw("E"); hex_fixed(stage, 2);
-    text_raw(" "); hex_fixed(mpidr, 4);
-    text_raw("/"); hex_fixed(spsr, 2);
-    text_raw(" "); hex_fixed(esr, 8);
-    text_raw(" "); hex_fixed(elr, 8);
+    if (framebuffer) panic_open("OnePlus 13T / EARLY EXCEPTION");
+    value_raw("last checkpoint", stage);
+    value_raw("ESR_EL1", esr); value_raw("ELR_EL1", elr);
+    value_raw("FAR_EL1", far); value_raw("SPSR_EL1", spsr);
+    if (framebuffer) panic_footer("HALTED: no software reboot");
     panic_halt();
 }
 
 void boot_progress_kernel_exception(uint64_t esr, uint64_t elr, uint64_t far)
 {
-    uint64_t flags = irq_save();
+    if (panic_other_cpu()) { panic_halt(); return; }
+    uint64_t flags = panic_state ? irq_disable() : irq_save();
+    if (flags == UINT64_MAX) return;
     if (panic_state) {
         panic_limit = height / LINE;
         row = panic_limit - 2; column = 0; clear_line(row * LINE); clear_line((row + 1) * LINE);
@@ -528,7 +709,8 @@ void boot_progress_kernel_exception(uint64_t esr, uint64_t elr, uint64_t far)
 #ifndef BOOT_PROGRESS_TEST
     __asm__ volatile("mrs %0, spsr_el1" : "=r"(fault_psr));
 #endif
-    boot_progress_stage("kernel exception");
+    record_stage("kernel exception");
+    text_raw("[XNU] kernel exception\n");
     value_raw("ESR_EL1", esr); value_raw("ELR_EL1", elr); value_raw("FAR_EL1", far);
     barrier(); irq_restore(flags);
 }
@@ -538,6 +720,7 @@ static void poll(void *unused0, void *unused1)
     (void)unused0; (void)unused1;
     if (panic_state) return;
     uint64_t flags = irq_save();
+    if (flags == UINT64_MAX) goto schedule;
     if (framebuffer && !busy) {
         busy = 1;
         ++poll_count;
@@ -559,12 +742,15 @@ static void poll(void *unused0, void *unused1)
                  (unsigned long long)poll_count, (unsigned long long)armcpu_timer_interrupts);
         line_raw(timer_status);
         row = 2; column = 0; clear_line(2 * LINE);
-        {
-            int ustep = (&native_ufs_root_step) ? native_ufs_root_step : -2;
-            unsigned long long urd = (&native_ufs_block_reads) ? (unsigned long long)native_ufs_block_reads : 0;
-            unsigned long long uer = (&native_ufs_block_failures) ? (unsigned long long)native_ufs_block_failures : 0;
-            snprintf(storage_status, sizeof(storage_status), "UFS step=%d rd=%llu er=%llu D/C/G %u/%u/%u ocs=%llx",
-                     ustep, urd, uer, !!armdt_platform_configured, !!armcpu_registered, !!armcpu_gic_ready,
+        if (&native_owner_cache_stage && native_owner_cache_stage &&
+            &native_ufs_block_reads && &native_ufs_block_failures) {
+            snprintf(storage_status, sizeof(storage_status), "free=%u avail=%u UFS=%llu err=%llu",
+                     vm_page_free_count, memorystatus_available_pages,
+                     (unsigned long long)native_ufs_block_reads, (unsigned long long)native_ufs_block_failures);
+            line_raw(storage_status);
+        } else {
+            snprintf(storage_status, sizeof(storage_status), "DT/CPU/GIC %u/%u/%u PPI-enable %016llx",
+                     !!armdt_platform_configured, !!armcpu_registered, !!armcpu_gic_ready,
                      (unsigned long long)armcpu_gic_boot[1]);
             line_raw(storage_status);
         }
@@ -576,6 +762,8 @@ static void poll(void *unused0, void *unused1)
         row = saved_row; column = saved_column; barrier(); busy = 0;
     }
     irq_restore(flags);
+    boot_progress_peripheral_frame();
+schedule:;
     uint64_t deadline;
     clock_interval_to_deadline(1, NSEC_PER_SEC, &deadline);
     thread_call_enter_delayed(poll_call, deadline);
@@ -607,6 +795,7 @@ void boot_progress_exit(int pid, const char *name, int status, unsigned ns, uint
     snprintf(line, sizeof(line), "exit pid=%d %.16s status=%x ns=%u code=%llx", pid,
              name ? name : "?", status, ns, (unsigned long long)code);
     uint64_t flags = irq_save();
+    if (flags == UINT64_MAX) return;
     if (!panic_state && !busy) copy_line(exit_stage, sizeof(exit_stage), line);
     irq_restore(flags);
     boot_progress_stage(line);

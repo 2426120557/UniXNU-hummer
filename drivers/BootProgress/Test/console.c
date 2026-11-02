@@ -32,7 +32,24 @@ static thread_call_t thread_call_allocate_with_options(void (*fn)(void *, void *
 #define BOOT_LOGO_X 2
 #define BOOT_LOGO_Y -1
 static const unsigned char boot_logo[] = {0,64,128,255,255,128,64,0,0,64,128,255,255,128,64,0};
+static uint64_t test_cpu;
+unsigned processor_count, processor_avail_count;
+unsigned long gPhysSize;
+volatile uint32_t armcpu_core_timer[8], armcpu_core_sgi[8];
+static int release_on_contention;
+static unsigned exchange_for_test(unsigned *lock, unsigned value, int order)
+{
+    unsigned previous = __atomic_exchange_n(lock, value, order);
+    // Let the other CPU finish immediately after this failed acquisition.
+    if (previous && release_on_contention) {
+        release_on_contention = 0;
+        __atomic_store_n(lock, 0, __ATOMIC_RELEASE);
+    }
+    return previous;
+}
+#define __atomic_exchange_n exchange_for_test
 #include "../BootProgress.c"
+#undef __atomic_exchange_n
 volatile int native_owner_cache_stage;
 volatile uint64_t native_ufs_block_reads, native_ufs_block_failures;
 unsigned vm_page_free_count;
@@ -56,6 +73,22 @@ int main(void)
                       .memSize = 0x10000000, .Video = { (uintptr_t)(allocation + GUARD), 1, PITCH * 4, W, H, 32 } };
     early_boot_progress_init(&args);
     assert(boot_progress_active() && logo_visible);
+    early_boot_progress_vm_ready();
+    unsigned previous = stage_count;
+    uint64_t held = irq_save();
+    assert(held != UINT64_MAX);
+    test_cpu = 0x10000;
+    boot_progress_stage("contended secondary");
+    assert(stage_count == previous);
+    release_on_contention = 1;
+    assert(boot_progress_display_handoff());
+    assert(!release_on_contention && !console_lock && display_owned);
+    boot_progress_display_failed();
+    test_cpu = 0;
+    irq_restore(held);
+    boot_progress_stage("uncontended boot CPU");
+    assert(stage_count == previous + 1);
+
     unsigned logo_at = GUARD + ((H - BOOT_LOGO_HEIGHT) / 2 + BOOT_LOGO_Y) * PITCH +
                        (W - BOOT_LOGO_WIDTH) / 2 + BOOT_LOGO_X;
     assert(allocation[logo_at] == 0xff000000 && allocation[logo_at + 1] == 0xff404040 &&
@@ -121,9 +154,15 @@ int main(void)
     assert(row == saved_row && column == saved_column && native_ufs_block_reads == 5678);
     boot_progress_kernel_exception(0x96000010, 0xfffffff007345678, 0x12345000);
     assert(fault_valid && fault_esr == 0x96000010 && fault_far == 0x12345000);
+    console_smp = 1; console_lock = 1; // A stopped console owner cannot block panic.
     panic_for_test("Failed to mount %s: %u %llx %%", "root device", 60U, 0x123456789abcdef0ULL);
     assert(panic_state == 1 && busy);
+    assert(!boot_progress_display_handoff());
     assert(!strcmp(boot_progress_panic_text, "Failed to mount root device: 60 123456789abcdef0 %"));
+    test_cpu = 0x10000;
+    panic_for_test("second CPU must preserve first panic");
+    assert(!strcmp(boot_progress_panic_text, "Failed to mount root device: 60 123456789abcdef0 %"));
+    test_cpu = 0;
     assert(allocation[GUARD] == 0xffff4040);
     assert(allocation[GUARD + W / 3] == 0xff40ff40);
     assert(allocation[GUARD + 2 * W / 3] == 0xff4080ff);
@@ -185,8 +224,69 @@ int main(void)
     boot_progress_root("frame ownership", "preserve pixels", 1);
     for (unsigned i = 0; i < 31; i++) poll(NULL, NULL);
     assert(!memcmp(snapshot, allocation + GUARD, PITCH * H * sizeof(uint32_t)));
-    free(snapshot);
+    boot_progress_peripheral(PAGANI_TOUCH, "TouchComm start", -71, 0x1000010, 0);
+    boot_progress_peripheral(PAGANI_KEYS, "HID report", 0, 0xc001, 3);
+    boot_progress_peripheral(PAGANI_PERIPHERALS, "out of bounds", 0, 0, 0);
+    boot_progress_peripheral(PAGANI_SPI, "reserved for SPI snapshot", 0, 0, 0);
+    assert(!peripheral_status[PAGANI_SPI][0]);
+    boot_progress_touch_spi(0x101,1,1,0x40000000,1,0x80000001);
+    assert(strstr(peripheral_status[PAGANI_TOUCH], "r=ffffffb9 v=1000010 n=0"));
+    assert(strstr(peripheral_status[PAGANI_KEYS], "n=3"));
+    assert(!strcmp(peripheral_status[PAGANI_SPI], "SPI fw=101 if=1 st=1 irq=40000000"));
+    assert(!strcmp(peripheral_status[PAGANI_SPI_FIFO], "SPI FIFO tx=1 rx=80000001"));
+    boot_progress_touch_smmu(7,81,0x800000a3,0);
+    assert(!strcmp(peripheral_status[PAGANI_SPI], "SMMU slot=7 bank=51"));
+    assert(!strcmp(peripheral_status[PAGANI_SPI_FIFO], "SMMU smr=800000a3 s2cr=0"));
+    boot_progress_touch_spi(0x102,1,0x41,0,0,0);
+    boot_progress_touch_dma(4,0,2,1);
+    assert(!strcmp(peripheral_status[PAGANI_SPI_FIFO], "SPI DMA tx=4 rx=0 ti=2 ri=1"));
+    boot_progress_touch_power(0x40800,0x30000,1,0,0x10100,0x100,0);
+    assert(!strcmp(peripheral_status[PAGANI_SPI], "PWR a=40800 hw=30000 t=1"));
+    assert(!strcmp(peripheral_status[PAGANI_SPI_FIFO], "PWR st=0 c=10100/100/0"));
+    boot_progress_touch_read(4,0,13,1,0x40,4,4,0xc800);
+    assert(!strcmp(peripheral_status[PAGANI_SPI], "SPI RX n=4 h=00000000 a=1/0 rst=3"));
+    assert(!strcmp(peripheral_status[PAGANI_SPI_FIFO], "SPI dma=1 ti=4 ri=4 st=40 dly=c800"));
+    boot_progress_touch_hid(31,0xd0004,430,420,3,0x40007fff,0x800000010000ULL,0x802);
+    assert(!strcmp(peripheral_status[PAGANI_SPI], "HID b=1f use=d/4 ev=430/420 e=3"));
+    assert(!strcmp(peripheral_status[PAGANI_SPI_FIFO], "XY in=4000/7fff out=8000/10000 mask=802"));
+    saved_row=row;saved_column=column;
+    boot_progress_peripheral_frame();
+    assert(!memcmp(snapshot,allocation+GUARD,PITCH*H*sizeof(uint32_t)));
+    boot_progress_peripheral_enable(1);
+    boot_progress_peripheral_frame();
+    assert(display_owned && row==saved_row && column==saved_column);
+    assert(!memcmp(snapshot,allocation+GUARD,4*LINE*PITCH*sizeof(uint32_t)));
+    assert(memcmp(snapshot+4*LINE*PITCH,allocation+GUARD+4*LINE*PITCH,5*LINE*PITCH*sizeof(uint32_t)));
+    assert(!memcmp(snapshot + 9 * LINE * PITCH, allocation + GUARD + 9 * LINE * PITCH,
+                   (H - 9 * LINE) * PITCH * sizeof(uint32_t)));
+    for (unsigned y=4*LINE;y<9*LINE;++y)
+        for (unsigned x=W;x<PITCH;++x) assert(allocation[GUARD+y*PITCH+x]==0x12345678);
+    busy=1;memcpy(snapshot,allocation+GUARD,PITCH*H*sizeof(uint32_t));
+    boot_progress_peripheral_frame();
+    assert(!memcmp(snapshot,allocation+GUARD,PITCH*H*sizeof(uint32_t)));busy=0;
+    boot_progress_peripheral(PAGANI_KEYS,"PMIC sample",0,0x8001,5);
+    poll(NULL,NULL);
+    assert(!memcmp(snapshot,allocation+GUARD,4*LINE*PITCH*sizeof(uint32_t)));
+    assert(memcmp(snapshot+4*LINE*PITCH,allocation+GUARD+4*LINE*PITCH,5*LINE*PITCH*sizeof(uint32_t)));
+    assert(!memcmp(snapshot+9*LINE*PITCH,allocation+GUARD+9*LINE*PITCH,(H-9*LINE)*PITCH*sizeof(uint32_t)));
+    boot_progress_peripheral_enable(0);
+    boot_progress_platform_enable(1);
+    processor_count = processor_avail_count = 8; gPhysSize = 4UL << 30;
+    for (unsigned cpu=0; cpu<8; cpu++) armcpu_core_timer[cpu] = armcpu_core_sgi[cpu] = 1;
+    memcpy(snapshot,allocation+GUARD,PITCH*H*sizeof(uint32_t));
+    boot_progress_peripheral_frame();
+    assert(memcmp(snapshot+4*LINE*PITCH,allocation+GUARD+4*LINE*PITCH,2*LINE*PITCH*sizeof(uint32_t)));
+    assert(!memcmp(snapshot+6*LINE*PITCH,allocation+GUARD+6*LINE*PITCH,(H-6*LINE)*PITCH*sizeof(uint32_t)));
     panic_for_test("panic after system display handoff");
+    memcpy(snapshot,allocation+GUARD,PITCH*H*sizeof(uint32_t));
+    boot_progress_peripheral(PAGANI_KEYS,"must preserve panic",0,0,0);
+    boot_progress_touch_spi(0,0,0,0,0,0);boot_progress_touch_smmu(0,0,0,0);
+    boot_progress_touch_dma(0,0,0,0);boot_progress_touch_read(0,0,0,0,0,0,0,0);boot_progress_touch_power(0,0,0,0,0,0,0);
+    boot_progress_touch_hid(0,0,0,0,0,0,0,0);boot_progress_peripheral_frame();
+    assert(!memcmp(snapshot,allocation+GUARD,PITCH*H*sizeof(uint32_t)));
+    assert(strstr(peripheral_status[PAGANI_KEYS],"PMIC sample"));
+    assert(strstr(peripheral_status[PAGANI_SPI_FIFO],"in=4000/7fff out=8000/10000 mask=802"));
+    free(snapshot);
     boot_progress_display_failed();
     assert(allocation[GUARD] == 0xffff4040 && !boot_progress_display_handoff());
     early_boot_progress_suspend();

@@ -1,2 +1,12 @@
 *.patch -text
 *.diff -text
+# CI runs ./unixnu directly on macOS and Linux; a CRLF shebang would break it,
+# and the driver sources are compiled by clang on both hosts.
+unixnu text eol=lf
+*.py text eol=lf
+*.sh text eol=lf
+*.toml text eol=lf
+*.c text eol=lf
+*.h text eol=lf
+*.cpp text eol=lf
+*.inc text eol=lf

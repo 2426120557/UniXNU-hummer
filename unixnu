@@ -16,27 +16,33 @@ def prepare(device=DEVICE, source=None):
     revision = (device / 'upstream.rev').read_text().strip()
     if not re.fullmatch('[0-9a-f]{40}', revision):
         raise ValueError('upstream.rev must contain a full Git commit ID')
+    # No engine-source fork any more. Up to v185 this repository carried
+    # patches/unixnu-source-kernel.patch, a 4637-line diff over the whole engine
+    # (docs, workflows, build scripts and the kernel hooks that called this board).
+    # That only ever applied to the revision it was cut against, and the migration
+    # to 6790e7c moves 461 commits ahead of it. The newer engine does the same job
+    # natively: a board ships patches/xnu/*.patch named by patches/xnu/series, and
+    # the late probe hook this board used is now a supported extension point.
     patch = device / 'patches/unixnu-source-kernel.patch'
+    # Board components (UFS, display, panel, input, power, probes) are no longer
+    # patches over engine submodules. They are real directories under drivers/ in
+    # this repository, which components.py resolve() prefers over the catalog's
+    # git source. Only the GPU stays a patch, because the A830 backend is not in
+    # the Adreno740 revision the engine pins.
     driver_patches = [(device / 'patches' / name, module) for name, module in (
-        ('native-ufs-sm8750.patch', 'NativeUfs'),
-        ('native-mobile-display-stage7.patch', 'NativeMobileDisplay'),
-        # The volume key needs a consumer usage the engine's keyboard report cannot carry,
-        # so report 4 and its board entry point live in the NativeHidInput submodule.
-        ('native-keys.patch', 'NativeHidInput'),
         # The whole A830 backend, taken from the OnePlus 13T port: CP init and its
         # self-test, the GPU/GMU SMMU contexts with the A830 address layout, the
         # A830 register bring-up (NativeAdrenoA830HwInit), the ring with gen8
         # fences, preemption, the published user client, and the ABI v2 the Metal
-        # frontend speaks. It replaces the three small patches this board used
-        # while the driver was still being retargeted by hand.
-        ('adreno-a830.patch', 'NativeAdreno'))]
-    # The backend above is written against a newer driver than this engine pins.
-    # Moving the submodule forward is part of adopting it: at the pinned revision
-    # the driver has no NativeAdrenoPreempt.cpp, an ABI v1 user client and no A830
-    # address layout, so the patch cannot apply there at all. The engine itself
-    # does not reference the driver outside its own submodule.
+        # frontend speaks.
+        ('adreno-a830.patch', 'Adreno740'),)]
+    # Adreno740 is pinned by the engine at exactly the revision this patch is cut
+    # against (a9a2cbb), so only AdrenoMetal needs moving: the Metal plugin inside
+    # the reused Data volume was built against this fork revision, and the kernel
+    # side has to publish the same ABI for it to load.
     driver_revisions = {
-        'NativeAdreno': 'a9a2cbb43b89d672e2921e19721a6438b738b17f',
+        'Adreno740': 'a9a2cbb43b89d672e2921e19721a6438b738b17f',
+        'AdrenoMetal': '831a9dcbd6ac7de89a11bdaf031e07b9aadfa3c8',
     }
     # Kit patches land in kits/<module>, not drivers/<module>. The HFI kit as pinned
     # only speaks the A6xx/A7xx performance table; gen8 moved it to message 15 with
@@ -49,11 +55,16 @@ def prepare(device=DEVICE, source=None):
     # to either one produces a different payload. Leaving them out meant "only edit a driver"
     # hit the cache and reused the previous tree - v127c shipped the exact machine code of
     # v127b, down to the same pc and far, because the tree was never rebuilt.
-    digest = hashlib.sha256(patch.read_bytes())
+    digest = hashlib.sha256(patch.read_bytes() if patch.is_file() else b'no-engine-fork')
     digest.update(repr(sorted(driver_revisions.items())).encode())
     for path, _ in driver_patches + kit_patches:
         if path.is_file():
             digest.update(path.read_bytes())
+    # Board driver sources live in this repository now, so they decide the tree too.
+    for source in sorted((device / 'drivers').rglob('*')):
+        if source.is_file():
+            digest.update(str(source.relative_to(device)).encode())
+            digest.update(source.read_bytes())
     # The recipe decides what the tree contains, so it has to be hashed too.
     # Without this a change to prepare() -- moving a submodule, ordering a
     # patch -- left the fingerprint alone and CI restored the tree the old
@@ -98,8 +109,9 @@ def prepare(device=DEVICE, source=None):
                 if local and (source / path / '.git').exists():
                     git('config', key.removesuffix('.path') + '.url', source / path, cwd=tree)
             git('-c', 'protocol.file.allow=always', 'submodule', 'update', '--init', '--recursive', cwd=tree)
-        git('apply', '--check', patch, cwd=tree)
-        git('apply', patch, cwd=tree)
+        if patch.is_file():
+            git('apply', '--check', patch, cwd=tree)
+            git('apply', patch, cwd=tree)
         moved = []
         for module, revision in driver_revisions.items():
             directory = tree / 'drivers' / module
