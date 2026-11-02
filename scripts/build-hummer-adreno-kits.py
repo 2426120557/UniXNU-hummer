@@ -58,15 +58,19 @@ RECORD_C = (ROOT / 'build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837'
 RECORD_CXX = (ROOT / 'build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837'
                    / 'iokit/DEVELOPMENT/IOPlatformExpert.cpo.json')
 
-FIRMWARE = ROOT / '.cache/firmware/hummer-gpu'
+# The four images ship with the repository: 240 KiB dumped from this device's
+# own vendor partition (see scripts/fetch-hummer-gpu-firmware.py for the pins
+# and the OTA they came from). CI has no phone to pull them from, and a missing
+# image stops the archive step before anything downstream can run.
+FIRMWARE = ROOT / 'firmware/hummer-gpu'
 
 # The engine driver's strong overrides for its own weak defaults: it asks for
 # these two names and gets their lengths from the companion _size symbols, so
 # the microcode version can change without touching the driver.
 FIRMWARE_PINS = [
-    ('_native_adreno_firmware_image', 'qcom/gen80000_gmu.bin',
+    ('_native_adreno_firmware_image', 'gen80000_gmu.bin',
      '1ad8175e6cd01ea76c64d20b83600038c52dd29844b48d57b11b769b038863a5'),
-    ('_native_adreno_sqe_firmware_image', 'qcom/gen80000_sqe.fw',
+    ('_native_adreno_sqe_firmware_image', 'gen80000_sqe.fw',
      '9c8f009bea112d7c06dd2ccb67e889999459e53b92f0f4859f5ea0db067ad6b5'),
 ]
 
@@ -351,7 +355,7 @@ def firmware_assembly():
     # of producing an archive that boots half the stack and then stalls.
     blobs = {}
     for name, size, digest in FIRMWARE_CHECK:
-        path = FIRMWARE / 'qcom' / name
+        path = FIRMWARE / name
         if not path.is_file():
             raise SystemExit('%s missing: run scripts/fetch-hummer-gpu-firmware.py '
                              'with the phone attached (--device)' % path)
@@ -363,7 +367,7 @@ def firmware_assembly():
         blobs[name] = blob
 
     for label, name, _ in FIRMWARE_PINS:
-        emit(label, blobs[name.rsplit('/', 1)[1]])
+        emit(label, blobs[name])
 
     # The SM8750 board layer's own names for the same images, plus the ZAP pair
     # cut out of the signed ELF (metadata is what PAS hashes, payload is what it

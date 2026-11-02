@@ -78,14 +78,15 @@ archives = [
   "build-hummer-adreno-probe.py",
   # GPU 驱动的归档（XNU_NATIVE_ADRENO=y 时引擎 force-load build/native-adreno/
   # libNativeAdreno.a）。两块按顺序跑：
-  #   1. 从本机 vendor 分区取 gen80000_gmu.bin / sqe.fw / aqe.fw / zap.mbn 到
-  #      .cache/firmware/hummer-gpu/，逐个校验 SHA-256；厂商 blob 不进 Git。
-  #      默认走 adb（adb exec-out cat，避免 Windows 上的路径改写），也接受
-  #      --vendor-dir 指向已解包的 vendor/firmware。pin 表就是这台 PKR110 的
-  #      原厂 OTA dump —— 必须用本机的 SQE/AQE：CP 会校验微码版本，换成
-  #      linux-firmware 那套（多 119 条 PM4 指令的旧版）只表现为“CP 永不出复位”。
-  #      zap.mbn 是已签名的 Hexagon ELF，构建时按 PAS 规则切成 0xfcc metadata
-  #      + 0x1000 payload（Sm8750GpuZapLoad 只收这两个尺寸）。
+  #   1. 校验 firmware/hummer-gpu/ 里的四件套（gmu / sqe / aqe / zap）。它们随
+  #      仓库分发：一共 240 KB，来自这台 PKR110 的原厂 OTA —— CI 没有手机可取，
+  #      而固件缺失会让归档步骤直接停住，后面的板级库就都进不了内核链接。
+  #      脚本只在缺失或不匹配时才刷新，默认走 adb（exec-out cat，绕开 Windows
+  #      上 MSYS 对 /vendor/... 的路径改写），也接受 --vendor-dir 指向已解包的
+  #      vendor/firmware。必须用本机的 SQE/AQE：CP 校验微码版本，linux-firmware
+  #      那套是 0x77 而不是 0x81（少 10 条 PM4 指令），换上去只表现为“CP 永不
+  #      出复位”。zap.mbn 是已签名的 Hexagon ELF，构建时按 PAS 规则切成
+  #      0xfcc metadata + 0x1000 payload（Sm8750GpuZapLoad 只收这两个尺寸）。
   #   2. 编译整个 A830 后端（unixnu 把 drivers/NativeAdreno 升到 a9a2cbb 并打
   #      patches/adreno-a830.patch：CP/SQE、GPU+GMU SMMU 上下文、A830 寄存器
   #      bring-up、ring、抢占、user client、ABI v2、发布层）+ kits/AdrenoFirmware
