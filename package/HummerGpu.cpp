@@ -29,7 +29,7 @@
 #include <libkern/libkern.h>
 #include <kern/clock.h>
 #include <mach/kmod.h>
-#include <mach/task.h>
+#include <kern/task.h>
 #include <pexpert/pexpert.h>
 #include "ArmSmmu4KMmio.h"
 #include "NativeAdrenoGpuContext.h"
