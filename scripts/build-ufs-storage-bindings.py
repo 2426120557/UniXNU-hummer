@@ -21,7 +21,7 @@ parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--kernelcache', type=Path, required=True)
 args = parser.parse_args()
 component = 'NativeUfs'
-args.objects_dir = ROOT / 'build/native-ufs'
+args.objects_dir = ROOT / 'build/sheng-ufs'
 SLIDE = -0x1000000
 
 KERNELCACHE_SHA256 = 'f18b4df865405f2a287b84977d7aca745e056d656d9fc9df1662970ce2969de7'
@@ -186,7 +186,7 @@ possible.update({'__ZN20IOBlockStorageDeviceC2EPK11OSMetaClass': constructors[0]
                  '__ZN20IOBlockStorageDevice10gMetaClassE': meta,
                  '__ZTV20IOBlockStorageDevice': table})
 
-object_path = out / (component + '.o')
+object_path = out / 'ShengUfs.o'  # the archive stem the baseline script links
 require(object_path.is_file(), f'Build {component}.o before this binder')
 undefined = subprocess.check_output(['xcrun', 'nm', '-u', '-j', object_path], text=True).split()
 undefined = [name for name in undefined if 'IOBlockStorageDevice' in name]
@@ -198,7 +198,7 @@ assembly = out / 'original-bindings.S'
 assembly.write_text(''.join(f'.globl {name}\n.set {name}, {value:#x}\n' for name, value in sorted(bindings.items())))
 subprocess.run(['xcrun', 'clang', '-target', 'arm64-apple-ios17.0', '-Werror', '-Wno-incompatible-sysroot',
                 '-c', assembly, '-o', out / 'original-bindings.o'], check=True)
-archive = out / ('lib' + component + '.a')
+archive = out / 'libShengUfs.a'
 archive.unlink(missing_ok=True)
 subprocess.run(['xcrun', 'ar', 'rcs', archive, object_path, out / 'original-bindings.o'], check=True)
 (out / 'bindings.json').write_text(json.dumps(dict(

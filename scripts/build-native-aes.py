@@ -13,7 +13,7 @@ import board_sources
 compile_command = runpy.run_path(str(root / 'scripts/build-arm-platform.py'))['compile_command']
 recipe = root / 'build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/iokit/DEVELOPMENT/IOPlatformExpert.cpo.json'
 record = json.loads(recipe.read_text().strip().rstrip(','))
-out = root / 'build/native-aes'
+out = root / 'build/software-aes'
 out.mkdir(parents=True, exist_ok=True)
 obj = out / 'NativeAES.o'
 command = compile_command(record, board_sources.driver('NativeAES') / 'NativeAES.cpp', obj)

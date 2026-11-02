@@ -78,10 +78,17 @@ def main():
     compile_command = runpy.run_path(str(root / 'scripts/build-arm-platform.py'))['compile_command']
     recipe = root / 'build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/iokit/DEVELOPMENT/IOPlatformExpert.cpo.json'
     record = json.loads(recipe.read_text().strip().rstrip(','))
-    output = root / {'NativeUfs': 'build/native-ufs', 'NativeVirtioBlock': 'build/native-virtio-block',
-                     'NativeRamBlock': 'build/native-ram-block'}[args.component]
+    # Format 2: build-xnu-4k-baseline.sh links these under the catalog names
+    # (XNU_NATIVE_UFS -> build/sheng-ufs/libShengUfs.a, the RAM transport ->
+    # build/ram-block/libRamBlock.a, and its bindings audit derives the object
+    # name from the archive stem), so the outputs follow those names.
+    NAME = {'NativeUfs': 'ShengUfs', 'NativeVirtioBlock': 'VirtioMmioBlock',
+            'NativeRamBlock': 'RamBlock'}
+    output = root / {'NativeUfs': 'build/sheng-ufs',
+                     'NativeVirtioBlock': 'build/virtio-mmio-block',
+                     'NativeRamBlock': 'build/ram-block'}[args.component]
     output.mkdir(parents=True, exist_ok=True)
-    obj = output / (args.component + '.o')
+    obj = output / (NAME[args.component] + '.o')
     command = compile_command(record, board_sources.driver(args.component) / (args.component + '.cpp'), obj)
     command += ['-DNATIVE_UFS_SM8750=1', '-DNATIVE_UFS_READ_ONLY=1',
                 '-Wno-unused-function']
@@ -103,7 +110,7 @@ def main():
         raise SystemExit('Root-window build lacks the storage class')
     if args.component != 'NativeUfs':
         # Reuse the original storage imports already qualified and linked by NativeUfs.
-        bindings = json.loads((root / 'build/native-ufs/bindings.json').read_text())['bindings']
+        bindings = json.loads((root / 'build/sheng-ufs/bindings.json').read_text())['bindings']
         imports = subprocess.check_output(['xcrun', 'nm', '-u', '-j', obj], text=True).split()
         if any(name not in bindings for name in imports if 'IOBlockStorageDevice' in name):
             raise SystemExit('Root-binding helper has unqualified original storage imports')
@@ -116,9 +123,14 @@ def main():
             'compiled_object_sha256': hashlib.sha256(obj.read_bytes()).hexdigest(),
             'bindings': {name: bindings[name] for name in imports if 'IOBlockStorageDevice' in name},
         }, indent=2) + '\n')
-    archive = output / ('lib' + args.component + '.a')
+    archive = output / ('lib' + NAME[args.component] + '.a')
     archive.unlink(missing_ok=True)
     subprocess.run(['xcrun', 'ar', 'rcs', archive, obj], check=True)
+    if args.component == 'NativeRamBlock':
+        # build-xnu-4k-baseline.sh links the RAM transport as the loose object
+        # build/ram-block/NativeRamBlock.o (the alias-sharing case), while the
+        # bindings audit hashes RamBlock.o; ship both, byte-identical.
+        (output / 'NativeRamBlock.o').write_bytes(obj.read_bytes())
     print(archive)
 
 

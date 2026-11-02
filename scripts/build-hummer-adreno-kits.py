@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Build build/native-adreno/libNativeAdreno.a for hummer (SM8750, Adreno 830).
+"""Build build/adreno740/libAdreno740.a for hummer (SM8750, Adreno 830).
 
 The engine links exactly one archive for the GPU:
 
-    build/native-adreno/libNativeAdreno.a      (build-xnu-4k-baseline.sh:592/738,
+    build/adreno740/libAdreno740.a             (build-xnu-4k-baseline.sh,
                                                 only when XNU_NATIVE_ADRENO=1)
 
 At this engine revision there is no component system and no
@@ -67,7 +67,7 @@ def device_repo_root():
             return candidate
     return ROOT
 
-OUT = ROOT / 'build/native-adreno'
+OUT = ROOT / 'build/adreno740'
 OUT.mkdir(parents=True, exist_ok=True)
 
 # C compiles replay the bsd build's record; C++ replays IOKit's, the same pair
@@ -121,7 +121,7 @@ INCLUDES = [
     'kits/hummer',
     # package/HummerGpu.cpp includes Sm8750GpuFirmware.h, which this script
     # generates next to the assembly blob it describes.
-    'build/native-adreno',
+    'build/adreno740',
     # package/HummerGpu.cpp lives in kits/hummer but includes the driver's own
     # headers (NativeAdrenoGpuContext.h and friends), which sit in the driver
     # directory: drivers/Adreno740 in a format 2 tree, drivers/NativeAdreno in
@@ -427,7 +427,7 @@ def build():
         objects.append(obj)
     objects.append(firmware)
 
-    archive = OUT / 'libNativeAdreno.a'
+    archive = OUT / 'libAdreno740.a'
     archive.unlink(missing_ok=True)
     run(['xcrun', 'ar', 'rcs', archive] + objects)
 
