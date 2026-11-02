@@ -15,9 +15,10 @@ scripts/build-arm-driver.py, so the whole archive is assembled here:
                                     firmware segment planner
   kits/ArmSmmu4K/*.c                native 4 KiB SMMU tables, streams, live audit
   kits/AdrenoPM4/*.c                PM4 packet encoder
-  kits/hummer/ShengGmu*.c           this board's SM8750 platform layer: GMU load
-  kits/hummer/ShengGpuSmmu*.c       and start, GPU SMMU stream routing, AOP
-  kits/hummer/ShengGmuCommandDb*.c  command-database parser
+  kits/hummer/ShengGpuSmmu*.c       this board's SM8750 GPU SMMU stream routing
+  kits/hummer/Sm8750Gmu*.c          the SM8750 GMU layer: cold firmware start,
+                                    HFI startup, runtime OOB/DCVS, command-db
+  kits/hummer/HummerGpuVotes.c      SM8750 speed-bin OPP policy -> A8XX HFI table
   firmware.S                        the two pinned blobs as strong symbols
 
 NativeAdrenoAccelerator.cpp and NativeAdrenoPublish.cpp are deliberately not
@@ -71,12 +72,23 @@ INCLUDES = [
 # C symbols the archive must define, checked with nm before it is accepted.
 # C++ classes are checked by substring because nm prints mangled names.
 REQUIRED_C = [
+    # The board probe drives the SM8750 GMU layer adopted in v184.
+    'Sm8750GmuColdStart',
+    'Sm8750GmuLoadAndStartHfi',
+    'Sm8750GmuGpuOob',
+    'Sm8750GmuSetPerformance',
+    'Sm8750GmuBindMmio',
+    'Sm8750GmuCommandDbInputs',
+    'HummerGpuBuildStartup',
+    'AdrenoHfiGen8Votes',
+    # The engine's own driver still references this board layer by name
+    # (NativeAdrenoService.cpp). It is not on the probe's path -- see v184 notes.
     'ShengGmuColdStart',
     'ShengGmuLoadAndStartHfi',
     'ShengGmuBindMmio',
+    'ShengGmuCommandDbInputs',
     'ShengGpuSmmuStart',
     'ShengGpuSmmuObserve',
-    'ShengGmuCommandDbInputs',
     'AdrenoFirmwarePlanGmu',
     'AdrenoHfiStartupRun',
     'ArmSmmu4KAttachStreams',
@@ -192,7 +204,8 @@ def sources():
             if path.name.startswith('test_'):
                 continue
             items.append((path, 'c'))
-    for name in ('ShengGmu.c', 'ShengGpuSmmu.c', 'ShengGmuCommandDb.c'):
+    for name in ('ShengGmu.c', 'ShengGpuSmmu.c', 'ShengGmuCommandDb.c',
+                 'Sm8750Gmu.c', 'Sm8750GmuCommandDb.c', 'HummerGpuVotes.c'):
         path = ROOT / 'kits/hummer' / name
         if not path.is_file():
             raise SystemExit('%s missing: package/ did not map to kits/hummer' % path)

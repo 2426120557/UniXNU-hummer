@@ -10,10 +10,21 @@
  *
  * This probe takes the next step: build the GMU's own SMMU context, map its
  * payloads at the addresses a6xx_gmu.c uses, load the pinned gen80000_gmu.bin,
- * release the CM3 and -- since v163 -- talk HFI to the firmware that is now
- * running: the performance table, IFPC off, CORE_FW_START and START, plus a DCVS
- * vote that has been opt-in (hummer-usb-dcvs=1) since v165 hung on it.  It stops
- * once the GX rail's state after that conversation is known.
+ * release the CM3 and then run the full gen8 HFI startup.
+ *
+ * v184 replaces the hand-written message sequence of v163..v169 with the SM8750
+ * GMU layer and the A8XX performance table from the OnePlus 13T port
+ * (IssacL04/UniXNU-Pagani_SM8750), which drives the same SM8750/Adreno 830 to a
+ * working Metal desktop.  It sits on top of v171..v183 (the USB/SMMU
+ * diagnostics and the panic-mode report), which are unchanged below.  The hand-written version could only send a table whose
+ * votes were all zero: the firmware acknowledged every message, left GX powered
+ * off (PWR_CLK_STATUS stayed 3) and then rejected DCVS with 0x93.  GX is powered
+ * from votes, so Sm8750GmuColdStart now feeds it the command-db ARC/BXM votes of
+ * the real OPP table -- HummerGpuVotes plus AdrenoHfiGen8Votes (gen8 moved the
+ * performance table to message 15 and added a dependent vote per level).
+ *
+ * The probe still stops after the GMU conversation and panics with the whole
+ * state, so one boot shows whether GX came up.  CP/SQE and ZAP are the next step.
  *
  * Why it runs from native_legacy_display_late_probe() instead of the bsd_init
  * hook: the context bring-up allocates real memory through
@@ -32,8 +43,10 @@
 #include <pexpert/pexpert.h>
 #include <arm/machine_routines.h>
 
-#include "ShengGmu.h"
-#include "ShengGmuSource.h"
+#include "Sm8750Gmu.h"
+#include "Sm8750GmuSource.h"
+#include "Sm8750GmuCommandDb.h"
+#include "HummerGpuVotes.h"
 #include "ShengGpuSmmuSource.h"
 #include "NativeAdrenoGmuContext.h"
 #include "NativeAdrenoKernelTime.h"
@@ -75,6 +88,22 @@ extern "C" const uint64_t native_adreno_firmware_image_size;
 
 #define HU_SMMU_BASE  0x3da0000ULL
 #define HU_SMMU_BYTES 0x40000ULL
+/* CX_MISC is not one of the GMU's three kit windows; it is mapped here only for
+ * the GX-rail observation (0x83*4 holds the GX power/clamp bits). */
+#define HU_CX_MISC_BASE 0x3d9e000ULL
+#define HU_CX_MISC_SIZE 0x2000ULL
+/* GPUCC, SMEM and QFPROM windows the vote path needs.  QFPROM 0x138 carries the
+ * 9-bit speed bin that selects an OPP table; SMEM is not read in this version. */
+#define HU_QFPROM_BASE 0x221c8000ULL
+#define HU_QFPROM_SIZE 0x1000ULL
+#define HU_QFPROM_SPEED_BIN 0x138u
+#define HU_CMDDb_BASE 0x81c60000ULL
+#define HU_CMDDb_SIZE 0x20000ULL
+/* GMU_PWR_CLK_STATUS: bit0 GX power, bit1 GX clock.  3 = both still off. */
+#define HU_REG_GMU_PWR_CLK_STATUS 0x1f7e8u
+/* DTCM's version word is the last word; the HFI wire version follows it by four
+ * dwords (annibale's +16 is bytes).  Only used to report, not to decide. */
+#define HU_REG_GMU_HFI_VERSION (REG_GMU_CM3_DTCM_START + 0xff8u + 4u)
 /* The context bank's fault page, relative to the bank's base: FSR, FAR (low),
  * FSYNR0. FSR_FAULT clears every bit by writing ones. */
 #define HU_CB_FSR     0x58u
@@ -87,7 +116,7 @@ extern "C" const uint64_t native_adreno_firmware_image_size;
 
 /* The GMU device keeps every resource it took, and allows one attempt per object,
  * so it has to outlive this call. */
-static ShengGmuDevice hummer_gmu_device;
+static Sm8750GmuDevice hummer_gmu_device;
 
 static int gmu_sha256(void *, const void *bytes, size_t length, uint8_t digest[32])
 {
@@ -236,40 +265,67 @@ static uint32_t hu_branch_on(vm_offset_t gpucc, unsigned offset, uint32_t *chang
 	return value;
 }
 
+/* The A830 power sequence opens a set of GPUCC gates between "CX and PLL0 are
+ * up" and "the GMU may start": six critical branches that are plain enables, the
+ * CX NoC branch, and six clock branches that must also lose CLK_OFF.
+ * Sm8750GpuPowerOn does exactly this (stage 5/6 of the OnePlus 13T port), and
+ * their Run 75 stopped at GPUCC +0x9010 before that was corrected, so a gate
+ * left closed here is a plausible reason for GX never to come up.  cx_power_up()
+ * and PLL0 are already handled above; this only closes the remaining gates and
+ * reports which ones it had to touch.  RCGR dividers are deliberately not
+ * reprogrammed: the boot loader already clocks the GMU well enough for the
+ * firmware to start (v160). */
+static uint32_t hu_gpu_clock_gates(vm_offset_t gpucc)
+{
+	static const uint32_t critical[] = { 0x93a4, 0x9008, 0x9064, 0x93a8, 0x9004, 0x90cc };
+	uint32_t changed = 0;
+	for (unsigned i = 0; i < sizeof(critical) / sizeof(critical[0]); ++i) {
+		const uint32_t before = HU_RD(gpucc, critical[i]);
+		if (!(before & HU_CBCR_ENABLE)) {
+			HU_WR(gpucc, critical[i], before | HU_CBCR_ENABLE);
+			changed |= 1u << i;
+		}
+	}
+	IODelay(10);
+	(void)hu_branch_on(gpucc, 0x90bcu, nullptr);
+	static const uint32_t clocks[] = { 0x9010, 0x90d4, 0x90e4, 0x93e8, 0x90e8, 0x7000 };
+	for (unsigned i = 0; i < sizeof(clocks) / sizeof(clocks[0]); ++i) {
+		uint32_t enabled = 0;
+		const uint32_t before = HU_RD(gpucc, clocks[i]);
+		(void)hu_branch_on(gpucc, clocks[i], &enabled);
+		if (enabled || !(before & HU_CBCR_ENABLE))
+			changed |= 1u << (8 + i);
+	}
+	return changed;
+}
+
 /* Which payloads the CPU sees through their own (cacheable) kernel mapping. The
  * io submap refused the 16 MiB icache on v157 (kmem_alloc failed with KERN_NO_SPACE
  * inside ml_io_map), so that one falls back to NativeAdrenoGmuPayload.cpu and has to
  * be flushed before the CM3 is released: the GMU reads the buffers through its SMMU
  * as Normal non-cacheable. */
 static uintptr_t gmu_cacheable_view[5];
+static size_t gmu_cacheable_bytes[5];
 
-/* Clean+invalidate the lines covering a range, then wait for the maintenance to
- * complete -- the order the A8XX reference uses before the other side reads a
- * buffer this kernel just built. The memory clobber stops the compiler from sinking
- * a store past the instruction that cleans its line. Only ranges reached through a
- * cacheable mapping are touched: cache maintenance on the uncached aliases would be
- * a no-op at best. */
-static int gmu_flush(void *, const void *bytes, size_t length)
+/* Clean+invalidate every cacheable payload view, then wait for the maintenance to
+ * complete.  This is the kit's `io.barrier` hook: Sm8750Gmu writes the icache,
+ * calls barrier(), and only then releases the CM3, so cleaning here is what makes
+ * the GMU see the words the CPU just stored.  Only ranges reached through a
+ * cacheable mapping are touched -- cache maintenance on an uncached alias is a
+ * no-op at best.  The memory clobber stops the compiler sinking a store past the
+ * instruction that cleans its line. */
+static int hu_gmu_barrier(void *)
 {
-	const uintptr_t at = reinterpret_cast<uintptr_t>(bytes);
-	int cacheable = 0;
-	for (unsigned i = 0; i < 5; ++i)
-		if (at == gmu_cacheable_view[i])
-			cacheable = 1;
-	if (!cacheable || !length)
-		return 0;
-	uintptr_t line = at & ~static_cast<uintptr_t>(63);
-	const uintptr_t end = (at + length + 63) & ~static_cast<uintptr_t>(63);
-	for (; line < end; line += 64)
-		__asm__ volatile("dc civac, %0" : : "r"(line) : "memory");
+	for (unsigned i = 0; i < 5; ++i) {
+		if (!gmu_cacheable_view[i] || !gmu_cacheable_bytes[i])
+			continue;
+		const uintptr_t start = gmu_cacheable_view[i];
+		const uintptr_t end =
+		    (start + gmu_cacheable_bytes[i] + 63) & ~static_cast<uintptr_t>(63);
+		for (uintptr_t line = start; line < end; line += 64)
+			__asm__ volatile("dc civac, %0" : : "r"(line) : "memory");
+	}
 	__asm__ volatile("dsb sy" : : : "memory");
-	return 0;
-}
-
-/* One poll of the HFI response queue: 100 us, as the annibale port does. */
-static int hfi_wait_once(void *)
-{
-	IODelay(100);
 	return 0;
 }
 
@@ -299,36 +355,40 @@ extern "C" void hummer_adreno_bringup_probe(void)
 	boot_progress_stage("adreno-gmu: clocks");
 
 	boot_progress_stage("adreno-gmu: mmio");
-	vm_offset_t gmu = ml_io_map(sheng_gmu_window_physical[ShengGmuCore],
-	                            sheng_gmu_window_bytes[ShengGmuCore]);
-	vm_offset_t rscc = ml_io_map(sheng_gmu_window_physical[ShengGmuRscc],
-	                             sheng_gmu_window_bytes[ShengGmuRscc]);
-	vm_offset_t gpu = ml_io_map(sheng_gmu_window_physical[ShengGmuGpu],
-	                            sheng_gmu_window_bytes[ShengGmuGpu]);
-	vm_offset_t cx_misc = ml_io_map(sheng_gmu_window_physical[ShengGmuCxMisc],
-	                                sheng_gmu_window_bytes[ShengGmuCxMisc]);
+	vm_offset_t gmu = ml_io_map(sm8750_gmu_window_physical[Sm8750GmuCore],
+	                            sm8750_gmu_window_bytes[Sm8750GmuCore]);
+	vm_offset_t rscc = ml_io_map(sm8750_gmu_window_physical[Sm8750GmuRscc],
+	                             sm8750_gmu_window_bytes[Sm8750GmuRscc]);
+	vm_offset_t gpu = ml_io_map(sm8750_gmu_window_physical[Sm8750GmuGpu],
+	                            sm8750_gmu_window_bytes[Sm8750GmuGpu]);
+	vm_offset_t cx_misc = ml_io_map(HU_CX_MISC_BASE, HU_CX_MISC_SIZE);
 	vm_offset_t smmu = ml_io_map(HU_SMMU_BASE, HU_SMMU_BYTES);
 	if (!gmu || !rscc || !gpu || !cx_misc || !smmu)
 		panic("hummer gmu: window unmappable gmu=%lx rscc=%lx gpu=%lx cxmisc=%lx smmu=%lx",
 		    (unsigned long)gmu, (unsigned long)rscc, (unsigned long)gpu,
 		    (unsigned long)cx_misc, (unsigned long)smmu);
 
-	ShengGmuMmio mmio{};
+	/* Sm8750GmuBindMmio validates physical base and size against its own pinned
+	 * DT table, so the windows are handed over unchanged; CX_MISC stays outside
+	 * the kit (it is observation only). */
+	Sm8750GmuMmio mmio{};
 	struct { unsigned window; vm_offset_t cpu; } bound[] = {
-		{ ShengGmuCore, gmu }, { ShengGmuRscc, rscc },
-		{ ShengGmuGpu, gpu }, { ShengGmuCxMisc, cx_misc },
+		{ Sm8750GmuCore, gmu }, { Sm8750GmuRscc, rscc },
+		{ Sm8750GmuGpu, gpu },
 	};
 	for (unsigned i = 0; i < sizeof(bound) / sizeof(bound[0]); ++i) {
-		ShengGmuMmioWindow &w = mmio.windows[bound[i].window];
+		Sm8750GmuMmioWindow &w = mmio.windows[bound[i].window];
 		w.cpu = reinterpret_cast<volatile unsigned char *>(bound[i].cpu);
-		w.physical = sheng_gmu_window_physical[bound[i].window];
-		w.bytes = sheng_gmu_window_bytes[bound[i].window];
+		w.physical = sm8750_gmu_window_physical[bound[i].window];
+		w.bytes = sm8750_gmu_window_bytes[bound[i].window];
 	}
-	/* ShengGmuPdc stays absent on SM8750 and ShengGmuBindMmio requires exactly that. */
 
-	ShengGmuIo io{};
-	if (ShengGmuBindMmio(&mmio, &io) != ShengGmuSuccess)
-		panic("hummer gmu: ShengGmuBindMmio refused the DT windows");
+	Sm8750GmuIo io{};
+	if (Sm8750GmuBindMmio(&mmio, &io) != Sm8750GmuSuccess)
+		panic("hummer gmu: Sm8750GmuBindMmio refused the DT windows");
+	/* Replace the kit's dsb-only barrier with one that also cleans the cacheable
+	 * payload views: Sm8750Gmu releases the CM3 right after a barrier. */
+	io.barrier = hu_gmu_barrier;
 
 	/* No default slot: v156 proved slot 2 carries a boot-loader route, so "pick
 	 * the first slot that is genuinely free" has to be the default and an explicit
@@ -431,13 +491,24 @@ extern "C" void hummer_adreno_bringup_probe(void)
 		(void)HU_RD(smmu, hu_cb_offset + HU_CB_FSR);
 	}
 
-	ShengGmuConfig config{};
-	config.chip_id = SHENG_GMU_CHIP_ID;
+	/* --- v184: the SM8750 GMU layer and a real OPP table. ---------------------
+	 * v163..v169 hand-built the HFI messages.  Every one of 15/11/14/10 was
+	 * acknowledged, yet GMU_PWR_CLK_STATUS stayed 3 (GX power and clock off) and
+	 * DCVS (30) came back 0x93: the performance table those messages carried had
+	 * vote=0 and dep=0 on every level, because there was no command-db reader to
+	 * supply them.  GX is powered from the votes in that table, so this version
+	 * derives them from the real OPP list instead of guessing.
+	 *
+	 * The layer, the A8XX table encoder and the OPP policy are the ones the
+	 * OnePlus 13T port uses (IssacL04/UniXNU-Pagani_SM8750) -- same SM8750, same
+	 * Adreno 830, and it reaches a Metal desktop there. */
+	Sm8750GmuConfig config{};
+	config.chip_id = SM8750_GMU_CHIP_ID;
 	config.firmware = native_adreno_firmware_image;
 	config.firmware_bytes = static_cast<size_t>(native_adreno_firmware_image_size);
 	config.poll_budget = 1000;
-	ShengGmuMemory *memory[5] = { &config.icache, &config.dummy, &config.debug,
-	                              &config.log, &config.hfi };
+	Sm8750GmuMemory *memory[5] = { &config.icache, &config.dummy, &config.debug,
+	                               &config.log, &config.hfi };
 	boot_progress_stage("adreno-gmu: payload views");
 	/* ml_io_map() does not return 0 when the io submap cannot serve a request: it
 	 * reaches kmem_alloc(), which panic()s outright ("kmem_alloc(...): failed with
@@ -445,7 +516,7 @@ extern "C" void hummer_adreno_bringup_probe(void)
 	 * any fallback could run, so the request is never made at all. Only sizes this
 	 * board has already mapped are handed to it (the GPU windows above are up to
 	 * 0x68000); everything larger uses the payload's own kernel mapping, which
-	 * ShengGmu cleans before the CM3 is released. */
+	 * hu_gmu_barrier() cleans before the CM3 is released. */
 	static const uint64_t kUncachedCeiling = 0x100000;
 	unsigned uncached = 0, cacheable = 0;
 	for (unsigned i = 0; i < 5; ++i) {
@@ -458,6 +529,7 @@ extern "C" void hummer_adreno_bringup_probe(void)
 		} else if (payloads[i].cpu) {
 			view = static_cast<vm_offset_t>(payloads[i].cpu);
 			gmu_cacheable_view[i] = static_cast<uintptr_t>(view);
+			gmu_cacheable_bytes[i] = static_cast<size_t>(payloads[i].bytes);
 			++cacheable;
 		}
 		if (!view)
@@ -470,129 +542,111 @@ extern "C" void hummer_adreno_bringup_probe(void)
 		memory[i]->iova = payloads[i].iova;
 	}
 
-	ShengGmuServices services{};
+	Sm8750GmuServices services{};
+	services.sha256 = gmu_sha256;
 	services.now_us = NativeAdrenoKernelTime::now_us;
 	services.wait_us = NativeAdrenoKernelTime::wait_us;
-	services.sha256 = gmu_sha256;
-	services.flush = cacheable ? gmu_flush : nullptr;
 
-	hummer_gmu_device = ShengGmuDevice{};
+	hummer_gmu_device = Sm8750GmuDevice{};
 	hummer_gmu_device.io = io;
 	hummer_gmu_device.services = services;
 
-	boot_progress_stage("adreno-gmu: load fw");
-	ShengGmuResult result{};
-	const ShengGmuStatus status = ShengGmuLoadAndStartHfi(&hummer_gmu_device, &config, &result);
+	/* --- votes ---------------------------------------------------------------
+	 * The command-db snapshot is a fixed 0x20000 window at 0x81c60000; the parser
+	 * refuses anything smaller because every offset in the header is relative to
+	 * the end of that window.  QFPROM 0x138 holds the 9-bit speed bin that picks
+	 * the OPP profile.  If that word is not one of the bins the tables were
+	 * generated from, each known bin is tried in turn and the substitution is
+	 * printed: the top OPPs differ per bin, but every profile starts at 160 MHz
+	 * and this bring-up asks for 525 MHz at most. */
+	boot_progress_stage("adreno-gmu: votes");
+	vm_offset_t cmddb = ml_io_map(HU_CMDDb_BASE, HU_CMDDb_SIZE);
+	vm_offset_t qfprom = ml_io_map(HU_QFPROM_BASE, HU_QFPROM_SIZE);
+	if (!cmddb || !qfprom)
+		panic("hummer gmu: vote windows unmappable cmddb=%lx qfprom=%lx",
+		    (unsigned long)cmddb, (unsigned long)qfprom);
 
-	/* The firmware runs and its queues are up, so read what it has to say before
-	 * anything is asked of it. GENERAL_9 is how far into the log it has written,
-	 * DTCM's version word 16 dwords on is the HFI wire version (gen8 moved the
-	 * performance table to message 15 in 2.6.1), and PWR_CLK_STATUS says whether
-	 * GX is still off -- it is, until the firmware's own startup turns it on. */
-	uint32_t hfi_version = 0, log_written = 0, pwr_clk = 0, hfi_ctrl = 0;
-	uint32_t log_words[4] = {};
+	Sm8750GmuVoteInputs votes{};
+	const Sm8750GmuDbStatus db_status = Sm8750GmuCommandDbInputs(
+	    reinterpret_cast<const uint8_t *>(cmddb), HU_CMDDb_SIZE, &votes);
+	const uint32_t speed_raw = HU_RD(qfprom, HU_QFPROM_SPEED_BIN) & 0x1ffu;
+	uint32_t speed_used = speed_raw, speed_fallback = 0;
+	AdrenoHfiStartupConfig startup{};
+	unsigned initial = 0, bandwidth = 0;
+	AdrenoHfiStartupStatus vote_status = AdrenoHfiStartupInvalid;
+	if (db_status == Sm8750GmuDbSuccess) {
+		vote_status = HummerGpuBuildStartup(&votes, speed_raw, 0, &startup,
+		                                    &initial, &bandwidth);
+		static const uint32_t known_bins[] = { 190, 221, 232, 242 };
+		for (unsigned i = 0;
+		     i < sizeof(known_bins) / sizeof(known_bins[0]) &&
+		     vote_status != AdrenoHfiStartupSuccess; ++i) {
+			vote_status = HummerGpuBuildStartup(&votes, known_bins[i], 0, &startup,
+			                                    &initial, &bandwidth);
+			if (vote_status == AdrenoHfiStartupSuccess) {
+				speed_used = known_bins[i];
+				speed_fallback = 1;
+			}
+		}
+	}
+	if (db_status != Sm8750GmuDbSuccess || vote_status != AdrenoHfiStartupSuccess)
+		panic("hummer gmu: votes refused db=%u bin=%u(%u) status=%u "
+		      "gfx=%u mx=%u cx=%u gmxc=%u gbx=%u\n"
+		      "sh0=%x mc0=%x acv=%x cn0=%x cxad=%x mxad=%x",
+		    db_status, speed_raw, speed_used, vote_status,
+		    (unsigned)votes.gfx.bytes, (unsigned)votes.mx.bytes,
+		    (unsigned)votes.cx.bytes, (unsigned)votes.gmxc.bytes,
+		    (unsigned)votes.gbx.bytes,
+		    votes.sh0.address, votes.mc0.address, votes.acv.address,
+		    votes.cn0_address, votes.cx_address, votes.mx_address);
+
+	const uint32_t pwr_before = HU_RD(gmu, (HU_REG_GMU_PWR_CLK_STATUS << 2) -
+	                                       SM8750_GMU_CORE_GPU_DELTA);
+
+	/* Close the remaining GPUCC gates before anything asks GX to power up. */
+	boot_progress_stage("adreno-gmu: gates");
+	const uint32_t gates_changed = hu_gpu_clock_gates(gpucc);
+
+	/* --- cold start: firmware + the whole gen8 HFI startup -------------------
+	 * Sm8750GmuColdStart validates the pinned image, writes and reads back all
+	 * 15 records, releases the CM3 and then runs AdrenoHfiStartupRun, which sends
+	 * the A8XX performance table (message 15), the bandwidth table, CORE_FW_START
+	 * and START, waiting for a real ACK on each.  A protocol failure resets and
+	 * poisons the device; every allocation is retained either way. */
+	static const Sm8750GmuStartupLimits limits = { 1000, 100, 100000, 2000000 };
+	static Sm8750GmuStartupResult cold{};
+	boot_progress_stage("adreno-gmu: cold start");
+	const Sm8750GmuStatus cold_status = Sm8750GmuColdStart(
+	    &hummer_gmu_device, &config, &startup, &limits, &cold);
+
+	/* GX comes up while the firmware places its own requests, so the vote is only
+	 * sent when startup succeeded and then given its own, longer poll window. */
+	static Sm8750GmuResult runtime{};
+	Sm8750GmuStatus dcvs_status = Sm8750GmuStateMismatch;
+	Sm8750GmuStatus oob_status = Sm8750GmuStateMismatch;
+	if (cold_status == Sm8750GmuSuccess) {
+		boot_progress_stage("adreno-gmu: dcvs");
+		dcvs_status = Sm8750GmuSetPerformance(&hummer_gmu_device, initial,
+		                                      bandwidth, &runtime);
+		boot_progress_stage("adreno-gmu: oob");
+		oob_status = Sm8750GmuGpuOob(&hummer_gmu_device, 1, &runtime);
+	}
+	boot_progress_stage("adreno-gmu: read back");
+
 	auto gmu_word = [gmu](uint32_t word) {
-		return HU_RD(gmu, (word << 2) - SHENG_GMU_CORE_GPU_DELTA);
+		return HU_RD(gmu, (word << 2) - SM8750_GMU_CORE_GPU_DELTA);
 	};
-	hfi_version = gmu_word(REG_GMU_HFI_VERSION);
-	log_written = gmu_word(REG_GMU_GENERAL_9) & 0xffffu;
-	pwr_clk = gmu_word(REG_GMU_PWR_CLK_STATUS);
-	hfi_ctrl = gmu_word(REG_GMU_HFI_CTRL_STATUS);
+	const uint32_t pwr_after = gmu_word(HU_REG_GMU_PWR_CLK_STATUS);
+	const uint32_t gx_misc = HU_RD(cx_misc, 0x83u * 4u);
+	const uint32_t hfi_version = gmu_word(HU_REG_GMU_HFI_VERSION);
+	const uint32_t hfi_ctrl = gmu_word(REG_GMU_HFI_CTRL_STATUS);
+	const uint32_t log_written = gmu_word(REG_GMU_GENERAL_9) & 0xffffu;
+	uint32_t log_words[2] = {};
 	const volatile uint32_t *log =
 	    reinterpret_cast<const volatile uint32_t *>(payloads[3].cpu);
-	if (log) {
-		const unsigned upto = log_written ? 4u : 0u;
-		for (unsigned i = 0; i < upto; ++i)
+	if (log && log_written)
+		for (unsigned i = 0; i < 2; ++i)
 			log_words[i] = log[i];
-	}
-	uint32_t hfi_table[3] = {};
-	if (hummer_gmu_device.hfi.shared)
-		for (unsigned i = 0; i < 3; ++i)
-			hfi_table[i] = hummer_gmu_device.hfi.shared[i];
-
-	/* --- v165: make the talk visible, and put the vote behind a switch. -------
-	 * v164 hung: the screen stopped at "adreno-gmu: load fw" and never reached the
-	 * panic that ends this probe, so the wedge is somewhere after that line --
-	 * where v164 printed nothing at all. v164 added three things to v163 and only
-	 * one of them can stall a bus: message 30 (DCVS). A payload the firmware does
-	 * not like can fault the CM3, and every later GMU register read then waits
-	 * forever; the per-step PWR_CLK_STATUS/GMU2HOST reads v164 added are exactly
-	 * such accesses. So:
-	 *   - DCVS becomes opt-in (hummer-usb-dcvs=1). The default boot sends only the
-	 *     four messages v163 proved and prints what it learned; steps[4].status
-	 *     stays 99 ("not attempted") so the report cannot be misread as success.
-	 *   - a boot_progress_stage() names each step before it runs, so a hang leaves
-	 *     its own name on the screen instead of the generic "load fw".
-	 *   - the per-step reads stay: they are the observation, and without DCVS they
-	 *     only touch the state v163 already read safely. */
-	struct hu_hfi_step {
-		unsigned id;
-		const uint32_t *payload;
-		size_t words;
-		AdrenoHfiStatus status;
-		uint32_t error;
-		size_t ack_words;
-		uint32_t ack0;
-		uint32_t pwr;
-		uint32_t g2h;
-	};
-	uint32_t perf[5 + 2 * 3 + 2 + 3 * 2];
-	size_t np = 0;
-	perf[np++] = 0;                 /* the table's version */
-	perf[np++] = 1;                 /* HFI_TABLE_GPU_PERF */
-	perf[np++] = 2;                 /* two 3D-core speeds: off, then 160 MHz */
-	perf[np++] = 3;                 /* three words each: vote, dependency, kHz */
-	perf[np++] = 0; perf[np++] = 0; perf[np++] = 0;
-	perf[np++] = 0; perf[np++] = 0; perf[np++] = 160000;
-	perf[np++] = 3;                 /* the GMU's own three speeds */
-	perf[np++] = 2;                 /* two words each: vote, kHz */
-	perf[np++] = 0; perf[np++] = 0;
-	perf[np++] = 0; perf[np++] = 500000;
-	perf[np++] = 0; perf[np++] = 650000;
-	static const uint32_t ifpc[3] = { 9, 0, 0 };
-	static uint32_t handle = 0;
-	static uint32_t dcvs[1] = { 1 };   /* level 1: the 160 MHz entry above, by index */
-	static uint32_t ack[16];
-	hu_hfi_step steps[5] = {
-		{ 15, perf, np, AdrenoHfiSuccess, 0, 0, 0, 0, 0 },
-		{ 11, ifpc, 3, AdrenoHfiSuccess, 0, 0, 0, 0, 0 },
-		{ 14, &handle, 1, AdrenoHfiSuccess, 0, 0, 0, 0, 0 },
-		{ 10, perf, 0, AdrenoHfiSuccess, 0, 0, 0, 0, 0 },
-		{ 30, dcvs, 1, (AdrenoHfiStatus)99, 0, 0, 0, 0, 0 },   /* 99 = not attempted */
-	};
-	static const char *const step_stage[5] = {
-		"adreno-gmu: hfi 15", "adreno-gmu: hfi 11", "adreno-gmu: hfi 14",
-		"adreno-gmu: hfi 10", "adreno-gmu: hfi 30",
-	};
-	uint32_t dcvs_enabled = 0;
-	(void)PE_parse_boot_argn("hummer-usb-dcvs", &dcvs_enabled, sizeof(dcvs_enabled));
-	const unsigned step_count = dcvs_enabled ? 5u : 4u;
-	const uint32_t pwr_before = pwr_clk;
-	const uint32_t g2h_before = gmu_word(REG_GMU_GMU2HOST_INTR_INFO);
-	for (unsigned i = 0; i < step_count; ++i) {
-		hu_hfi_step &s = steps[i];
-		boot_progress_stage(step_stage[i]);
-		for (unsigned k = 0; k < 16; ++k)
-			ack[k] = 0;         /* a failed poll leaves the buffer untouched */
-		s.status = AdrenoHfiExchange(&hummer_gmu_device.hfi, s.id, s.payload, s.words,
-		    (s.id == 10 || s.id == 30) ? 50000u : 10000u, hfi_wait_once, ack, 16,
-		    &s.ack_words, &s.error);
-		if (s.ack_words > 0)
-			s.ack0 = ack[0];
-		s.pwr = gmu_word(REG_GMU_PWR_CLK_STATUS);
-		s.g2h = gmu_word(REG_GMU_GMU2HOST_INTR_INFO);
-	}
-	boot_progress_stage("adreno-gmu: hfi done");
-	if (dcvs_enabled) {
-		/* GX will not appear inside a 10 ms poll budget even when the vote is
-		 * accepted: the firmware has to place its own requests first. */
-		boot_progress_stage("adreno-gmu: hfi settle");
-		for (unsigned i = 0; i < 10; ++i)
-			IODelay(100000);
-	}
-	boot_progress_stage("adreno-gmu: hfi read");
-	const uint32_t pwr_after = gmu_word(REG_GMU_PWR_CLK_STATUS);
-	const uint32_t gmu2host = gmu_word(REG_GMU_GMU2HOST_INTR_INFO);
 
 	if (hu_cb_offset) {
 		hu_cb_sctlr = HU_RD(smmu, hu_cb_offset);
@@ -645,83 +699,84 @@ extern "C" void hummer_adreno_bringup_probe(void)
 
 	/* v179: kprintf routes through _doprnt_log, whose encoder asserts that a
 	 * single literal argument fits in a command (arg_size <= UINT8_MAX). The full
-	 * report above is ~800 bytes, so printing it in one call panics inside
+	 * report below is ~800 bytes, so printing it in one call panics inside
 	 * libkern/os/log_encode.c. Each line below is well under that limit. */
 	uint32_t want_panic = 0;
 	(void)PE_parse_boot_argn("hummer-adreno-panic", &want_panic, sizeof(want_panic));
 
 	if (want_panic)
-		panic("hummer gmu: status=%u phase=%u fw=%08x hfi=%08x fwrdy=%u hfirdy=%u "
-	      "hash=%u reset=%u\n"
-	      "poll=%u ao=%08x cm3=%08x dtcm=%08x aod=%u uc=%u cc=%u\n"
-	      "cb fsr=%08x far=%08x syn=%08x sctlr=%08x off=%x\n"
-	      "clk cxo=%08x/%08x gmu=%08x/%08x ahb=%08x noc=%08x\n"
-	      "ctx bank=%u asid=%u slot=%u sid=%u spans=%u ttbr0=%llx\n"
-	      "hfi ver=%08x q=%08x %08x %08x pwr=%08x ctrl=%08x\n"
-	      "log=%u %08x %08x %08x %08x\n"
-	      "hfi2 15=%d/%x 11=%d/%x 14=%d/%x 10=%d/%x 30=%d/%x\n"
-	      "hfi3 n=%u,%u,%u,%u,%u ack=%08x,%08x,%08x,%08x,%08x\n"
-	      "hfi4 pwr=%08x,%08x,%08x,%08x,%08x,%08x\n"
-	      "hfi5 g2h=%08x,%08x,%08x,%08x,%08x,%08x\n"
-	      "hfi6 skip=%u %08x/%08x/%x fin=%08x/%08x\n"
-	      "usb arg=%u p0=%u ri=%d ph=%u er=%u qr=%u\n"
-	      "usb2 dr=%u ds=%u bk=%u ta=%x tb=%x ev=%x\n"
-	      "smmu id0=%08x id1=%08x id2=%08x scr0=%08x sacr=%08x\n"
-	      "smmu2 str=%u bk=%u pg=%u cr0b0=%u tag=%s\n"
-	      "iou: %llx %llx %llx %llx %llx",
-	    status, result.phase, result.firmware_init_result, result.hfi_status,
-	    result.firmware_ready_observed, result.hfi_ready_observed,
-	    result.complete_hash_verified, result.reset_verified,
-	    result.poll_reads, result.ao_fault_status, result.cm3_fault_status,
-	    result.dtcm_version, result.ao_delta, uncached, cacheable,
-	    hu_cb_fsr, hu_cb_far, hu_cb_syn, hu_cb_sctlr, hu_cb_offset,
-	    hu_cxo_before, hu_cxo_after, hu_gmuclk_before, hu_gmuclk_after,
-	    hu_ahb_after, hu_memnoc_after,
-	    bank, asid, slot, sid, report.spans,
-	    (unsigned long long)report.ttbr0,
-	    hfi_version, hfi_table[0], hfi_table[1], hfi_table[2], pwr_clk, hfi_ctrl,
-	    log_written, log_words[0], log_words[1], log_words[2], log_words[3],
-	    steps[0].status, steps[0].error, steps[1].status, steps[1].error,
-	    steps[2].status, steps[2].error, steps[3].status, steps[3].error,
-	    steps[4].status, steps[4].error,
-	    (unsigned)steps[0].ack_words, (unsigned)steps[1].ack_words,
-	    (unsigned)steps[2].ack_words, (unsigned)steps[3].ack_words,
-	    (unsigned)steps[4].ack_words,
-	    steps[0].ack0, steps[1].ack0, steps[2].ack0, steps[3].ack0, steps[4].ack0,
-	    pwr_before, steps[0].pwr, steps[1].pwr, steps[2].pwr, steps[3].pwr,
-	    steps[4].pwr,
-	    g2h_before, steps[0].g2h, steps[1].g2h, steps[2].g2h, steps[3].g2h,
-	    steps[4].g2h,
-	    hummer_gmu_device.hfi.skipped, hummer_gmu_device.hfi.skipped_header,
-	    hummer_gmu_device.hfi.skipped_ret, hummer_gmu_device.hfi.skipped_code,
-	    pwr_after, gmu2host,
-	    usb_arg, usb_phase0, usb_retry, usb.phase, usb.error, usb.qcom_result,
-	    usb.domain_result, usb.domain_stage, usb.domain_bank,
-	    usb.trace_a, usb.trace_b, usb.last_poll_events,
-	    sid0, sid1, sid2, sscr0, ssacr,
-	    sstreams, sbanks, spages, sscr0 & 1u, "v173-256",
-	    (unsigned long long)payloads[0].iova, (unsigned long long)payloads[1].iova,
-	    (unsigned long long)payloads[2].iova, (unsigned long long)payloads[3].iova,
-	    (unsigned long long)payloads[4].iova);
+		panic("hummer gmu: cold=%u proto=%u stage=%u xport=%u fwerr=%08x cmds=%u polls=%u\n"
+		      "load phase=%u fw=%08x hfi=%08x hash=%u reset=%u ao=%08x cm3=%08x uc=%u cc=%u\n"
+		      "dcvs=%u oob=%u pwr=%08x->%08x gx=%08x hfiver=%08x ctrl=%08x\n"
+		      "votes db=%u bin=%u(%u,%u) gpu=%u gmu=%u bw=%u cnoc=%u ddr=%u\n"
+		      "perf init=%u mhz=%u v0=%08x vi=%08x di=%08x\n"
+		      "cb fsr=%08x far=%08x syn=%08x sctlr=%08x off=%x\n"
+		      "clk cxo=%08x/%08x gmu=%08x/%08x ahb=%08x noc=%08x gates=%02x\n"
+		      "ctx bank=%u asid=%u slot=%u sid=%u spans=%u ttbr0=%llx\n"
+		      "log=%u %08x %08x\n"
+		      "usb arg=%u p0=%u ri=%d ph=%u er=%u qr=%u\n"
+		      "usb2 dr=%u ds=%u bk=%u ta=%x tb=%x ev=%x\n"
+		      "smmu id0=%08x id1=%08x id2=%08x scr0=%08x sacr=%08x\n"
+		      "smmu2 str=%u bk=%u pg=%u cr0b0=%u tag=%s\n"
+		      "iou: %llx %llx %llx %llx %llx",
+		    (unsigned)cold_status, (unsigned)cold.protocol_status,
+		    (unsigned)cold.protocol.stage, (unsigned)cold.protocol.transport_status,
+		    cold.protocol.firmware_error, cold.protocol.published_commands,
+		    cold.protocol.poll_reads,
+		    cold.load.phase, cold.load.firmware_init_result, cold.load.hfi_status,
+		    cold.load.complete_hash_verified, cold.load.reset_verified,
+		    cold.load.ao_fault_status, cold.load.cm3_fault_status, uncached, cacheable,
+		    (unsigned)dcvs_status, (unsigned)oob_status, pwr_before, pwr_after, gx_misc,
+		    hfi_version, hfi_ctrl,
+		    (unsigned)db_status, speed_raw, speed_used, speed_fallback,
+		    startup.gpu_count, startup.gmu_count, startup.bandwidth_count,
+		    startup.cnoc_count, startup.ddr_count,
+		    initial, (unsigned)(startup.gpu[initial].hz / 1000000u),
+		    startup.gpu[0].vote, startup.gpu[initial].vote,
+		    startup.gpu_dependency_votes[initial],
+		    hu_cb_fsr, hu_cb_far, hu_cb_syn, hu_cb_sctlr, hu_cb_offset,
+		    hu_cxo_before, hu_cxo_after, hu_gmuclk_before, hu_gmuclk_after,
+		    hu_ahb_after, hu_memnoc_after, gates_changed,
+		    bank, asid, slot, sid, report.spans, (unsigned long long)report.ttbr0,
+		    log_written, log_words[0], log_words[1],
+		    usb_arg, usb_phase0, usb_retry, usb.phase, usb.error, usb.qcom_result,
+		    usb.domain_result, usb.domain_stage, usb.domain_bank,
+		    usb.trace_a, usb.trace_b, usb.last_poll_events,
+		    sid0, sid1, sid2, sscr0, ssacr,
+		    sstreams, sbanks, spages, sscr0 & 1u, "v184-256",
+		    (unsigned long long)payloads[0].iova, (unsigned long long)payloads[1].iova,
+		    (unsigned long long)payloads[2].iova, (unsigned long long)payloads[3].iova,
+		    (unsigned long long)payloads[4].iova);
 	else {
 		/* One kprintf per line: every literal here stays far below the log
 		 * encoder's per-command limit, unlike the ~800-byte block above. */
-		kprintf("hummer gmu: status=%u phase=%u fw=%08x hfi=%08x pwr=%08x ctrl=%08x\n",
-		    status, result.phase, result.firmware_init_result, result.hfi_status,
-		    pwr_clk, hfi_ctrl);
-		kprintf("hfi2 15=%d/%x 11=%d/%x 14=%d/%x 10=%d/%x 30=%d/%x\n",
-		    steps[0].status, steps[0].error, steps[1].status, steps[1].error,
-		    steps[2].status, steps[2].error, steps[3].status, steps[3].error,
-		    steps[4].status, steps[4].error);
-		kprintf("hfi3 n=%u,%u,%u,%u,%u ack=%08x,%08x,%08x,%08x,%08x\n",
-		    (unsigned)steps[0].ack_words, (unsigned)steps[1].ack_words,
-		    (unsigned)steps[2].ack_words, (unsigned)steps[3].ack_words,
-		    (unsigned)steps[4].ack_words,
-		    steps[0].ack0, steps[1].ack0, steps[2].ack0, steps[3].ack0, steps[4].ack0);
-		kprintf("hfi6 skip=%u %08x/%08x/%x fin=%08x/%08x\n",
-		    hummer_gmu_device.hfi.skipped, hummer_gmu_device.hfi.skipped_header,
-		    hummer_gmu_device.hfi.skipped_ret, hummer_gmu_device.hfi.skipped_code,
-		    pwr_after, gmu2host);
+		kprintf("hummer gmu: cold=%u proto=%u stage=%u xport=%u fwerr=%08x cmds=%u\n",
+		    (unsigned)cold_status, (unsigned)cold.protocol_status,
+		    (unsigned)cold.protocol.stage, (unsigned)cold.protocol.transport_status,
+		    cold.protocol.firmware_error, cold.protocol.published_commands);
+		kprintf("load phase=%u fw=%08x hfi=%08x hash=%u reset=%u uc=%u cc=%u\n",
+		    cold.load.phase, cold.load.firmware_init_result, cold.load.hfi_status,
+		    cold.load.complete_hash_verified, cold.load.reset_verified,
+		    uncached, cacheable);
+		kprintf("dcvs=%u oob=%u pwr=%08x->%08x gx=%08x hfiver=%08x\n",
+		    (unsigned)dcvs_status, (unsigned)oob_status, pwr_before, pwr_after,
+		    gx_misc, hfi_version);
+		kprintf("votes db=%u bin=%u(%u,%u) gpu=%u gmu=%u bw=%u cnoc=%u ddr=%u\n",
+		    (unsigned)db_status, speed_raw, speed_used, speed_fallback,
+		    startup.gpu_count, startup.gmu_count, startup.bandwidth_count,
+		    startup.cnoc_count, startup.ddr_count);
+		kprintf("perf init=%u mhz=%u v0=%08x vi=%08x di=%08x\n",
+		    initial, (unsigned)(startup.gpu[initial].hz / 1000000u),
+		    startup.gpu[0].vote, startup.gpu[initial].vote,
+		    startup.gpu_dependency_votes[initial]);
+		kprintf("clk cxo=%08x/%08x gmu=%08x/%08x noc=%08x gates=%02x\n",
+		    hu_cxo_before, hu_cxo_after, hu_gmuclk_before, hu_gmuclk_after,
+		    hu_memnoc_after, gates_changed);
+		kprintf("cb fsr=%08x far=%08x syn=%08x sctlr=%08x off=%x\n",
+		    hu_cb_fsr, hu_cb_far, hu_cb_syn, hu_cb_sctlr, hu_cb_offset);
+		kprintf("ctx bank=%u asid=%u slot=%u sid=%u spans=%u ttbr0=%llx\n",
+		    bank, asid, slot, sid, report.spans,
+		    (unsigned long long)report.ttbr0);
 		kprintf("usb arg=%u p0=%u ri=%d ph=%u er=%u qr=%u\n",
 		    usb_arg, usb_phase0, usb_retry, usb.phase, usb.error, usb.qcom_result);
 		kprintf("usb2 dr=%u ds=%u bk=%u ta=%x tb=%x ev=%x\n",
@@ -730,6 +785,6 @@ extern "C" void hummer_adreno_bringup_probe(void)
 		kprintf("smmu id0=%08x id1=%08x id2=%08x scr0=%08x sacr=%08x\n",
 		    sid0, sid1, sid2, sscr0, ssacr);
 		kprintf("smmu2 str=%u bk=%u pg=%u cr0b0=%u tag=%s\n",
-		    sstreams, sbanks, spages, sscr0 & 1u, "v173-256");
+		    sstreams, sbanks, spages, sscr0 & 1u, "v184-256");
 	}
 }

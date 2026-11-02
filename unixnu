@@ -36,13 +36,19 @@ def prepare(device=DEVICE, source=None):
         # forbids a privileged instruction fetch from such a page, and the GMU
         # fetches its firmware's external part through this context.
         ('native-adreno-gmu-priv.patch', 'NativeAdreno'))]
+    # Kit patches land in kits/<module>, not drivers/<module>. The HFI kit as pinned
+    # only speaks the A6xx/A7xx performance table; gen8 moved it to message 15 with
+    # per-level dependent votes, and an A8XX configuration cannot even be validated
+    # without it. hummer's GPU is an A830, so the kit learns the A8xx layout here.
+    kit_patches = [(device / 'patches' / name, module) for name, module in (
+        ('adreno-firmware-a8xx.patch', 'AdrenoFirmware'),)]
     # Everything that ends up inside the built kernel decides this fingerprint. `package/`
     # becomes kits/<board.kit> and `scripts/` holds the recipes that compile it, so a change
     # to either one produces a different payload. Leaving them out meant "only edit a driver"
     # hit the cache and reused the previous tree - v127c shipped the exact machine code of
     # v127b, down to the same pc and far, because the tree was never rebuilt.
     digest = hashlib.sha256(patch.read_bytes())
-    for path, _ in driver_patches:
+    for path, _ in driver_patches + kit_patches:
         if path.is_file():
             digest.update(path.read_bytes())
     for directory in ('package', 'scripts'):
@@ -89,6 +95,10 @@ def prepare(device=DEVICE, source=None):
             if driver_patch.is_file():
                 git('apply', '--check', driver_patch, cwd=tree / 'drivers' / module)
                 git('apply', driver_patch, cwd=tree / 'drivers' / module)
+        for kit_patch, module in kit_patches:
+            if kit_patch.is_file():
+                git('apply', '--check', kit_patch, cwd=tree / 'kits' / module)
+                git('apply', kit_patch, cwd=tree / 'kits' / module)
         tree.rename(target)
     return target
 

@@ -1,0 +1,188 @@
+diff --git a/AdrenoHfi.c b/AdrenoHfi.c
+index a398d2f..c994a64 100644
+--- a/AdrenoHfi.c
++++ b/AdrenoHfi.c
+@@ -1,13 +1,22 @@
+ /* SPDX-License-Identifier: BSD-2-Clause-Patent */
+ /* HFI wire facts from the source pinned by the umbrella. No Linux runtime. */
+ #include "AdrenoHfi.h"
+-#if !defined(__aarch64__) || __BYTE_ORDER__ != __ORDER_LITTLE_ENDIAN__
++#if __BYTE_ORDER__ != __ORDER_LITTLE_ENDIAN__
+ #error Modern GMU HFI transport requires little-endian AArch64
+ #endif
+ #define WORDS 1024u
++#if defined(__aarch64__)
+ static void acquire(void){__asm__ volatile("dmb oshld":::"memory");}
+ static void publish(void){__asm__ volatile("dsb oshst":::"memory");}
+ static void complete(void){__asm__ volatile("dmb osh":::"memory");}
++#elif defined(ADRENO_HFI_HOST_TEST)
++/* Software queue peers only; these fences do not implement device coherency. */
++static void acquire(void){__atomic_thread_fence(__ATOMIC_SEQ_CST);}
++static void publish(void){__atomic_thread_fence(__ATOMIC_SEQ_CST);}
++static void complete(void){__atomic_thread_fence(__ATOMIC_SEQ_CST);}
++#else
++#error Modern GMU HFI transport requires little-endian AArch64
++#endif
+ static AdrenoHfiStatus poison(AdrenoHfi *h,AdrenoHfiStatus status)
+ {h->poisoned=1;return status;}
+ static AdrenoHfiStatus valid(AdrenoHfi *h,unsigned q,volatile uint32_t **header,
+diff --git a/AdrenoHfiStartup.c b/AdrenoHfiStartup.c
+index a136768..aa9bab3 100644
+--- a/AdrenoHfiStartup.c
++++ b/AdrenoHfiStartup.c
+@@ -24,8 +24,11 @@ AdrenoHfiStartupStatus AdrenoHfiStartupValidate(const AdrenoHfiStartupConfig *c)
+ {
+     if(!c || !levels(c->gpu,c->gpu_count,16) || !levels(c->gmu,c->gmu_count,4) ||
+         !c->bandwidth_count || c->bandwidth_count>16 || c->enable_ifpc>1 ||
++        c->performance_table>AdrenoHfiPerfA8xx ||
+         !addresses(c->cnoc_addresses,c->cnoc_count,6) ||
+         !addresses(c->ddr_addresses,c->ddr_count,8))return AdrenoHfiStartupInvalid;
++    const unsigned dependencies=c->performance_table==AdrenoHfiPerfA8xx?c->gpu_count:0;
++    if(!zero(c->gpu_dependency_votes+dependencies,16-dependencies))return AdrenoHfiStartupInvalid;
+     if(c->cnoc_wait_mask>>c->cnoc_count || c->ddr_wait_mask>>c->ddr_count)return AdrenoHfiStartupInvalid;
+     for(unsigned i=0;i<c->cnoc_count;++i)
+         for(unsigned j=0;j<c->ddr_count;++j)if(c->cnoc_addresses[i]==c->ddr_addresses[j])return AdrenoHfiStartupInvalid;
+@@ -56,6 +59,21 @@ AdrenoHfiStartupStatus AdrenoHfiStartupEncode(const AdrenoHfiStartupConfig *c,
+     size_t n=0;unsigned message=0;
+     switch(stage) {
+     case AdrenoHfiStagePerformance:
++        if(c->performance_table==AdrenoHfiPerfA8xx) {
++            message=15;
++            p[n++]=0; /* table version */
++            p[n++]=1; /* HFI_TABLE_GPU_PERF */
++            p[n++]=c->gpu_count;p[n++]=3;
++            for(unsigned i=0;i<c->gpu_count;++i) {
++                p[n++]=c->gpu[i].vote;p[n++]=c->gpu_dependency_votes[i];
++                p[n++]=(uint32_t)(c->gpu[i].hz/1000);
++            }
++            p[n++]=c->gmu_count;p[n++]=2;
++            for(unsigned i=0;i<c->gmu_count;++i) {
++                p[n++]=c->gmu[i].vote;p[n++]=(uint32_t)(c->gmu[i].hz/1000);
++            }
++            break;
++        }
+         message=4;n=58;
+         for(size_t i=0;i<n;++i)p[i]=0;
+         p[0]=c->gpu_count;p[1]=c->gmu_count;
+diff --git a/AdrenoHfiStartup.h b/AdrenoHfiStartup.h
+index 0496c6f..4e09755 100644
+--- a/AdrenoHfiStartup.h
++++ b/AdrenoHfiStartup.h
+@@ -5,7 +5,8 @@
+ #ifdef __cplusplus
+ extern "C" {
+ #endif
+-/* Modern A6xx/A7xx wire profile. Legacy and A8xx table formats are excluded. */
++/* Modern HFI transport; performance table format is selected explicitly. */
++enum {AdrenoHfiPerfA6xxA7xx,AdrenoHfiPerfA8xx};
+ typedef struct {uint64_t hz;uint32_t vote;} AdrenoHfiPerformanceLevel;
+ typedef struct {
+     unsigned gpu_count,gmu_count;
+@@ -16,6 +17,8 @@ typedef struct {
+     uint32_t ddr_addresses[8],ddr_data[16][8];
+     uint32_t acd_version,acd_enable_mask,acd_stride,acd_count,acd_data[32];
+     unsigned enable_ifpc;
++    unsigned performance_table;
++    uint32_t gpu_dependency_votes[16]; /* A8xx dependent ARC votes, indexed like gpu[]. */
+ } AdrenoHfiStartupConfig;
+ typedef enum {
+     AdrenoHfiStageNone,AdrenoHfiStagePerformance,AdrenoHfiStageBandwidth,
+diff --git a/AdrenoHfiVotes.c b/AdrenoHfiVotes.c
+index f3ce145..5206fb5 100644
+--- a/AdrenoHfiVotes.c
++++ b/AdrenoHfiVotes.c
+@@ -41,6 +41,42 @@ AdrenoHfiStartupStatus AdrenoHfiBcmAux(AdrenoHfiBcm *b,const uint8_t *p,size_t b
+     if(!b || !p || bytes!=8 || p[7])return AdrenoHfiStartupInvalid;
+     b->unit=le32(p);b->width=le16(p+4);b->vcd=p[6];return AdrenoHfiStartupSuccess;
+ }
++static unsigned corner(const AdrenoHfiRail *r,uint32_t level)
++{
++    unsigned last=0;
++    for(unsigned i=0;i<r->bytes/2;++i) {
++        unsigned value=le16(r->data+2*i);
++        if(value>=level)return i;
++        if(value)last=i;
++    }
++    return last;
++}
++AdrenoHfiStartupStatus AdrenoHfiGen8Votes(const uint32_t *levels,size_t count,
++    const AdrenoHfiRail *gfx,const AdrenoHfiRail *secondary,const AdrenoHfiRail *mx,
++    const AdrenoHfiRail *bx,uint32_t *votes,uint32_t *dependencies,size_t capacity)
++{
++    if(!gfx || !secondary || !mx || !bx || !votes || !dependencies ||
++        !rail(mx->data,mx->bytes) || (!!bx->data!=!!bx->bytes) ||
++        (bx->data && !rail(bx->data,bx->bytes)))return AdrenoHfiStartupInvalid;
++    uint32_t gx[16],dep[16];
++    if(AdrenoHfiArcVotes(levels,count,gfx->data,gfx->bytes,
++        secondary->data,secondary->bytes,gx,capacity))return AdrenoHfiStartupInvalid;
++    for(size_t i=0;i<count;++i) {
++        const uint32_t selected=gx[i]>>16;
++        gx[i]=(gx[i]&0xffff00ffu)|(corner(secondary,selected)<<8);
++        if(!i) {dep[i]=UINT32_MAX;continue;}
++        unsigned m=corner(mx,levels[i]);
++        if(m>63)return AdrenoHfiStartupInvalid;
++        dep[i]=(0x3fffu<<14)|(m<<8)|0xffu;
++        if(bx->data) {
++            unsigned b=corner(bx,selected);
++            if(b>63)return AdrenoHfiStartupInvalid;
++            dep[i]=(dep[i]&~0x03f00000u)|(b<<20);
++        }
++    }
++    for(size_t i=0;i<count;++i) {votes[i]=gx[i];dependencies[i]=dep[i];}
++    return AdrenoHfiStartupSuccess;
++}
+ static int address(uint32_t a){return a && !(a&3);}
+ AdrenoHfiStartupStatus AdrenoHfiBuildBandwidth(const uint32_t *kbps,size_t count,
+     const AdrenoHfiBcm *bcms,size_t n,uint32_t cn0,AdrenoHfiStartupConfig *c)
+diff --git a/AdrenoHfiVotes.h b/AdrenoHfiVotes.h
+index 48081ff..fe5d971 100644
+--- a/AdrenoHfiVotes.h
++++ b/AdrenoHfiVotes.h
+@@ -17,6 +17,13 @@ extern "C" {
+ AdrenoHfiStartupStatus AdrenoHfiArcVotes(const uint32_t *levels,size_t level_count,
+     const uint8_t *primary,size_t primary_bytes,const uint8_t *secondary,size_t secondary_bytes,
+     uint32_t *votes,size_t capacity);
++typedef struct {const uint8_t *data;size_t bytes;} AdrenoHfiRail;
++/* Gen8 matches the secondary rail to the selected primary corner and packs
++ * MX/BX dependency votes. bx={0} means authoritative absence in command-db.
++ * Both outputs remain unchanged on error; neither function changes a rail. */
++AdrenoHfiStartupStatus AdrenoHfiGen8Votes(const uint32_t *levels,size_t count,
++    const AdrenoHfiRail *gfx,const AdrenoHfiRail *secondary,const AdrenoHfiRail *mx,
++    const AdrenoHfiRail *bx,uint32_t *votes,uint32_t *dependencies,size_t capacity);
+ typedef struct {
+     uint32_t address,unit;
+     uint16_t width,buswidth;
+diff --git a/test_startup.c b/test_startup.c
+index 173b32f..b41d57f 100644
+--- a/test_startup.c
++++ b/test_startup.c
+@@ -91,6 +91,21 @@ int main(void)
+ {
+     CHECK(!posix_memalign((void **)&shared,4096,16384));
+     unsigned cases=0;
++    /* A8xx TABLE message has variable GX/CX entries, including dependent ARC votes. */
++    setup(0,0);config.performance_table=AdrenoHfiPerfA8xx;
++    for(unsigned i=0;i<4;++i)config.gpu_dependency_votes[i]=0x80+i;
++    CHECK(run()==AdrenoHfiStartupSuccess && peer.count==4 && peer.ids[0]==15);
++    const uint32_t gen8[]={0,1,4,3,0,0x80,0,3,0x81,100000,6,0x82,200000,
++        9,0x83,300000,3,2,0,0,4,200000,8,400000};
++    CHECK(peer.words[0]==sizeof(gen8)/4 && !memcmp(peer.messages[0],gen8,sizeof(gen8)));
++    setup(0,0);config.performance_table=2;refused();
++    setup(0,0);config.gpu_dependency_votes[0]=1;refused();
++    setup(0,0);config.performance_table=AdrenoHfiPerfA8xx;config.gpu_dependency_votes[4]=1;refused();
++    for(unsigned mode=1;mode<=3;++mode) {
++        setup(0,0);config.performance_table=AdrenoHfiPerfA8xx;peer.fail_at=1;peer.mode=mode;
++        CHECK(run()==(mode==3?AdrenoHfiStartupTimeout:AdrenoHfiStartupTransportError));
++        CHECK(state.poisoned && hfi.poisoned && !state.completed && peer.count==1);
++    }
+     for(unsigned acd=0;acd<2;++acd)for(unsigned ifpc=0;ifpc<2;++ifpc) {
+         setup(acd,ifpc);CHECK(run()==AdrenoHfiStartupSuccess);
+         unsigned count=4+2*acd+ifpc;CHECK(peer.count==count && state.completed && !state.poisoned);
+@@ -156,6 +171,6 @@ int main(void)
+     setup(1,1);services.total_timeout_us=99;refused();
+     setup(1,1);uint32_t p[159],copy[159],id=99;size_t n=9;memset(p,0xa5,sizeof(p));memcpy(copy,p,sizeof(p));
+     CHECK(AdrenoHfiStartupEncode(&config,AdrenoHfiStageComplete,&id,p,159,&n)==AdrenoHfiStartupInvalid && !n && id==99 && !memcmp(p,copy,sizeof(p)));
+-    free(shared);printf("PASS: four startup profiles, %u per-stage failures, real transport software ACKs, deadlines/clock/fault quarantine and pre-publication refusal\n",cases);
++    free(shared);printf("PASS: A8xx variable performance table and failure quarantine; four A7xx profiles, %u per-stage failures, software ACKs and pre-publication refusal\n",cases);
+     return 0;
+ }
