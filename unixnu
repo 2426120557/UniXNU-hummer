@@ -54,6 +54,12 @@ def prepare(device=DEVICE, source=None):
     for path, _ in driver_patches + kit_patches:
         if path.is_file():
             digest.update(path.read_bytes())
+    # The recipe decides what the tree contains, so it has to be hashed too.
+    # Without this a change to prepare() -- moving a submodule, ordering a
+    # patch -- left the fingerprint alone and CI restored the tree the old
+    # recipe had built, dirty submodule and all.
+    for name in ('unixnu', 'board.toml'):
+        digest.update((device / name).read_bytes())
     for directory in ('package', 'scripts'):
         root = device / directory
         if not root.is_dir():
@@ -94,14 +100,46 @@ def prepare(device=DEVICE, source=None):
             git('-c', 'protocol.file.allow=always', 'submodule', 'update', '--init', '--recursive', cwd=tree)
         git('apply', '--check', patch, cwd=tree)
         git('apply', patch, cwd=tree)
+        moved = []
         for module, revision in driver_revisions.items():
             directory = tree / 'drivers' / module
             if not directory.is_dir():
                 raise ValueError('driver_revisions names an absent module: ' + module)
-            if subprocess.run(['git', 'cat-file', '-e', revision + '^{commit}'], cwd=directory,
-                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode:
+
+            def present():
+                return subprocess.run(['git', 'cat-file', '-e', revision + '^{commit}'],
+                                      cwd=directory, stdout=subprocess.DEVNULL,
+                                      stderr=subprocess.DEVNULL).returncode == 0
+
+            if not present():
+                # A submodule clone can be shallow, and GitHub will not serve a
+                # bare SHA that no ref advertises. Deepen first, then let the
+                # ordinary refspec bring the history in; asking for the object
+                # by name only works on a server that allows it.
+                shallow = subprocess.run(['git', 'rev-parse', '--is-shallow-repository'],
+                                         cwd=directory, capture_output=True,
+                                         text=True).stdout.strip() == 'true'
+                git('fetch', '--unshallow', 'origin', cwd=directory) if shallow \
+                    else git('fetch', 'origin', cwd=directory)
+            if not present():
                 git('fetch', 'origin', revision, cwd=directory)
             git('checkout', '--detach', revision, cwd=directory)
+            moved.append(module)
+        # The engine's own `unixnu fetch` runs `git submodule update` on this
+        # tree, and that follows the gitlink recorded in HEAD -- straight back
+        # over the checkout above. It only skips the submodule when HEAD already
+        # names the commit it is switching to; otherwise it finds the patched
+        # working tree in the way and aborts ("Your local changes would be
+        # overwritten"). So record the moved submodules in a commit of our own;
+        # then the update has nothing to do and the patches below survive it.
+        if moved:
+            git('add', *('drivers/' + module for module in moved), cwd=tree)
+            changed = subprocess.run(['git', 'diff', '--cached', '--quiet'],
+                                     cwd=tree).returncode != 0
+            if changed:
+                git('-c', 'user.name=unixnu', '-c', 'user.email=unixnu@localhost',
+                    'commit', '-q', '-m',
+                    'pin ' + ', '.join(moved) + ' for this device', cwd=tree)
         for driver_patch, module in driver_patches:
             if driver_patch.is_file():
                 git('apply', '--check', driver_patch, cwd=tree / 'drivers' / module)
