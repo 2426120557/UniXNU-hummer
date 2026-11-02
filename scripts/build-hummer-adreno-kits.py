@@ -59,11 +59,31 @@ RECORD_CXX = (ROOT / 'build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837'
                    / 'iokit/DEVELOPMENT/IOPlatformExpert.cpo.json')
 
 FIRMWARE = ROOT / '.cache/firmware/hummer-gpu'
+
+# The engine driver's strong overrides for its own weak defaults: it asks for
+# these two names and gets their lengths from the companion _size symbols, so
+# the microcode version can change without touching the driver.
 FIRMWARE_PINS = [
     ('_native_adreno_firmware_image', 'qcom/gen80000_gmu.bin',
      '1ad8175e6cd01ea76c64d20b83600038c52dd29844b48d57b11b769b038863a5'),
     ('_native_adreno_sqe_firmware_image', 'qcom/gen80000_sqe.fw',
-     '30ee3301534f95799d4afaf73864f3c369baa5a5dea8481e7f0cb8cc941f396c'),
+     '9c8f009bea112d7c06dd2ccb67e889999459e53b92f0f4859f5ea0db067ad6b5'),
+]
+
+# Every blob this board boots, pinned to the device dump that
+# scripts/fetch-hummer-gpu-firmware.py records: one OTA's SQE/AQE pair is not
+# interchangeable with another's, and the CP only says so by never leaving
+# reset. All four are required -- a missing ZAP would otherwise turn into a
+# board layer that boots the GMU and then quietly skips authentication.
+FIRMWARE_CHECK = [
+    ('gen80000_gmu.bin', 88896,
+     '1ad8175e6cd01ea76c64d20b83600038c52dd29844b48d57b11b769b038863a5'),
+    ('gen80000_sqe.fw', 111892,
+     '9c8f009bea112d7c06dd2ccb67e889999459e53b92f0f4859f5ea0db067ad6b5'),
+    ('gen80000_aqe.fw', 25340,
+     'f04cb97e1e629b9003a26c5670b8f7e5b7bfeca95d35b2abd581fd8672efed20'),
+    ('gen80000_zap.mbn', 12088,
+     'e294fba1f90045b321db3cc74a4f0012ca82b5c5b2b6051b845bde9738ac1747'),
 ]
 
 INCLUDES = [
@@ -309,11 +329,11 @@ def firmware_assembly():
     halves. Both are emitted from the same pinned bytes rather than aliased, so a
     toolchain that dislikes symbol aliases cannot quietly drop one of them.
 
-    AQE and ZAP are only present when the vendor firmware has been staged: the
-    kernel needs them to upload the CP's AQE microcode and to authenticate ZAP,
-    but neither exists in linux-firmware. They are optional here so the tree
-    still builds without them -- the board layer refuses at the CP step and says
-    which file is missing, instead of failing the whole kernel link.
+    AQE and ZAP come from the same device dump as the rest: the kernel needs
+    them to upload the CP's AQE microcode and to authenticate ZAP, and neither
+    image exists in linux-firmware at all. All four are pinned and required --
+    see FIRMWARE_CHECK -- so a build either carries the images this board boots
+    or stops with the name of the one that is wrong.
     """
     lines = ['.section __DATA_CONST,__const']
     images = []
@@ -327,35 +347,33 @@ def firmware_assembly():
                       '.quad _' + label + '_end-_' + label])
         images.append((label, path, len(blob)))
 
-    for label, name, digest in FIRMWARE_PINS:
-        path = FIRMWARE / name
+    # Verify all four before emitting any, so a wrong blob names itself instead
+    # of producing an archive that boots half the stack and then stalls.
+    blobs = {}
+    for name, size, digest in FIRMWARE_CHECK:
+        path = FIRMWARE / 'qcom' / name
         if not path.is_file():
-            raise SystemExit('%s missing: run scripts/fetch-hummer-gpu-firmware.py' % path)
+            raise SystemExit('%s missing: run scripts/fetch-hummer-gpu-firmware.py '
+                             'with the phone attached (--device)' % path)
         blob = path.read_bytes()
         actual = hashlib.sha256(blob).hexdigest()
-        if actual != digest:
-            raise SystemExit('%s: sha256 %s does not match its pin' % (name, actual))
-        emit(label, blob)
+        if len(blob) != size or actual != digest:
+            raise SystemExit('%s: %d bytes / sha256 %s, pin is %d / %s'
+                             % (name, len(blob), actual, size, digest))
+        blobs[name] = blob
 
-    # The SM8750 board layer's own names for the same two images.
-    emit('sm8750_gpu_gmu', (FIRMWARE / 'qcom/gen80000_gmu.bin').read_bytes())
-    emit('sm8750_gpu_sqe', (FIRMWARE / 'qcom/gen80000_sqe.fw').read_bytes())
+    for label, name, _ in FIRMWARE_PINS:
+        emit(label, blobs[name.rsplit('/', 1)[1]])
 
-    aqe = FIRMWARE / 'qcom/gen80000_aqe.fw'
-    if aqe.is_file():
-        emit('sm8750_gpu_aqe', aqe.read_bytes())
-    else:
-        print('hummer-adreno-kits: no gen80000_aqe.fw -- CP AQE upload will be skipped')
-
-    zap = FIRMWARE / 'qcom/gen80000_zap.mbn'
-    if zap.is_file():
-        metadata, payload = zap_parts(zap.read_bytes())
-        emit('sm8750_gpu_zap_metadata', metadata)
-        emit('sm8750_gpu_zap_payload', payload)
-    else:
-        print('hummer-adreno-kits: no gen80000_zap.mbn -- ZAP authentication will be skipped; '
-              'extract vendor/firmware/gen80000_zap.mbn from this device and run '
-              'scripts/fetch-hummer-gpu-firmware.py --vendor-dir <dir>')
+    # The SM8750 board layer's own names for the same images, plus the ZAP pair
+    # cut out of the signed ELF (metadata is what PAS hashes, payload is what it
+    # authenticates; Sm8750GpuZapLoad refuses any other sizes).
+    emit('sm8750_gpu_gmu', blobs['gen80000_gmu.bin'])
+    emit('sm8750_gpu_sqe', blobs['gen80000_sqe.fw'])
+    emit('sm8750_gpu_aqe', blobs['gen80000_aqe.fw'])
+    metadata, payload = zap_parts(blobs['gen80000_zap.mbn'])
+    emit('sm8750_gpu_zap_metadata', metadata)
+    emit('sm8750_gpu_zap_payload', payload)
 
     write_firmware_header(images)
     source = OUT / 'firmware.S'
