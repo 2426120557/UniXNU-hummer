@@ -47,7 +47,25 @@ import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-CACHE = ROOT / 'firmware/hummer-gpu'
+
+def device_repo_root():
+    """Where this device repository lives while a build runs inside the tree.
+
+    `unixnu` copies package/ and scripts/ into the prepared tree and runs these
+    recipes from there, so Path(__file__).parents[1] is the *tree*, not the
+    repository. The firmware and its pins ship with the repository, so resolve
+    that directory through UNIXNU_DEVICE (exported by ./unixnu) and fall back to
+    the tree for a standalone run.
+    """
+    explicit = os.environ.get('UNIXNU_DEVICE')
+    if explicit and (Path(explicit) / 'firmware/hummer-gpu').is_dir():
+        return Path(explicit)
+    for candidate in (ROOT.parent, ROOT):
+        if (candidate / 'firmware/hummer-gpu').is_dir():
+            return candidate
+    return ROOT
+
+CACHE = device_repo_root() / 'firmware/hummer-gpu'
 DEVICE_DIR = '/vendor/firmware'
 
 # Fingerprint of the OTA these pins came from; recorded in the manifest, never
@@ -171,7 +189,7 @@ def main():
                 ' (linux-firmware has %d: %s)' % (upstream, 'same' if upstream == size
                                                   else 'device-specific'))
             print('%-20s %8d bytes  ok%s' % (name, size, note))
-        print('hummer-gpu firmware pinned and present in %s' % CACHE.relative_to(ROOT))
+        print('hummer-gpu firmware pinned and present in %s' % CACHE)
         return
     if arguments.check:
         raise SystemExit('missing or stale: ' + ', '.join(missing))
@@ -222,7 +240,7 @@ def main():
               % (name, size, state, digest[:16] + '...', note))
 
     (CACHE / 'manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
-    print('hummer-gpu firmware ready in %s' % CACHE.relative_to(ROOT))
+    print('hummer-gpu firmware ready in %s' % CACHE)
     print('next: build-hummer-adreno-kits.py turns zap.mbn into the 0xfcc metadata '
           '+ 0x1000 payload pair ZAP authentication needs')
 

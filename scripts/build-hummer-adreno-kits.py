@@ -41,6 +41,7 @@ strong definitions that replace NativeAdrenoFirmwareDefaults.cpp's empty weak on
 Usage: build-hummer-adreno-kits.py   (run after the kernel object tree exists)
 """
 
+import os
 import hashlib
 import json
 import struct
@@ -48,6 +49,24 @@ import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+
+def device_repo_root():
+    """Where this device repository lives while a build runs inside the tree.
+
+    `unixnu` copies package/ and scripts/ into the prepared tree and runs these
+    recipes from there, so Path(__file__).parents[1] is the *tree*, not the
+    repository. The firmware and its pins ship with the repository, so resolve
+    that directory through UNIXNU_DEVICE (exported by ./unixnu) and fall back to
+    the tree for a standalone run.
+    """
+    explicit = os.environ.get('UNIXNU_DEVICE')
+    if explicit and (Path(explicit) / 'firmware/hummer-gpu').is_dir():
+        return Path(explicit)
+    for candidate in (ROOT.parent, ROOT):
+        if (candidate / 'firmware/hummer-gpu').is_dir():
+            return candidate
+    return ROOT
+
 OUT = ROOT / 'build/native-adreno'
 OUT.mkdir(parents=True, exist_ok=True)
 
@@ -62,7 +81,7 @@ RECORD_CXX = (ROOT / 'build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837'
 # own vendor partition (see scripts/fetch-hummer-gpu-firmware.py for the pins
 # and the OTA they came from). CI has no phone to pull them from, and a missing
 # image stops the archive step before anything downstream can run.
-FIRMWARE = ROOT / 'firmware/hummer-gpu'
+FIRMWARE = device_repo_root() / 'firmware/hummer-gpu'
 
 # The engine driver's strong overrides for its own weak defaults: it asks for
 # these two names and gets their lengths from the companion _size symbols, so
