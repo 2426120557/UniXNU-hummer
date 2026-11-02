@@ -8,6 +8,9 @@ import struct
 import subprocess
 
 ROOT = Path(__file__).resolve().parents[1]
+import sys
+sys.path.insert(0, str(ROOT / 'scripts'))
+import board_sources
 
 # drivers/NativeUfs is an upstream submodule, read-only for this overlay repository, so
 # the SMMU edits below (plus the v54 root-partition-name edits, which also touch
@@ -565,7 +568,7 @@ if component == 'NativeUfs':
     # stage="policy count invalid"、prepared=0。
     # 放行由下面 NATIVE_UFS_EDITS 里的两处改写完成（configureVerification 与读路径的
     # verify()），交付前必须换回真策略包。
-    command += ['-I', str(ROOT / 'kits/VerifiedRoot/include'), '-I', str(ROOT / 'drivers/NativeVirtioBlock'),
+    command += ['-I', str(ROOT / 'kits/VerifiedRoot/include'), '-I', str(board_sources.driver('NativeVirtioBlock')),
                 '-DNATIVE_VERIFIED_BLOCK=1', '-DNATIVE_VERIFIED_BLOCK_MULTI_POLICY=1', '-mgeneral-regs-only']
     # GccUfs.h in the submodule carries SM8550 offsets.  SM8750 moves every UFS PHY
     # branch register after the AXI branch up by 4 bytes, and the SM8550 AHB offset
@@ -575,7 +578,7 @@ if component == 'NativeUfs':
     # own include guard ahead of it.  -include is the only mechanism that works here:
     # NativeUfs.cpp quote-includes GccUfs.h, so the including file's directory always
     # beats any -I.
-    gcc_ufs = ROOT / 'drivers/NativeUfs/GccUfs.h'
+    gcc_ufs = board_sources.driver('NativeUfs') / 'GccUfs.h'
     # package/ maps to kits/hummer in the assembled tree (board.toml kit = "hummer").
     override = ROOT / 'kits/hummer/HummerGccUfs.h'
     if not gcc_ufs.exists():

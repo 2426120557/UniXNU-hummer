@@ -1,13 +1,13 @@
 name: build-kernel
 
-# OnePlus Ace 5 Pro (hummer, SM8750) — 13T (Pagani) pipeline.
-# 引擎由 ./unixnu 包装器准备：clone upstream.rev (d9460ebb) + 打 patches/ 三份补丁，
-# 缓存后转交引擎自己的 unixnu。保留 hummer 的固件/ADT/触屏。
+# OnePlus Ace 5 Pro (hummer, SM8750) — format 2 device repository, engine 6790e7c.
+# The ./unixnu wrapper clones upstream.rev, applies the fork patches and hands over
+# to the engine's own CLI; profiles merge arch -> soc -> os -> device.
 
 on:
   workflow_dispatch:
   push:
-    branches: [ main, master ]
+    branches: [ main, master, 'v18*' ]
     # 只改文档不该烧一轮 40 分钟的 macOS 构建；代码 / 补丁 / board.toml 仍然自动编。
     paths-ignore:
       - '**.md'
@@ -18,13 +18,16 @@ concurrency:
   group: hummer-xnu-${{ github.ref }}
   cancel-in-progress: false
 
+env:
+  # Format 2 work directory: out/<board.name>/<os_profile>/<defconfig stem>.
+  WORK: out/hummer/ipados-17.7.11-21H461/hummer
+
 jobs:
   build:
     runs-on: macos-15
     timeout-minutes: 360
     # 必须显式给写权限：没有它 GITHUB_TOKEN 是只读的，gh release upload 会 403。
-    # 而那一步带 continue-on-error，失败会被吞掉 —— 于是日志永远发不出来，
-    # v75 连续几轮"看不见报错"就是这么来的。
+    # 而那一步带 continue-on-error，失败会被吞掉 —— 于是日志永远发不出来。
     permissions:
       contents: write
     steps:
@@ -35,65 +38,57 @@ jobs:
         with:
           python-version: "3.12"
 
-      # 缓存 out/ipsw（OS+SystemOS 解压后约 8 GiB）。单独成条目、且 key 稳定，
-      # 这样失败重跑不用再拉那 8 GiB——这正是之前每次重编都卡在拉 IPSW 的根因。
-      # 单仓库缓存上限 10 GiB，8 GiB 的 ipsw 单独存得下；引擎树/feeds 放第二个条目尽力缓存。
+      # 缓存 out/ipsw（OS+SystemOS 解压后约 8 GiB）。format 2 的 ipsw 成员仍缓存在
+      # <out>/ipsw/<build>/（ipsw.py: out_root / 'ipsw' / build），路径与旧引擎一致。
       - name: Cache the fetched IPSW (OS + SystemOS, ~8 GiB)
         uses: actions/cache@v4
         with:
           path: out/ipsw
-          key: hummer-ipsw-21H461-v1
+          key: hummer-ipsw-21H461-v2
           restore-keys: |
             hummer-ipsw-21H461-
 
-      # 缓存这两块（第二轮起省掉 21 个子模块的 clone 和 7 个源码仓库的 fetch）：
-      #   .cache      ./unixnu --prepare 产出的引擎树（按 upstream.rev + 补丁指纹命名，
-      #               prepare() 发现有就直接返回，天然命中）
-      #   out/feeds   ./unixnu fetch 的源码
-      # 注意：若本仓库缓存总额已逼近 10 GiB，这个条目可能被 GitHub 拒存（非致命），
-      # 下一轮会回退到重新 clone/fetch——但 ipsw 那条已命中，仍省掉最大的下载。
+      # 缓存准备好的引擎树（.cache，按 upstream.rev + 配方指纹命名）与 fetch 的源码
+      # （out/feeds）。键覆盖配方与 profile 输入：board/feeds/dts/configs/patches/scripts
+      # 任一变化都换树。若缓存总额逼近 10 GiB 被拒存（非致命），回退重 clone/fetch。
       - name: Cache the prepared engine and fetched feeds
         uses: actions/cache@v4
         with:
           path: |
             .cache
             out/feeds
-          key: hummer-13t-${{ hashFiles('upstream.rev', 'patches/unixnu-source-kernel.patch', 'patches/native-ufs-sm8750.patch', 'patches/native-mobile-display-stage7.patch', 'board.toml') }}
+          key: hummer-fmt2-${{ hashFiles('upstream.rev', 'unixnu', 'board.toml', 'feeds.toml', 'patches/**', 'dts/**', 'configs/**', 'scripts/**') }}
           restore-keys: |
-            hummer-13t-
+            hummer-fmt2-
+
+      - name: Install host tools
+        run: |
+          # dtc：format 2 用 dts/hummer.dts + 引擎的通用 ADT 生成器，编译设备树需要它。
+          brew install cmake ninja unifdef llvm mtools openssl@3 dtc
+          echo "$(brew --prefix llvm)/bin" >> "$GITHUB_PATH"
+          xcodebuild -version
 
       - name: Prepare the isolated, patched UniXNU source
         run: |
           # 先建日志目录并把 prepare 的输出落盘：这一步若失败（补丁打不上、
           # 子模块 gitlink 失效等），后面就没有日志可看，等于瞎修。
-          mkdir -p out/hummer/logs
+          mkdir -p "$WORK/logs"
           # git 索引里若丢了可执行位，./unixnu 会 Permission denied；补一道。
           chmod +x ./unixnu 2>/dev/null || true
-          ./unixnu --prepare 2>&1 | tee out/hummer/logs/actions-prepare.log
-          TREE=$(./unixnu --prepare)
-          echo "UNIXNU_TREE=$TREE" >> "$GITHUB_ENV"
-          echo "engine tree: $TREE"
+          ./unixnu --prepare 2>&1 | tee "$WORK/logs/actions-prepare.log"
+          ./unixnu --prepare 2>/dev/null
+          # 包装器把 UNIXNU_OUT 指到仓库 out/，引擎把树放在 <out>/<name>/<profile>/<config>/tree。
+          echo "UNIXNU_TREE=$PWD/$WORK/tree" >> "$GITHUB_ENV"
 
-      # 注意：不要再把 hummer 老引擎时代的 patches/zzzz-hummer-stage7-compat.patch
-      # 塞进引擎的 patches/xnu/。那份是从 Pagani 的 native-stage7-userspace-compat
-      # 移植来的，现在整仓回到 Pagani 引擎 + 13T 三份补丁后，13T 的内核补丁已经改过
-      # bsd/kern/ubc_subr.c、osfmk/vm/vm_fault.c、osfmk/vm/vm_protos.h，那份副本的
-      # 上下文对不上 -> "patch does not apply"，而且它本身已成冗余（源头已生效）。
-
-      - name: Install host tools
-        run: |
-          brew install cmake ninja unifdef llvm mtools openssl@3
-          echo "$(brew --prefix llvm)/bin" >> "$GITHUB_PATH"
-          xcodebuild -version
-
-      - name: Fetch the kernel sources
+      # defconfig 首次运行会同时浅取 feeds 里的 sm8750 SoC 源（schema 2 的 soc profile）。
+      - name: Resolve profiles and fetch the kernel sources
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
-          mkdir -p out/hummer/logs
-          ./unixnu defconfig hummer_defconfig
-          ./unixnu fetch xnu libplatform libdispatch AvailabilityVersions libpthread corecrypto-2023 IOStorageFamily 2>&1 | tee out/hummer/logs/actions-fetch.log
-          cp unixnu.lock out/hummer/unixnu.lock
+          ./unixnu defconfig hummer_defconfig 2>&1 | tee "$WORK/logs/actions-defconfig.log"
+          ./unixnu fetch xnu libplatform libdispatch AvailabilityVersions libpthread corecrypto-2023 IOStorageFamily 2>&1 | tee "$WORK/logs/actions-fetch.log"
+          ./unixnu tree 2>&1 | tee "$WORK/logs/actions-tree.log"
+          cp unixnu.lock "$WORK/unixnu.lock"
 
       - name: Fetch the IPSW and prepare policies
         env:
@@ -101,23 +96,22 @@ jobs:
         run: |
           # OS(4.9 GiB) + SystemOS(3.1 GiB) 很吃磁盘，先记一下余量，便于判断是不是
           # "no space left on device"（macOS runner 的可用空间并不宽裕）。
-          df -h . | tee out/hummer/logs/actions-disk.log
+          df -h . | tee "$WORK/logs/actions-disk.log"
           # 缓存命中则跳过抓取（省掉 8 GiB 下载）；只在文件缺失时才拉。
           if [ -f out/ipsw/21H461/044-76040-038.dmg ]; then
-            echo "IPSW already restored from cache, skipping fetch" | tee out/hummer/logs/actions-ipsw.log
+            echo "IPSW already restored from cache, skipping fetch" | tee "$WORK/logs/actions-ipsw.log"
           else
-            ./unixnu ipsw fetch AppleLogo KernelCache OS Cryptex1,SystemOS StaticTrustCache Cryptex1,SystemTrustCache 2>&1 | tee out/hummer/logs/actions-ipsw.log
+            ./unixnu ipsw fetch AppleLogo KernelCache OS Cryptex1,SystemOS StaticTrustCache Cryptex1,SystemTrustCache 2>&1 | tee "$WORK/logs/actions-ipsw.log"
           fi
           # 下面每条单独落盘：上几轮全塞在一个步骤里，挂了也不知道是哪一条。
-          ./unixnu tree 2>&1 | tee out/hummer/logs/actions-tree.log
-          df -h . | tee -a out/hummer/logs/actions-disk.log
-          python3 scripts/audit-stage7-display.py out/ipsw/21H461/kernelcache.decompressed 2>&1 | tee out/hummer/logs/actions-audit-display.log
-          python3 scripts/prepare-ufs-policies.py --tree out/hummer/tree --inputs out/ipsw/21H461 --openssl-prefix "$(brew --prefix openssl@3)" 2>&1 | tee out/hummer/logs/actions-policies.log
-          python3 scripts/prepare-original-trust.py --tree "$UNIXNU_TREE" --inputs out/ipsw/21H461 --output out/hummer/original-static-system.bundle 2>&1 | tee out/hummer/logs/actions-trust.log
+          df -h . | tee -a "$WORK/logs/actions-disk.log"
+          python3 scripts/audit-stage7-display.py out/ipsw/21H461/kernelcache.decompressed 2>&1 | tee "$WORK/logs/actions-audit-display.log"
+          python3 scripts/prepare-ufs-policies.py --tree "$UNIXNU_TREE" --inputs out/ipsw/21H461 --openssl-prefix "$(brew --prefix openssl@3)" 2>&1 | tee "$WORK/logs/actions-policies.log"
+          python3 scripts/prepare-original-trust.py --tree "$UNIXNU_TREE" --inputs out/ipsw/21H461 --output "$WORK/original-static-system.bundle" 2>&1 | tee "$WORK/logs/actions-trust.log"
 
       - name: Prepare volatile Data
         run: |
-          sudo "$(command -v python3)" scripts/prepare-ram-data.py --tree "$UNIXNU_TREE" --source out/ipsw/21H461/044-76040-038.dmg --systemos out/ipsw/21H461/044-76034-038.dmg --output out/hummer/ram-data --config out/hummer/.config 2>&1 | tee out/hummer/logs/actions-ram-data.log
+          sudo "$(command -v python3)" scripts/prepare-ram-data.py --tree "$UNIXNU_TREE" --source out/ipsw/21H461/044-76040-038.dmg --systemos out/ipsw/21H461/044-76034-038.dmg --output "$WORK/ram-data" --config "$WORK/.config" 2>&1 | tee "$WORK/logs/actions-ram-data.log"
 
       - name: Build XNU and the FAT payload
         env:
@@ -129,24 +123,24 @@ jobs:
           fi
           # --skip-setup：payload 步骤读 board.toml [payload] skip_setup_tool，在 Data 种子
           # 的副本上把 Setup 标记为完成，系统起来直接进 SpringBoard 而不是 Hello。
-          ./unixnu build kernel payload -j 3 --trust-cache out/hummer/original-static-system.bundle --data-ramdisk out/hummer/ram-data/data.dbrdisk --skip-setup 2>&1 | tee out/hummer/logs/actions-build.log
+          ./unixnu build kernel payload -j 3 --trust-cache "$WORK/original-static-system.bundle" --data-ramdisk "$WORK/ram-data/data.dbrdisk" --skip-setup 2>&1 | tee "$WORK/logs/actions-build.log"
 
       - name: Show build log tail
         if: always()
         run: |
-          for f in out/hummer/logs/*.log; do
+          for f in "$WORK"/logs/*.log; do
             [ -f "$f" ] || continue
             echo "===== $f ====="
             grep -n -iE "error:|error |Traceback|raise |fatal:|undefined|No such file|ld: " "$f" | tail -25 || true
           done
-          tail -60 out/hummer/logs/actions-build.log 2>/dev/null || true
+          tail -60 "$WORK/logs/actions-build.log" 2>/dev/null || true
 
       - name: Check artifacts
         id: check
         run: |
-          K=out/hummer/kernel/kernel.macho
+          K="$WORK/kernel/kernel.macho"
           if [ -f "$K" ]; then echo "KERNEL_BUILT=yes" >> "$GITHUB_ENV"; ls -la "$K"; else echo "KERNEL_BUILT=no" >> "$GITHUB_ENV"; fi
-          [ -f out/hummer/payload/payload.img ] && ls -la out/hummer/payload/payload.img || echo "payload.img not produced"
+          [ -f "$WORK/payload/payload.img" ] && ls -la "$WORK/payload/payload.img" || echo "payload.img not produced"
 
       - name: Upload
         if: always()
@@ -154,10 +148,10 @@ jobs:
         with:
           name: hummer-xnu-${{ github.run_number }}
           path: |
-            out/hummer/kernel/**
-            out/hummer/payload/**
-            out/hummer/logs/**
-            out/hummer/unixnu.lock
+            out/hummer/ipados-17.7.11-21H461/hummer/kernel/**
+            out/hummer/ipados-17.7.11-21H461/hummer/payload/**
+            out/hummer/ipados-17.7.11-21H461/hummer/logs/**
+            out/hummer/ipados-17.7.11-21H461/hummer/unixnu.lock
           if-no-files-found: warn
           retention-days: 7
 
@@ -170,7 +164,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           # 无论多早失败都要产出一个可上传的包，否则这一轮的报错永远看不到。
-          tar czf ci-logs.tar.gz out/hummer/logs 2>/dev/null || true
+          tar czf ci-logs.tar.gz "$WORK/logs" 2>/dev/null || true
           if [ ! -s ci-logs.tar.gz ]; then
             { echo "no hummer logs were produced (failure before the log dir)"; \
               echo "run: $GITHUB_RUN_ID"; } > ci-logs.txt
@@ -178,7 +172,7 @@ jobs:
           fi
           gh release view ci-latest >/dev/null 2>&1 || \
             gh release create ci-latest --title "ci latest" --notes "Rolling build outputs."
-          for f in ci-logs.tar.gz out/hummer/kernel/kernel.macho out/hummer/payload/payload.img; do
+          for f in ci-logs.tar.gz "$WORK/kernel/kernel.macho" "$WORK/payload/payload.img"; do
             [ -f "$f" ] && gh release upload ci-latest "$f" --clobber
           done
 

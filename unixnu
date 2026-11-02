@@ -7,6 +7,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import tomllib
 
 DEVICE = Path(__file__).resolve().parent
 UPSTREAM = 'https://github.com/UniXNU/UniXNU.git'
@@ -60,18 +61,20 @@ def prepare(device=DEVICE, source=None):
     for path, _ in driver_patches + kit_patches:
         if path.is_file():
             digest.update(path.read_bytes())
-    # Board driver sources live in this repository now, so they decide the tree too.
-    for source in sorted((device / 'drivers').rglob('*')):
-        if source.is_file():
-            digest.update(str(source.relative_to(device)).encode())
-            digest.update(source.read_bytes())
+    # Board driver sources used to live at drivers/ in this repository; since the
+    # format 2 migration they are package/drivers/, which the package loop below
+    # hashes. nothing is left to hash here.
     # The recipe decides what the tree contains, so it has to be hashed too.
     # Without this a change to prepare() -- moving a submodule, ordering a
     # patch -- left the fingerprint alone and CI restored the tree the old
-    # recipe had built, dirty submodule and all.
-    for name in ('unixnu', 'board.toml'):
-        digest.update((device / name).read_bytes())
-    for directory in ('package', 'scripts'):
+    # recipe had built, dirty submodule and all. The profile inputs count as
+    # well: board.toml names the components, feeds.toml pins the SoC source and
+    # dts/ decides the ADT, so any of them changing means a different build.
+    for name in ('unixnu', 'board.toml', 'feeds.toml', 'upstream.rev'):
+        path = device / name
+        if path.is_file():
+            digest.update(path.read_bytes())
+    for directory in ('package', 'scripts', 'dts', 'configs', 'patches'):
         root = device / directory
         if not root.is_dir():
             continue
@@ -171,9 +174,18 @@ def main():
         return
     os.environ.setdefault('UNIXNU_DEVICE', str(DEVICE))
     os.environ.setdefault('UNIXNU_OUT', str(DEVICE / 'out'))
-    uefi = DEVICE.parent / 'UEFI-Pagani_SM8750'
+    # The firmware checkout stays next to this repository; its Build/ directory is
+    # redirected into the format 2 output directory, which is
+    # out/<board.name>/<os_profile>/<defconfig without _defconfig>/ (the OS profile
+    # comes from board.toml, so it is read here rather than hard-coded).
+    uefi = DEVICE.parent / os.environ.get('UNIXNU_UEFI_DIR', 'UEFI-Pagani_SM8750')
     if uefi.is_dir():
-        output = DEVICE / 'out/oneplus13t/uefi-build'
+        document = tomllib.loads((DEVICE / 'board.toml').read_text())
+        board = document['board']
+        name = Path(board['name']).name
+        profile = Path(board['os_profile']).name
+        config = Path(document['kernel']['defconfig']).name.removesuffix('_defconfig')
+        output = DEVICE / 'out' / name / profile / config / 'uefi-build'
         if not os.path.lexists(uefi / 'Build'):
             output.mkdir(parents=True, exist_ok=True)
             (uefi / 'Build').symlink_to(os.path.relpath(output, uefi), target_is_directory=True)

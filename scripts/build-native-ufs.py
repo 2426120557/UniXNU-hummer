@@ -7,6 +7,10 @@ from pathlib import Path
 import runpy
 import struct
 import subprocess
+import sys
+
+sys.path.insert(0, str(__import__('pathlib').Path(__file__).resolve().parent))
+import board_sources
 
 
 # hummer：一次链路超时不能把整个 root 打死。
@@ -52,7 +56,7 @@ ROOT_COMMANDS_RETRY = '''    // hummer: bounded recovery (injected by build-nati
 
 
 def inject_read_retry(root):
-    path = root / 'drivers' / 'NativeUfs' / 'RootCommands.h'
+    path = board_sources.driver('NativeUfs') / 'RootCommands.h'
     text = path.read_text()
     if 'hummer: bounded recovery' in text:
         return
@@ -78,13 +82,13 @@ def main():
                      'NativeRamBlock': 'build/native-ram-block'}[args.component]
     output.mkdir(parents=True, exist_ok=True)
     obj = output / (args.component + '.o')
-    command = compile_command(record, root / 'drivers' / args.component / (args.component + '.cpp'), obj)
+    command = compile_command(record, board_sources.driver(args.component) / (args.component + '.cpp'), obj)
     command += ['-DNATIVE_UFS_SM8750=1', '-DNATIVE_UFS_READ_ONLY=1',
                 '-Wno-unused-function']
     if args.root_windows:
         command += ['-I', str(root / 'build/storage-abi/include'),
                     '-I', str(root / 'kits/VerifiedRoot/include'),
-                    '-I', str(root / 'drivers/NativeVirtioBlock'),
+                    '-I', str(board_sources.driver('NativeVirtioBlock')),
                     '-DNATIVE_VERIFIED_BLOCK=1', '-DNATIVE_VERIFIED_BLOCK_MULTI_POLICY=1',
                     '-mgeneral-regs-only']
     else:

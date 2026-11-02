@@ -1,0 +1,20 @@
+# Board XNU patches, applied after the arch, SoC and OS series.
+# One patch per line, relative to this directory; '#' starts a comment.
+#
+# Empty on purpose. The kernel-side hooks this port needs are engine features at
+# upstream.rev 6790e7c (the board package is reached through a supported late
+# probe extension point instead of a fork patch), and the shared series already
+# carry the SM8750 SMP and platform-power hooks:
+#   arch:patches/xnu/series      common ARM64 bootstrap
+#   soc:patches/xnu/series       sm8750-smp.patch
+#   os:patches/xnu/series        prelink, Apple ADT and ABI fixes
+#
+# Not part of this series, kept for reference or applied elsewhere:
+#   adreno-a830.patch            GPU driver patch; `unixnu` applies it to
+#                                drivers/Adreno740 while preparing the tree
+#   adreno-firmware-a8xx.patch   kit patch; applied to kits/AdrenoFirmware
+#   native-*.patch               driver changes already present in package/drivers
+#   mu-basecore-dxe-trace.patch  UEFI (edk2) trace, firmware side
+#   uefi-*.patch                 hummerPkg / edk2 changes, firmware side
+#   zzzz-hummer-stage7-compat.patch  superseded by the OS series; its context no
+#                                longer matches (see .github/workflows/build-kernel.yml)

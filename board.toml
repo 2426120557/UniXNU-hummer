@@ -1,104 +1,110 @@
-# OnePlus Ace 5 Pro (hummer, SM8750) — 整仓换成 OnePlus 13T (Pagani) 的移植。
+# OnePlus Ace 5 Pro (hummer, SM8750, Adreno 830) — format 2 device repository.
 #
-# 同 SM8750、同一份目标 IPSW（iPad7,1 17.7.11 21H461），所以引擎、补丁、构建
-# 流水线全部采用 13T 的（upstream.rev = d9460ebb + patches/ + 13T 构建脚本）。
-# 只保留 hummer 自己的设备相关部分：
-#   - [firmware] hummerPkg：本机 UEFI 已真机验证，13T 的固件在 Ace 5 Pro 上起不来
-#   - [userdata] 本机 GPT 几何
-#   - ADT：make-hummer-adt.py（由 13T 的生成器改出，6 核 cpu%d + GICv3 + /psci，
-#     cpus=6，走 XNU 标准 PSCI 起从核）
-#   - 触屏：hummer 的 Synaptics S3910（13T 是 Novatek，对本机面板无效）
-# 首轮触屏默认关闭（hummer-touch=0），先验证 13T 流水线能编出并启动到 Hello。
+# 本文件的注释从 v186 起改成英文并与上游格式对齐；v186 之前那一大段中文 bring-up
+# 记录（每个 boot arg 是怎么试出来的）保留在 git 历史里（git show v186:board.toml）。
+#
+# The four profile layers apply in this order and merge by key:
+#   arch  UniXNU/profiles/arch/arm64               common ARM64 config and patches
+#   soc   feeds.toml "sm8750"                      SM8750 DTSI, fragment, SMP patch
+#   os    UniXNU/profiles/os/ipados-17.7.11-21H461 IPSW identity, Apple ADT identity,
+#                                                  prelink roots, trust caches
+#   device this file + dts/ + configs/ + patches/xnu/series
+# Arrays replace the inherited array, so every array below is the complete list
+# for this board rather than an addition.
+#
+# What stays board-specific here, because no shared profile owns it:
+#   - the six-core CPU selection and the DRAM window (dts/hummer.dts)
+#   - the UEFI firmware (hummerPkg, validated on this phone)
+#   - the userdata GPT geometry of this unit
+#   - the board driver package (package/, appears as kits/hummer in the tree)
+#   - the bring-up kernel arguments in [payload]
+
+schema_version = 2
 
 [board]
 name = "hummer"
 soc = "SM8750"
-description = "OnePlus Ace 5 Pro (SM8750) - full port from OnePlus 13T"
+soc_source = "sm8750"
+os_profile = "ipados-17.7.11-21H461"
+description = "OnePlus Ace 5 Pro (PKR110, SM8750) — early userspace, six CPUs, A830 bring-up"
 kit = "hummer"
 
 [ipsw]
-url = "https://updates.cdn-apple.com/2025SpringFCS/fullrestores/122-77166/DCA6CFE8-90E9-4B92-880D-3DE171798E40/iPad_Pro_HFR_17.7.11_21H461_Restore.ipsw"
-product = "iPad7,1"
-version = "17.7.11"
-build = "21H461"
-device_class = "j120ap"
-chip_id = 0x8011
-board_id = 12
+# url, product, version, build, device_class, chip_id and board_id come from the
+# OS profile (the same iPad7,1 21H461 restore every SM8750 port boots).
 fetch = ["AppleLogo", "KernelCache", "DeviceTree", "StaticTrustCache", "Cryptex1,SystemTrustCache"]
 
 [ipsw.sha256]
 "044-76040-038.dmg" = "3f99b859c9728379110b66657c7b15285bcb1925ad8b5726542e2cdcf8b1028d"
 "044-76034-038.dmg" = "b4908cde41d23e6bc05e6af51a2c9eeb00cf0f863a6a18b1600c96a3fd70414f"
 
-[userdata]
-first_lba = 0x3a1421
-last_lba = 0x3ad07fa
-lba_bytes = 4096
-windows = [
-  { name = "OS", component = "OS" },
-  { name = "SystemOS", component = "Cryptex1,SystemOS" },
-]
+[components]
+# Catalog components the kernel and the payload need. Everything else this board
+# uses — UFS transport, AES, RAM/VirtIO block, legacy display, key store events,
+# boot progress, touch, buttons, the SM8750 GPU platform layer — is board code
+# under package/ and is compiled by the archive plan below, not by a catalog
+# recipe.
+#
+# QcomGeniSpi is the GENI SPI controller the S3910 panel sits on; it is an
+# embedded component, so it only has to be present in the tree.
+#
+# Adreno740 is the A830 backend: `unixnu` pins the module at the revision
+# patches/adreno-a830.patch is cut against and the board archive is compiled
+# from its sources. Its catalog recipe also produces
+# build/adreno740/libAdreno740.a; the archive the kernel force-loads
+# (CONFIG_XNU_NATIVE_ADRENO) is build/native-adreno/libNativeAdreno.a, because
+# that one also carries the SM8750 platform layer and the firmware blobs.
+include = ["ArmCpu", "ArmDTPlatform", "DarwinBoot", "XnuPrelink", "QcomGeniSpi", "Adreno740"]
 
-# 13T 的归档构建器（引擎脚本 + 13T 的设备脚本），末尾加 hummer 触屏。
 [kernel]
 defconfig = "hummer_defconfig"
+config_fragments = ["arch:configs/common.config", "soc:configs/sm8750.config", "os:configs/ipados.config"]
+patch_series = ["arch:patches/xnu/series", "soc:patches/xnu/series", "os:patches/xnu/series", "device:patches/xnu/series"]
+# Ordered archive plan, run before the kernel link. Selected components with a
+# kernel-stage recipe (ArmCpu, ArmDTPlatform, Adreno740) are placed ahead of
+# these entries by the resolver, so the plan lists only this board's builders. Scripts run with cwd =
+# <work>/tree, and the IPSW members are cached at <out>/ipsw/<build>, i.e.
+# ../../../../ipsw from the tree in a format 2 work directory.
 archives = [
   "build-corecrypto-14.py",
   "build-corecrypto-14.py --namespace",
   "build-libpthread-kernel.py",
-  # build-arm-platform.py 只按记录编译 ArmDTPlatform/ArmCpu，不产出归档；
-  # 而 13T 的 baseline.sh 硬性要求这两个归档存在（test -f）：
-  #   ARM_DT_ARCHIVE = build/armdt-platform/libArmDTPlatform.a
-  #   ARMCPU_ARCHIVE = build/armcpu/libArmCpu.a
-  # 这两个路径正是 build-arm-driver.py 的输出目录（见其 out 映射表），
-  # 所以必须显式跑这两个构建器。
-  "build-arm-platform.py",
-  "build-arm-driver.py ArmDTPlatform",
-  "build-arm-driver.py ArmCpu",
   "build-native-aes.py",
   "build-native-ufs.py --root-windows",
-  "build-ufs-storage-bindings.py --kernelcache ../../ipsw/21H461/kernelcache.decompressed",
+  "build-ufs-storage-bindings.py --kernelcache ../../../../ipsw/21H461/kernelcache.decompressed",
   "build-native-ufs.py --component NativeVirtioBlock --root-windows",
   "build-native-ufs.py --component NativeRamBlock --root-windows",
-  "build-sheng-platform-power.py --kernelcache ../../ipsw/21H461/kernelcache.decompressed",
+  "build-sheng-platform-power.py --kernelcache ../../../../ipsw/21H461/kernelcache.decompressed",
   "build-verified-root-probe.py --component os --include-systemos",
-  "build-stage7-display.py --kernelcache ../../ipsw/21H461/kernelcache.decompressed",
-  # hummer 触屏（S3910 @ GENI SPI4）；触发点在 scripts/pmgr/ShengPlatformPower.cpp
-  # 的 sheng_pmgr_run() 末尾（弱引用）。默认不跑（hummer-touch=0）。
+  "build-stage7-display.py --kernelcache ../../../../ipsw/21H461/kernelcache.decompressed",
+  # hummer touch: Synaptics S3910 on GENI SPI4 (the 13T has a Novatek panel).
+  # Called through the weak hook at the end of sheng_pmgr_run() in
+  # package/drivers/ShengPlatformPower; off unless hummer-touch=<n> is passed.
   "build-hummer-touch.py",
-  # USB CDC 调试控制台（nabu 的 QcomXnuUsbDebug 移植，profile soc/Sm8750.h）。
-  # 这一轮只编不链：先证明模块能对 xnu-10063 编过，下一轮再补 XNU 控制台钩子
-  # （patches/xnu/）并把 libHummerUsbCdc.a force-load 进内核。
+  # USB CDC debug console (QcomXnuUsbDebug port, soc/Sm8750 profile).
   "build-hummer-usbcdc.py",
-  # GPU bring-up 第一步：Adreno 830 (a8xx) 寄存器活性探针归档（package/HummerAdrenoProbe.c
-  # 经 CI 的 package→kits/hummer 映射后编译；引擎 build-xnu-4k-baseline.sh 在
-  # CONFIG_XNU_ADRENO_FIRMWARE_PROBE=y 时 force-load 它，bsd_init 钩子调用
-  # native_adreno_firmware_probe()）。开 boot arg hummer-adreno-probe=1 后该探针必 panic，
-  # 把 kgsl/rscc/cxmisc/gpucc 四个窗口的读值留在屏上，等真机读回后撤掉本行与对应 kernel_arg。
+  # Adreno 830 register liveness probe. In the plan but disabled: with
+  # hummer-adreno-probe=1 it panics in bsd_init and leaves the kgsl/rscc/cxmisc/
+  # gpucc readbacks on screen, which is how the GX/CX windows were measured in
+  # v142..v148. It never runs otherwise.
   "build-hummer-adreno-probe.py",
-  # GPU 驱动的归档（XNU_NATIVE_ADRENO=y 时引擎 force-load build/native-adreno/
-  # libNativeAdreno.a）。两块按顺序跑：
-  #   1. 校验 firmware/hummer-gpu/ 里的四件套（gmu / sqe / aqe / zap）。它们随
-  #      仓库分发：一共 240 KB，来自这台 PKR110 的原厂 OTA —— CI 没有手机可取，
-  #      而固件缺失会让归档步骤直接停住，后面的板级库就都进不了内核链接。
-  #      脚本只在缺失或不匹配时才刷新，默认走 adb（exec-out cat，绕开 Windows
-  #      上 MSYS 对 /vendor/... 的路径改写），也接受 --vendor-dir 指向已解包的
-  #      vendor/firmware。必须用本机的 SQE/AQE：CP 校验微码版本，linux-firmware
-  #      那套是 0x77 而不是 0x81（少 10 条 PM4 指令），换上去只表现为“CP 永不
-  #      出复位”。zap.mbn 是已签名的 Hexagon ELF，构建时按 PAS 规则切成
-  #      0xfcc metadata + 0x1000 payload（Sm8750GpuZapLoad 只收这两个尺寸）。
-  #   2. 编译整个 A830 后端（unixnu 把 drivers/NativeAdreno 升到 a9a2cbb 并打
-  #      patches/adreno-a830.patch：CP/SQE、GPU+GMU SMMU 上下文、A830 寄存器
-  #      bring-up、ring、抢占、user client、ABI v2、发布层）+ kits/AdrenoFirmware
-  #      （A8XX 性能表）+ kits/ArmSmmu4K + kits/AdrenoPM4 + package/ 里的
-  #      SM8750 平台层（GPUCC 电源 / SMMU 规划 / ZAP / socinfo / OPP 票）与
-  #      HummerGpu.cpp，把固件作为强符号一起归档。
+  # GPU firmware, then the whole A830 backend.
+  #   1. firmware/hummer-gpu holds gmu/sqe/aqe/zap (240 KB) from this phone's
+  #      stock OTA: CI has no device to pull them from, and a missing blob stops
+  #      this step, which would keep every later board library out of the link.
+  #      SQE/AQE must be the phone's own (CP checks the microcode version:
+  #      linux-firmware ships 0x77/119 PM4 packets, this phone 0x81/129, and the
+  #      wrong pair only ever shows up as "CP never leaves reset"). zap.mbn is cut
+  #      at build time into 0xfcc metadata + 0x1000 payload for PAS.
+  #   2. driver sources + SM8750 platform layer (GPUCC power, SMMU plan, ZAP,
+  #      socinfo, OPP votes) + the A8XX HFI performance table, archived together
+  #      with the firmware as strong symbols.
   "fetch-hummer-gpu-firmware.py",
   "build-hummer-adreno-kits.py",
 ]
 
 [kernel.prelink]
-tool = "kits/NativePrelink/emit_prelink.py"
+tool = "kits/XnuPrelink/emit_prelink.py"
 kernel = "build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/mach.development.bcm2837.unstripped.noctf"
 kernelcache_sha256 = "f18b4df865405f2a287b84977d7aca745e056d656d9fc9df1662970ce2969de7"
 slide = "-0x1000000"
@@ -112,160 +118,116 @@ roots = [
   "com.apple.iokit.IOHIDFamily", "com.apple.iokit.IOHIDEventDriver",
 ]
 
+[device_tree]
+# The hardware description the common ADT generator consumes: six performance
+# cores, the 4 GiB DarwinBoot window, and the SM8750 controller windows from the
+# SoC DTSI (GICv3 is exported to arm-io as "intc").
+source = "device:dts/hummer.dts"
+include_dirs = ["soc:dts"]
+
+[userdata]
+# GPT entry "userdata" of this unit (PKR110), 4 KiB sectors.
+first_lba = 0x3a1421
+last_lba = 0x3ad07fa
+lba_bytes = 4096
+
 [payload]
 volume = "UNIXNUHUMMER"
 size_mib = 160
 loader = "firmware"
 title = "OnePlus Ace 5 Pro Stage 7"
+# Must equal the memory node in dts/hummer.dts: the ADT generator rejects a
+# mismatch instead of handing XNU a size the hardware does not have.
 dram_size = "0x100000000"
 timeout = 10
-# 跳过 Setup（Hello 页）：payload 步骤用 seed-data-skip-setup.py 在 Data 种子的**副本**上
-# 展开 APFS、rw 挂载、把 Setup 标记为完成（com.apple.purplebuddy 的 SetupDone /
-# SetupFinishedAllSteps、notbackedup 的 mini-buddy 全 false、managedconfiguration 不提示
-# 云配置、migration 的 buildVersion=21H461），原始种子不变，改好的副本当 scratch-data.img。
-# 脚本用本 repo scripts/ 里的那份：它支持 --no-auto-dim，而引擎 upstream.rev=d9460ebb 的
-# 同名脚本是 `len(sys.argv)!=3` 就退出、不接受额外参数。--no-auto-dim 关掉 SpringBoard
-# 自动变暗/空闲休眠——本机还没按键、触摸刚接上，不关的话起来约 30 秒就熄屏。
+# Skip Setup (the Hello screen): seed-data-skip-setup.py works on a copy of the
+# Data seed and marks Setup finished (purplebuddy SetupDone/SetupFinishedAllSteps,
+# notbackedup mini-buddy flags false, managedconfiguration quiet, migration
+# buildVersion=21H461). --no-auto-dim keeps SpringBoard from dimming and sleeping
+# after ~30 s, which matters while the panel is the only output.
 skip_setup_tool = "scripts/seed-data-skip-setup.py"
 skip_setup_args = ["--no-auto-dim"]
 kernel_args = [
   "-v", "serial=0", "debug=0x14e", "cpus=6", "kt_fixed_zones=240",
-  # USB CDC 调试控制台（M2）。qcom-usb-debug=1 才会初始化 DWC3 并把 PE_kputc
-  # 接到 USB；主机侧应看到 USB\VID_1209&PID_316D\QCOMXNUUSBDEBUG 的 COM 口。
-  # 没接 USB 时它只是几个失败的寄存器读，不影响启动。
+  # USB CDC debug console: qcom-usb-debug=1 initialises DWC3 and routes PE_kputc
+  # to USB; the host then sees USB\VID_1209&PID_316D\QCOMXNUUSBDEBUG.
   "qcom-usb-debug=1",
-  # DEVELOPMENT 构建里 disable_kprintf_output 默认是 true：PE_init_kprintf_config
-  # 只在显式传 -enable_kprintf_spam 时才把它关掉。没有这个参数，串口只能拿到
-  # init 之前那一段，之后（含 worker 和探针报告）全部静音。
+  # DEVELOPMENT kernels default disable_kprintf_output to true; without
+  # -enable_kprintf_spam the UART goes silent after init.
   "-enable_kprintf_spam",
-  # v182：kprintf 走 CPU ring + worker 泵，而 worker 到底有没有在跑目前看不到；
-  # panic drain 是同步路径，不依赖 worker，所以先让探针 panic 一次，把
-  # usb/ph/er/dr/ds 那几行完整送到串口。
-  "hummer-adreno-panic=1",
-  # 根镜像所在分区：编译期由 GccUfs.h 的 UFS_ROOT_PARTITION 决定——SM8750 构建
-  # (-DNATIVE_UFS_SM8750=1) 已经锁成 "unixnu"，所以这里不用、也不能用启动参数覆盖。
   "native-ufs-root=1", "native-ufs-diagnostics=1", "sheng-pmgr=2",
   "offline-apfs-load=1", "startup_debug=0", "-no_corpses",
   "sheng-vsync=60", "sheng-vsync-fixed=1", "offline-mobile-graphics-load=1",
   "offline-legacy-register=1", "offline-legacy-phase=4", "offline-legacy-gop=1",
   "offline-legacy-pm=1", "offline-legacy-validate=1", "offline-legacy-transfer=1",
   "offline-legacy-cpu-present=1", "offline-key-events=1", "sheng-aks=1",
-  # 多核：ADT 有 6 个 cpu 节点 + /psci，但 ArmCpu::probe 对从核 nub 直接返回 nullptr，
-  # 除非给了 sheng-smp=1（drivers/ArmCpu/ArmCpu.cpp 的 probe）。v115 实测
-  #   HUMTOUCH cpu processor_count=1 avail=1 cpus_arg=6
-  # 所以不是 PSCI 失败，是从核根本没注册。v116 打开：
-  #   sheng-smp=1      注册从核，startCPU 里发 PSCI 0.2 CPU_ON
-  #   sheng-smp-gic=1  CPU_ON 之前由 boot CPU 唤醒目标核的 GICR（GICv3 必需，
-  #                    否则新核在自己的 redistributor 上 wfe 死等）
-  # 两个 Oryon prime 核在 MPIDR Affinity2（0x10000/0x10100），而 XNU 的
-  # ml_parse_cpu_topology 只用 MPIDR_CLUSTER_ID / MPIDR_CPU_ID（Affinity1/0）
-  # 算拓扑，两个核会塌到 logical 0（历史上 AppleS8000CPU 就是这么 panic 的）。
-  # 所以这一轮只跑 6 个 Affinity1 核；要 8 核得改引擎侧的亲和性映射。
-  # 触屏上报链路（对齐 13T 的四个开关，缺一个都收不到触摸）：
-  #   offline-hid-input=1  HummerHidInput 启动（加载 IOHIDFamily/IOHIDEventDriver、
-  #                        创建 owned IOHIDDevice）
-  #   offline-hid-home=1   上面那段创建条件（13T 就把 Home 开关复用成总闸）
-  #   sheng-touch-hid=1    NativeHidInput 才注册 native_touch_set_sink、才拼
-  #                        触摸报告描述符、才置 Built-In/DisplayIntegrated
-  #   hummer-touch=4       S3910 探针跑到触点轮询并 publish
-  # v76 bring-up: 切到 =3 + panic=3 读 IDENTIFY 寄存器，fifo=1 强 FIFO 路径。
-  # v76a: 加 memset(rx, 0xaa) 诊断。panic 屏 x0 斜杠后若还是 aa aa aa aa
-  #   -> geni_spi_transfer 根本没启动 SCLK（opcode/FIFO_IF_DISABLE 问题）
-  #   -> 变成 00/ff/其他 -> 传输跑了，从机没驱动 MISO（供电/复位引脚问题）
-  # fifo=0 (DMA) 实测硬复位，无 panic 屏，排除。
-  # v111 实测：done s4/4, mx12639 my27799 obj10 cfg128 -> 面板几何是 1264x2780（0.1px
-  #   单位），10 个触点对象，配置块 128 字节；cmd-db 布局确认为 slave 8 / data 144，
-  #   两路 LDO 地址 0x40800(L4B) / 0x41900(L16B)。
-  # v112: panic 关掉，stage 4 之后进触点轮询并往 NativeHidInput publish。
-  #   想再要一次"点到为止"的诊断屏就把它改成 9（第一个触点上报时 panic）。
-  # v113: 第一次真机触摸的结果是"左右对、上下反"——sheng 那块面板要的 Y 镜像在
-  #   hummer 上是多余的，默认关掉（hummer-touch-fy=1 可再打开）。
-  "offline-hid-input=1", "offline-hid-home=1", "sheng-touch-hid=1",
+  # Six cores from Affinity1 (0x0..0x500). The two Oryon prime cores sit in
+  # Affinity2 (0x10000/0x10100) and would collapse onto logical 0, which panics
+  # AppleS8000CPU, so the ADT lists only the six Affinity1 cores.
+  #   sheng-smp=1      register the secondary cores and send PSCI 0.2 CPU_ON
+  #   sheng-smp-gic=1  wake the target core's GICR before CPU_ON (GICv3 needs it)
   "sheng-smp=1", "sheng-smp-gic=1",
-  # v128（抄 UniXNU-sheng）：内核里 HAS_IPI 未定义，XNU 的 IPI 在非 Apple 平台上没有实现，
-  #   task_restartable_ranges_synchronize() 等的那个 ACK 永远等不到。sheng 的补丁在
-  #   startup.c 里加了 -no_slto_panic，注释原文：
-  #     "A thread that waits for an IPI acknowledgement (restartable ranges) then keeps
-  #      waiting instead of panicking the whole machine; the other cores keep running."
-  #   再配 ml-timeout-lock-panic-scale=40 把锁超时阈值放宽 40 倍。
-  #   armcpu-spi-ipi=1 保留：让 ArmCpu::signalCPU 用软件 pend 的 SPI 1008+core 而不是
-  #   ICC_SGI1R_EL1（ArmCpu 注释：本板不产生中断），能到就赚到，到不了也只会让那个线程
-  #   在超时后继续等，不再拖死整机。
+  # HAS_IPI is undefined in this kernel, so task_restartable_ranges_synchronize()
+  # would wait for an acknowledgement that never arrives. -no_slto_panic makes
+  # that thread keep waiting instead of panicking the machine; the lock timeout
+  # is widened 40x to match.
   "armcpu-spi-ipi=1", "-no_slto_panic", "ml-timeout-lock-panic-scale=40",
-  "hummer-touch=4", "hummer-touch-panic=0", "hummer-touch-fifo=1",
-  "hummer-touch-fy=0",
-  # v129 三个实体键（package/HummerButtons.cpp，结构照 UniXNU-sheng 的 ButtonProbe）：
-  #   电源   = PMK8550 PON pwrkey（SPMI USID 0，periph 0x13，RT_STS 0x1310 bit7）
-  #   音量减 = PM8550 GPIO6（USID 1，periph 0x8d，RT_STS 0x8D10 bit0，低有效，上拉）
-  #   音量加 = PMK8550 PON resin（同一 RT_STS 的 bit6）
-  #   —— hummer.dts 只给了 GPIO6 这一个 gpio-keys 子节点（vol_down），第二个音量键只能在
-  #   RESIN 上；若实测上下相反，改 pressed() 里那两行即可。
-  #   SPMI 访问用引擎自带的 BootResetCore.h（br_read8/br_write8），不再自己写一份。
-  #   上报走报告 2 的 bit1 Power / bit2 Volume Increment / bit3 Volume Decrement
-  #   （drivers/NativeHidInput 的 report 2 已按 ShengHidInput 的定义扩成这四个 usage）。
-  #   但 report 2 的 Consumer usage 是嵌在键盘 collection 里的，下游没有任何证据会读它，
-  #   所以 v134 起按键走**自己的 Consumer Control 设备**（primary usage 0x000C/0x0001，
-  #   和耳机线控音量键同一种形状），触屏那台键盘/数字化仪设备完全不动。
-  #   20 ms 轮询 + 3 次去抖（60 ms，越过 DTS 的 32 ms）。
-  #   0 = 关；1 = 启用；2 = 观察模式：扫描 PON 状态页（0x10..0x1f）与两颗 PMIC 各 12 个
-  #   GPIO 焊盘的实时状态，报告哪一个真的动过；有东西动过就在最后一次动作 30 秒后 panic，
-  #   什么都没动就等 120 秒（桌面大约 40 秒才起来，25 秒那种窗口太早，v134 就是这么白等的）。
-  #   同时打出 sent mask、按下次数、HID 侧状态（是否被打开 / 是否挂上 event driver / 返回码）。
-  #   v135 屏已经把"读"这一半彻底证实：p4 m0000000e st0002 —— 电源键（PON bit7）、
-  #   RESIN（bit6）、GPIO6 三个都读到了，三个报告位都发过，且 IOHIDEventDriver 确实挂在
-  #   新的 Consumer Control 设备下面。剩下唯一的问题是 iOS 认不认这些 Consumer usage。
-  #   v136 的 Menu 探针**没反应**，于是问题不再只是 usage：独立那台 Consumer Control 设备
-  #   （st0002 的 bit0=0）有个从没 open 它的 IOHIDEventDriver 子节点，报告送进去没人收。
-  #   v137 起：① 按键改回**合并设备**（它的数字化仪从 v112 起就一直在工作，确定被消费）；
-  #   ② report 2 的 Consumer 拆成**自己的 top-level collection**（不再是键盘 collection 的子项）。
-  #   v137 实测：去掉独立设备、按键回到合并设备、report 2 的 Consumer 拆成自己的
-  #   top-level collection 之后，按任意键报成 Consumer Menu（Home）**能稳定回到桌面** ——
-  #   通路（合并设备的数字化仪从 v112 起就被消费）彻底打通。
-  #   v138：撤销 menu 探针，让电源/音量键报各自真实 usage；并交换 descriptor 里 0xe9/0xea 的
-  #   位序（以为 VolUp/VolDown 接反）。但实测音量仍反 → 真因不在 descriptor，而在
-  #   HummerButtons.cpp 的 RESIN/GPIO6 物理映射写反了（误信 DTS 命名 GPIO6=vol_down）。
-  #   v139（对照官方 ShengHidInput 参考）：① 把 RESIN/GPIO6 对调成 GPIO6=音量加、RESIN=音量减
-  #   （与 sheng 一致、与实测硬件一致）；② report 2 从独立 top-level Consumer collection **嵌回
-  #   键盘 application**（sheng 的结构）——iOS 把键盘的 consumer 控制当系统键路由，独立集合只送到
-  #   Home、电源键不吃这一套。电源键仍用 Consumer 0x30(Power)。
-  #   音量键在没有音频驱动（本机没有 codec/audio）时不会出声，属已知缺口，非回归。
+  # Touch needs all four switches to receive a report:
+  #   offline-hid-input=1  load IOHIDFamily/IOHIDEventDriver and own the device
+  #   offline-hid-home=1   the creation condition the 13T reuses as a master switch
+  #   sheng-touch-hid=1    register native_touch_set_sink, build the descriptor
+  #   hummer-touch=4       run the S3910 probe up to contact polling and publish
+  # fifo=1 keeps the FIFO path (DMA hard-reset the controller); fy=0 drops the Y
+  # mirror the sheng panel needs, which inverted this panel.
+  "offline-hid-input=1", "offline-hid-home=1", "sheng-touch-hid=1",
+  "hummer-touch=4", "hummer-touch-panic=0", "hummer-touch-fifo=1", "hummer-touch-fy=0",
+  # Three physical keys, polled at 20 ms with 60 ms debounce:
+  #   power = PMK8550 PON pwrkey, volume- = PMK8550 PON resin,
+  #   volume+ = PM8550 GPIO6 (the DTS names it vol_down; the hardware is the
+  #   other way round). Reported on report 2's Consumer collection inside the
+  #   keyboard application, the layout iOS routes as system keys.
   "hummer-keyscan=1",
-  # v140 GPU bring-up 第一步（临时诊断，读回寄存器后撤掉）：开 Adreno 830 寄存器活性探针。
-  # 开后会 panic 把 kgsl/rscc/cxmisc/gpucc 四个窗口的读值留在屏上/UART，用于确认设备树
-  # 声称的 GPU 寄存器窗口到底有没有响应（GX 电源域塌了会回 0，不会挂总线）。
-  #
-  # v153 起注释掉：探针的问题已经答完了（v142~v148：窗口可读、CX 能上电、PLL 能锁、
-  # TCM 可写、GMU 从没启动过），而且它会在 bsd_init 里 panic，挡住"驱动链进内核后
-  # 能不能正常开机"这件事。要再量一次就把下面这行取消注释。
-  # "hummer-adreno-probe=1",
-  # v185 GPU 全链（package/HummerGpu.cpp，照抄一加 13T 那套 A830 实现）。
-  # 挂在 native_legacy_display_late_probe 里（IOKit 起来之后），流程是
-  # 板级输入（cmd-db + socinfo + QFPROM speed bin → 真 OPP 票）→ GPUCC 上电
-  # （GCC/GDSC/PLL/RCGR/分支时钟，含 CX/MX 的 RPMH 票）→ GPU SMMU 规划
-  # （SID 0/1 + GMU SID 5）→ 固件内存 → GMU 冷启动 + 整张 gen8 性能表 →
-  # CP 初始化 → ZAP 认证 → PM4 写一次 scratch 证明 ring 通 → 发布服务 →
-  # 加载 Metal 加速器。每一步在屏上留名字，卡住能看出卡在哪。
-  # 注意：hummer_gpu_start() 自己不 panic，失败只报状态并继续开机。
+  # A830 bring-up: package/HummerGpu.cpp, called from the legacy display late
+  # probe once IOKit is up. Board inputs (cmd-db, socinfo, QFPROM speed bin ->
+  # real OPP votes) -> GPUCC power (GCC/GDSC/PLL/RCGR/branch clocks, RPMH votes
+  # for CX and MX) -> GPU SMMU plan (SID 0/1 and GMU SID 5) -> firmware memory ->
+  # GMU cold start and the whole gen8 performance table -> CP init -> ZAP
+  # authentication -> one PM4 scratch write -> publish -> Metal accelerator.
+  # hummer_gpu_start() never panics: a failure is reported and boot continues.
   "hummer-adreno-bringup=1",
-  # v120 实测（带 hummer-cpu=1 的延迟诊断屏）：
-  #   HUMTOUCH cpu processor_count=6 avail=6 max=5 cpus_arg=6
-  # 六核全部注册，SMP 通了，所以这里不再带诊断参数。需要再量一次就把
-  # "hummer-cpu=1" 加回来（15 秒后 panic 报告核数，hummer-cpu-delay 可调毫秒）。
 ]
 trust_cache_sha256 = ["7416ca4f8377146626bb284e2133c76bee6cb4e3ee0af5d648b186235a7323a7"]
 
 [payload.adt]
-ipad_identity = true
-unique_chip_id = "required"
+# Format 2 builds the ADT from dts/hummer.dts with the common generator. The
+# Apple identity (root model/target-type, chosen security properties, product
+# table) comes from the OS profile; only the payload handoff stays here.
 chip_id = "0x8011"
-packed_data_ramdisk = true
-tool = "scripts/make-hummer-adt.py"
 owned_memory_size = "0x100000000"
-cpu_regs = "0,0x100,0x200,0x300,0x400,0x500"
-# 根卷 UUID（与内核 offline-owner-systemos-mount.patch 里发布 boot manifest 的那个一致）
+packed_data_ramdisk = true
+unique_chip_id = "required"
+# Root volume UUID, matching the owner policy and the boot manifest.
 root_match_volume_uuid = "04769D26-2CA0-4825-B443-E2E5F88300F2"
 
-# 本机 UEFI 固件（hummerPkg）：保留，不换 13T 的 oneplus13tPkg。
+[adt.defaults.u32]
+# No keys and no sleep: a display that dims after 30 s is unusable for bring-up.
+sleep-disabled = 1
+
+[adt.product.string]
+model = "hummer"
+
+[adt.buttons.string]
+compatible = "buttons"
+device_type = "buttons"
+
+[adt.buttons.strings]
+button-names = ["hold", "voldown", "volup"]
+
+[adt.buttons.u32]
+home-button-type = 2
+
+# This unit's UEFI firmware (hummerPkg), validated on the phone; the 13T's
+# oneplus13tPkg does not boot here.
 [firmware]
 config = "hummer"
 dsc = "Platforms/OnePlus/hummerPkg/hummer.dsc"
@@ -282,7 +244,7 @@ packages = [
 ENABLE_SECUREBOOT = "0"
 MEMORY_PROTECTION = "TRUE"
 SHIP_MODE = "FALSE"
-BUILDID_STRING = "hummer-13t-port"
+BUILDID_STRING = "hummer-format2"
 
 [bootimg]
 embed_payload = true

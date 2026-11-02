@@ -28,8 +28,13 @@ GSI = ROOT / 'kits/hummer/HummerGsi.c'
 GSI_H = ROOT / 'kits/hummer/HummerGsi.h'
 RPMH = ROOT / 'kits/hummer/HummerRpmh.c'
 BUTTONS = ROOT / 'kits/hummer/HummerButtons.cpp'
-GENI = ROOT / 'drivers/NativeGeniSpi/GeniSpi.c'
-GENI_H = ROOT / 'drivers/NativeGeniSpi/GeniSpi.h'
+# The GENI SPI controller is a catalog component (QcomGeniSpi). It appears in the
+# tree as drivers/QcomGeniSpi; the engine revision that still called the module
+# NativeGeniSpi is accepted too, so the recipe survives either pin.
+GENI_DIR = next((path for path in (ROOT / 'drivers/QcomGeniSpi', ROOT / 'drivers/NativeGeniSpi') if path.is_dir()),
+                ROOT / 'drivers/QcomGeniSpi')
+GENI = GENI_DIR / 'GeniSpi.c'
+GENI_H = GENI_DIR / 'GeniSpi.h'
 
 
 def run(command, cwd):
@@ -79,7 +84,7 @@ def audit(object_path):
         raise SystemExit(f'Unexpected platform deployment {deployment}')
 
 
-for required in (CPP_RECORD, C_RECORD, PROBE, GSI, GSI_H, ROOT / 'drivers/NativeGeniSpi/GeniSpi.h'):
+for required in (CPP_RECORD, C_RECORD, PROBE, GSI, GSI_H, GENI_H):
     if not required.exists():
         raise SystemExit(f'{required} is missing; the touch build cannot proceed')
 
@@ -93,7 +98,7 @@ cpp_command += ['-Wall', '-Wextra', '-Wno-unused-parameter',
                 # panic screen); ++ on a volatile is deprecated in C++20.
                 '-Wno-deprecated-volatile',
                 '-I', str(ROOT / '.cache/xnu-work/osfmk'),
-                '-I', str(ROOT / 'kits/hummer'), '-I', str(ROOT / 'drivers/NativeGeniSpi'),
+                '-I', str(ROOT / 'kits/hummer'), '-I', str(GENI_DIR),
                 # v167: the probe reports the USB CDC module's status, so it needs
                 # QcomXnuUsbDebug.h from the vendored module.
                 '-I', str(ROOT / 'kits/hummer/usbcdc/include')]
@@ -120,11 +125,11 @@ geni_source.write_text(GENI.read_text())
 print('HummerTouch: GENI_M_CMD_TX_RX = 3 (TX_ONLY|RX_ONLY, mainline SE/FIFO full-duplex)')
 
 c_command, c_dir = replay(C_RECORD, geni_source, OUT / 'GeniSpi.o')
-# GeniSpi.c is ENGINE code (drivers/NativeGeniSpi); compiling it with -Werror
+# GeniSpi.c is ENGINE code (drivers/QcomGeniSpi); compiling it with -Werror
 # fails on the engine's own warnings. Keep -mgeneral-regs-only for kernel code.
 c_command += ['-Wall', '-Wextra', '-mgeneral-regs-only',
               '-I', str(ROOT / '.cache/xnu-work/osfmk'),
-              '-I', str(ROOT / 'drivers/NativeGeniSpi')]
+              '-I', str(GENI_DIR)]
 if c_command and c_command[0] in ('clang', 'cc', 'clang++'):
     c_command = ['xcrun', '--sdk', 'iphoneos', c_command[0]] + c_command[1:]
 (OUT / 'compile-command-geni.json').write_text(json.dumps(c_command, indent=2) + '\n')

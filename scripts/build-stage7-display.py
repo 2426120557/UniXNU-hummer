@@ -8,7 +8,10 @@ import struct
 import subprocess
 import sys
 ROOT=Path(__file__).resolve().parents[1];OUT=ROOT/'build/native-legacy-display';OUT.mkdir(parents=True,exist_ok=True)
-sys.path.insert(0,str(ROOT/'kits/NativePrelink'))
+sys.path.insert(0,str(next((d for d in (ROOT/'kits/XnuPrelink', ROOT/'kits/NativePrelink') if d.is_dir()), ROOT/'kits/XnuPrelink')))
+sys.path.insert(0,str(ROOT/'scripts'))
+import board_sources
+HID_DIR=next((d for d in (ROOT/'drivers/ShengHidInput', ROOT/'drivers/NativeHidInput') if d.is_dir()), ROOT/'drivers/ShengHidInput')
 from native_prelink import macho,backed_offset,exports
 def run(cmd,**kw):return subprocess.check_output([str(x) for x in cmd],timeout=90,**kw)
 def require(v,why):
@@ -260,12 +263,12 @@ require(code(hid_raw,hid_macho)==code(hid_late.read_bytes(),macho(hid_late.read_
 objects += [hid_late,hid/'hid-original-bindings.o']
 archive=OUT/'libNativeLegacyDisplay.late.a';archive.unlink(missing_ok=True)
 run(['xcrun','ar','rcs',archive,*objects])
-sources=[ROOT/'drivers/NativeMobileDisplay/NativeLegacyDisplay.cpp',
-         ROOT/'drivers/NativeMobileDisplay/NativeLegacyRequest.h',
-         ROOT/'drivers/NativeKeyStoreEvents/NativeKeyStoreEvents.cpp',
+sources=[board_sources.driver('NativeMobileDisplay')/'NativeLegacyDisplay.cpp',
+         board_sources.driver('NativeMobileDisplay')/'NativeLegacyRequest.h',
+         board_sources.driver('NativeKeyStoreEvents')/'NativeKeyStoreEvents.cpp',
          ROOT/'scripts/stage7/Stage7Probe.cpp',
          ROOT/'kits/hummer/HummerHidInput.cpp',
-         ROOT/'drivers/NativeHidInput/NativeHidInput.cpp',
+         HID_DIR/'NativeHidInput.cpp',
          ROOT/'kits/hummer/OriginalHidDeviceABI.h',ROOT/'kits/hummer/hid-vtable.txt',Path(__file__),
          ROOT/'scripts/build-stage7-driver.py',ROOT/'scripts/original_stage7.py',ROOT/'scripts/audit-stage7-display.py']
 (OUT/'build-report.json').write_text(json.dumps(dict(original_sha256=original.sha256,

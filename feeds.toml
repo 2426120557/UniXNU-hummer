@@ -1,0 +1,14 @@
+# Sources of this device repository, in addition to the feeds.toml of UniXNU.
+#
+# SM8750 has no maintained SoC repository under the UniXNU organisation, so this
+# pin is the published SM8750 source: the OnePlus 13T port's common tree. It is
+# the same SoC as this board (SM8750, Adreno 830) and supplies the pieces a
+# device repository must not duplicate: the SM8750 DTSI (CPU, GICv3, UFS, GPU,
+# GMU, GPUCC and GPU SMMU windows), the SoC configuration fragment and the
+# sm8750-smp XNU patch series. The board overrides everything it observes
+# differently in board.toml and dts/hummer.dts.
+[[source]]
+name = "sm8750"
+kind = "soc"
+git = "https://github.com/IssacL04/UniXNU-sm8750-common.git"
+commit = "b79d675e522383c29131ccda8529fda45e1f2852"

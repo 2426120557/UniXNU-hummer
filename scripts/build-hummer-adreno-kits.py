@@ -109,6 +109,11 @@ FIRMWARE_CHECK = [
      'e294fba1f90045b321db3cc74a4f0012ca82b5c5b2b6051b845bde9738ac1747'),
 ]
 
+# The driver module is a catalog component: Adreno740 since the format 2 rename,
+# NativeAdreno in the engine revisions that predate it.
+DRIVER_RELATIVE = next((path for path in ('drivers/Adreno740', 'drivers/NativeAdreno') if (ROOT / path).is_dir()),
+                       'drivers/Adreno740')
+
 INCLUDES = [
     'kits/ArmSmmu4K',
     'kits/AdrenoPM4',
@@ -119,8 +124,9 @@ INCLUDES = [
     'build/native-adreno',
     # package/HummerGpu.cpp lives in kits/hummer but includes the driver's own
     # headers (NativeAdrenoGpuContext.h and friends), which sit in the driver
-    # directory.
-    'drivers/NativeAdreno',
+    # directory: drivers/Adreno740 in a format 2 tree, drivers/NativeAdreno in
+    # the engine revision before the catalog rename.
+    DRIVER_RELATIVE,
     '.cache/xnu-work/osfmk',
 ]
 
@@ -241,9 +247,9 @@ DRIVER_SOURCES = ('A830HwInit', 'CpInit', 'Cpu', 'GmuContext', 'GmuMemory', 'Gpu
 def sources():
     """Every translation unit that belongs in the archive."""
     items = []
-    driver = ROOT / 'drivers/NativeAdreno'
+    driver = ROOT / DRIVER_RELATIVE
     if not driver.is_dir():
-        raise SystemExit('%s missing: the NativeAdreno submodule is not checked out' % driver)
+        raise SystemExit('%s missing: the GPU driver module is not checked out' % driver)
     for name in DRIVER_SOURCES:
         path = driver / ('NativeAdreno' + name + '.cpp')
         if not path.is_file():

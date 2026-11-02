@@ -7,6 +7,7 @@ import runpy
 import re
 import struct
 import subprocess
+import sys
 
 
 def main():
@@ -14,6 +15,8 @@ def main():
            ('XNU_EARLY_BOOT_PROGRESS', 'XNU_ARM_DT_PLATFORM', 'XNU_ARMCPU')):
         raise SystemExit('13T boot progress requires early progress, ArmDTPlatform and ArmCpu')
     root = Path(__file__).resolve().parents[1]
+    sys.path.insert(0, str(root / 'scripts'))
+    import board_sources
     compile_command = runpy.run_path(str(root / 'scripts/build-arm-platform.py'))['compile_command']
     recipe = root / 'build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/osfmk/DEVELOPMENT/startup.o.json'
     record = json.loads(recipe.read_text().strip().rstrip(','))
@@ -21,7 +24,7 @@ def main():
     output.mkdir(parents=True, exist_ok=True)
     subprocess.run(['python3', root / 'scripts/prepare-boot-logo.py',
                     root / '../../ipsw/21H461/applelogo@2732~ipad.im4p', output / 'BootLogo.h'], check=True)
-    source = root / 'drivers/BootProgress'
+    source = board_sources.driver('BootProgress')
     obj = output / 'BootProgress.o'
     command = compile_command(record, source / 'BootProgress.c', obj)
     # Bootstrap records disable the hooks; this object supplies their enabled implementation.

@@ -113,6 +113,39 @@ static IOReturn hostSubmit (uint32_t direction, uint32_t dataBytes, uint32_t tim
     cacheInvalidate (gHost.virt + kUcdOffset + kRspOffset, 64);
     gRootDiagnostic.dmaOcs = *reinterpret_cast<volatile uint32_t *> (gHost.virt + 8) & 0xff;
     gRootDiagnostic.dmaResponse = loadBe32 (gHost.virt + kUcdOffset + kRspOffset);
+    // hummer: bounded recovery (injected by build-native-ufs.py). One stale or
+    // hibernated link must not poison the whole root: if the doorbell was released
+    // and no fatal status is latched, the command was never consumed, so wake the
+    // link and re-ring the same UTRD a bounded number of times. Writes never retry.
+    for (unsigned recover = 0; direction != 1 && recover < 2; ++recover) {
+      if (read32 (gHost.hc, 0x58) != 0) break;
+      if (read32 (gHost.hc, 0x20) & kUfsFatalStatus) break;
+      hostWrite (0x18, 0);
+#if defined(NATIVE_UFS_SM8750) && NATIVE_UFS_SM8750
+      {
+        const char *wakeWhy = nullptr;
+        if (!hostWakeLink (&wakeWhy)) break;
+      }
+#endif
+      hostWrite (0x20, 1);
+      cacheCivac (gHost.virt, kDataOffset + dataBytes);
+      started = mach_absolute_time ();
+      clock_interval_to_deadline (timeoutUs, kMicrosecondScale, &port.deadline);
+      hostWrite (0x58, 1);
+      state = UfsTransferPoll ();
+      end = pollUfsTransfer (port, state);
+      if (end == UfsTransferEnd::Completed) break;
+    }
+    if (end == UfsTransferEnd::Completed) {
+      *ocs = state.ocs;
+      gRootDiagnostic.elapsedTicks = mach_absolute_time () - started;
+      gRootDiagnostic.polls = state.polls;
+      gRootDiagnostic.dbSeen = state.doorbellSeen;
+      gRootDiagnostic.isSeen = state.interruptSeen;
+      cacheInvalidate (gHost.virt, kDataOffset + dataBytes);
+      gRootDiagnostic.response = loadBe32 (gHost.virt + kUcdOffset + kRspOffset);
+      return recordTransport (*ocs == 0 ? kIOReturnSuccess : kIOReturnIOError, *ocs);
+    }
     // No cancel/reset/retry: the controller may still own the buffer, even
     // with DB=0. Keep it allocated and prohibit all subsequent CPU writes.
     gHost.poisoned = true;

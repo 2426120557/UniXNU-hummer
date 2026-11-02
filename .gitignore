@@ -1,3 +1,31 @@
-# UniXNU build/device artifacts
-.cache/
+# UniXNU build and device artifacts
+/.cache/
+/out/
+/build/
+/sysinfo/
 __pycache__/
+*.pyc
+
+# Images and objects a build leaves behind
+*.img
+*.macho
+*.efi
+*.o
+*.a
+*.log
+
+# Local overrides
+local.toml
+unixnu.local.toml
+
+# Private inputs and generated firmware
+*.fd
+*.dtb
+*.dmg
+*.ipsw
+*.im4p
+*.dbr
+*.dbrdisk
+*.pem
+*.key
+.env

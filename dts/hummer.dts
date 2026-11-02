@@ -1,0 +1,37 @@
+/dts-v1/;
+/include/ "sm8750.dtsi"
+
+/ {
+    model = "OnePlus Ace 5 Pro";
+    compatible = "oneplus,hummer", "qcom,sm8750";
+
+    // DarwinBoot owns one contiguous 4 GiB window and fills boot_args from its
+    // own allocation; the ADT handoff before the format 2 migration carried the
+    // same zero base with the size below, so the memory node describes that
+    // window rather than the full 16 GiB of installed DRAM.
+    // payload.dram_size in board.toml must stay equal to this size.
+    memory@0 {
+        device_type = "memory";
+        reg = <0 0 0 0x100000000>;
+    };
+};
+
+// Six cores: the eight SM8750 CPUs are all present in the SoC DTSI but only the
+// six whose MPIDR lives in Affinity1 (0x0..0x500) are usable. The two Oryon
+// prime cores sit in Affinity2 (0x10000/0x10100); XNU computes its topology from
+// Affinity1/Affinity0 only, so they would collapse onto logical 0 and panic
+// AppleS8000CPU ("CPU configuration in device tree is invalid").
+&cpu0 { status = "okay"; };
+&cpu1 { status = "okay"; };
+&cpu2 { status = "okay"; };
+&cpu3 { status = "okay"; };
+&cpu4 { status = "okay"; };
+&cpu5 { status = "okay"; };
+
+// Adreno 830 (gen8_0_0). The bring-up in package/HummerGpu.cpp reads its
+// registers, OPPs and firmware identity from cmd-db, socinfo and QFPROM, not
+// from the device tree; these properties only identify the node.
+&gpu {
+    qcom,chipid = <0x44050001>;
+    qcom,gpu-model = "Adreno830v2";
+};

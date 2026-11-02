@@ -1,9 +1,10 @@
-# OnePlus Ace 5 Pro (hummer, SM8750) — 13T (Pagani) full-iPadOS config.
+# Kernel configuration of the OnePlus Ace 5 Pro (hummer, SM8750).
+# Each CONFIG_XNU_<NAME> becomes XNU_<NAME> for the build scripts; {tree} in a
+# string is the build tree. The shared fragments (arch/soc/os) apply first, the
+# SoC one adding the SM8750 timer, PAN and panic-region settings; this file is
+# applied last and therefore only lists what the board itself decides.
 #
-# 直接采用 13T 的 oneplus13t_defconfig（同 SM8750、同 21H461 kernelcache）：
-# UFS 根、AES、verified root、virtio/ram block、legacy display、boot progress。
-# 只多一条：force_load hummer 自己的 S3910 触屏归档（13T 是 Novatek，
-# 对本机面板无效；驱动默认关闭，靠 boot arg hummer-touch=<n> 打开）。
+# The starting point is the 13T configuration: same SoC, same 21H461 kernelcache.
 
 CONFIG_XNU_BUILD_ARCHIVES=y
 CONFIG_XNU_SOURCE_CORECRYPTO14=y
@@ -11,12 +12,14 @@ CONFIG_XNU_SOURCE_PTHREAD=y
 CONFIG_XNU_ARM_DT_PLATFORM=y
 CONFIG_XNU_ARMCPU=y
 CONFIG_XNU_NATIVE_ARCH_TIMER=y
-# SM8750 copyio 访问用户页时要临时清 PAN。
+# SM8750 copyio must temporarily clear PAN when it touches user pages.
 CONFIG_XNU_NATIVE_PAN=y
-# BCM2837 的 panic buffer 地址在本机没有映射。
+# The BCM2837 panic buffer address is not mapped on this device.
 CONFIG_XNU_DT_PANIC_REGION=y
 CONFIG_XNU_CRYPTO_BOOTSTRAP="prelinked"
 # CONFIG_XNU_ARMVIRT_PLATFORM is not set
+
+# Read-only owner-verified root, original AMFI and SystemOS startup.
 CONFIG_XNU_NATIVE_UFS=y
 CONFIG_XNU_NATIVE_AES=y
 CONFIG_XNU_VERIFIED_ROOT_PROBE=y
@@ -31,24 +34,29 @@ CONFIG_XNU_OWNER_CACHE_STARTUP=y
 CONFIG_XNU_OWNER_BOOT_MANIFEST=y
 CONFIG_XNU_NATIVE_RAM_BLOCK=y
 CONFIG_XNU_OWNER_DATA_MOUNT=y
-# OWNER_DATA_VOLUME_UUID 在构建前由真实 RAM seed 写入。
+# OWNER_DATA_VOLUME_UUID is written from the real RAM seed before the build.
 CONFIG_XNU_OWNER_UNION_SYSTEMOS=y
 CONFIG_XNU_VERIFIED_ROOT_ARCHIVE="{tree}/build/verified-root-os-xnu-bundle/libVerifiedRootProbe.a"
-# GPU 驱动：drivers/NativeAdreno 升到 a9a2cbb 后经 patches/adreno-a830.patch 落到 A830，
-# 平台层是 package/ 里的 SM8750 版 ShengGmu/ShengGpuSmmu/ShengGmuCommandDb，
-# 归档由 build-hummer-adreno-kits.py 产出，引擎在本地 force-load。
-# 本版不带 personality（引擎注释：由板级探针直接调用），所以只是把驱动链进内核，
-# 不改开机行为——真正的 GPU 动作要等探针去调 ShengGmuLoadAndStartHfi。
+
+# Adreno 830: the backend is drivers/Adreno740 (pinned to the revision
+# patches/adreno-a830.patch is cut against) plus the SM8750 platform layer in
+# package/. build-hummer-adreno-kits.py produces
+# build/native-adreno/libNativeAdreno.a, which this switch force-loads. The
+# driver ships without a personality: package/HummerGpu.cpp drives the bring-up
+# from the legacy display late probe, so nothing happens until it runs.
 CONFIG_XNU_NATIVE_ADRENO=y
 CONFIG_XNU_NATIVE_LEGACY_DISPLAY=y
-# Adreno 830 (a8xx) 寄存器活性探针：引擎 bsd_init 的 offline-component-load-probes.patch
-# 在该 flag 下调用 native_adreno_firmware_probe()（见 package/HummerAdrenoProbe.c），
-# 并由 build-xnu-4k-baseline.sh force-load build/adreno-firmware-probe/libAdrenoFirmwareProbe.a。
-# 独立于上面的 NATIVE_ADRENO（a740 驱动），只打开探针钩子，不会拉入 a740 后端。
+
+# Adreno 830 register liveness probe. The engine calls
+# native_adreno_firmware_probe() from bsd_init under this flag and force-loads
+# build/adreno-firmware-probe/libAdrenoFirmwareProbe.a. It is independent of
+# NATIVE_ADRENO and only opens the hook, without pulling in the driver.
 CONFIG_XNU_ADRENO_FIRMWARE_PROBE=y
+
 CONFIG_XNU_BOOT_PROGRESS=y
 CONFIG_XNU_EARLY_BOOT_PROGRESS=y
 
-# hummer 触屏（S3910 + drivers/NativeGeniSpi/GeniSpi.c），由
-# build-hummer-touch.py 归档；默认关闭，NativeHidInput 信箱是弱引用。
+# hummer touch (Synaptics S3910 over drivers/QcomGeniSpi), archived by
+# build-hummer-touch.py. The sink in NativeHidInput is a weak reference, so the
+# archive loads whether or not the touch driver is enabled by boot argument.
 CONFIG_XNU_EXTRA_LD_ARCHIVES="-Wl,-force_load,{tree}/build/hummer-touch/libHummerTouch.a"

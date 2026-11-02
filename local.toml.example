@@ -1,0 +1,13 @@
+# Optional development overrides; leave local.toml absent for pinned builds.
+#
+# Point the SoC source at a local checkout while working on dts/sm8750.dtsi or
+# the SM8750 fragment:
+# [[source]]
+# name = "sm8750"
+# kind = "soc"
+# local = "../UniXNU-sm8750-common"
+#
+# Point the board drivers at their assembled tree while iterating on package/:
+# [local]
+# drivers = "../UniXNU-hummer/package/drivers"
+# kits = "../UniXNU-hummer/package"

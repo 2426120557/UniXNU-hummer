@@ -8,6 +8,9 @@ import struct
 import subprocess
 
 root = Path(__file__).resolve().parents[1]
+import sys
+sys.path.insert(0, str(root / 'scripts'))
+import board_sources
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('component', choices=['NativeLegacyDisplay', 'NativeKeyStoreEvents', 'Stage7Probe', 'HummerHidInput', 'NativeHidInput'])
 component = parser.parse_args().component
@@ -17,7 +20,12 @@ directory.mkdir(parents=True, exist_ok=True)
 source = (root / 'scripts/stage7/Stage7Probe.cpp' if component == 'Stage7Probe' else
           # package/ maps to kits/hummer in the assembled tree (board.toml kit = "hummer").
           root / 'kits/hummer/HummerHidInput.cpp' if component == 'HummerHidInput' else
-          root / 'drivers' / ('NativeMobileDisplay' if component == 'NativeLegacyDisplay' else component) / (component + '.cpp'))
+          # The display and key-store drivers belong to this board's package; the HID
+          # input driver is a catalog component (ShengHidInput, formerly NativeHidInput).
+          board_sources.driver('NativeMobileDisplay') / 'NativeLegacyDisplay.cpp' if component == 'NativeLegacyDisplay' else
+          board_sources.driver('NativeKeyStoreEvents') / 'NativeKeyStoreEvents.cpp' if component == 'NativeKeyStoreEvents' else
+          next((path for path in (root / 'drivers/ShengHidInput', root / 'drivers/NativeHidInput') if path.is_dir()),
+               root / 'drivers/ShengHidInput') / 'NativeHidInput.cpp')
 record = json.loads((root / 'build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/iokit/DEVELOPMENT/IOPlatformExpert.cpo.json').read_text().strip().rstrip(','))
 obj = directory / (component + '.o')
 compile_command = runpy.run_path(str(root / 'scripts/build-arm-platform.py'))['compile_command']
